@@ -1,86 +1,86 @@
-# TypechoAI Agent Spec
+# TypechoAI Agent 实现规格
 
-**Project Name:** TypechoAI
-**Project Type:** Cross-platform AI Voice Dictation Tool
-**Primary Language:** Rust
-**Core Workflow:** Hotkey → Record → Whisper STT → LLM Rewrite → System Typing
+**项目名称：** TypechoAI  
+**项目类型：** 跨平台 AI 语音听写工具  
+**主要语言：** Rust  
+**核心流程：** 热键 -> 录音 -> Whisper 语音转文本 -> LLM 文本整理 -> 系统键盘输入
 
 ---
 
-## 1. Project Goal
+## 1. 项目目标
 
-TypechoAI is a cross-platform AI voice dictation tool.
+TypechoAI 是一个跨平台 AI 语音输入工具。
 
-Target user experience:
+目标用户体验：
 
 ```text
-Hold F12
-→ speak
-→ local Whisper speech-to-text
-→ optional LLM rewrite / cleanup
-→ type final text into the current focused application
+按住 F12
+→ 说话
+→ 本地 Whisper 语音识别
+→ 可选的 LLM 改写 / 清理
+→ 将最终文本输入到当前聚焦应用
 ```
 
-Primary use cases:
+主要使用场景：
 
-* AI coding
-* writing prompts
-* writing documentation
-* writing commit messages
-* general voice typing in any app
+* AI 编程
+* 写 Prompt
+* 写文档
+* 写 commit message
+* 在任意应用中进行通用语音输入
 
-Supported targets:
+目标支持平台：
 
-* Linux first
-* macOS second
-* Windows later
+* Linux 优先
+* macOS 第二阶段
+* Windows 后续支持
 
 ---
 
-## 2. Product Requirements
+## 2. 产品需求
 
-### 2.1 MVP Requirements
+### 2.1 MVP 需求
 
-The MVP must support:
+MVP 必须支持：
 
-1. Global hotkey listening
-2. Push-to-talk recording
-3. Local Whisper transcription
-4. Optional LLM text cleanup
-5. Simulated keyboard typing into the focused app
-6. Config file support
-7. CLI commands for run / test / config
+1. 全局热键监听
+2. 按住说话录音
+3. 本地 Whisper 转写
+4. 可选的 LLM 文本清理
+5. 将最终文本模拟输入到当前聚焦应用
+6. 配置文件支持
+7. 提供 `run` / `test` / `config` 相关 CLI 命令
 
-### 2.2 Non-Goals for MVP
+### 2.2 MVP 非目标
 
-The MVP does **not** need:
+MVP 暂不需要：
 
-* streaming transcription
+* 流式转写
 * GUI
-* account system
-* cloud sync
-* advanced settings UI
-* multi-device sync
+* 账号系统
+* 云同步
+* 高级设置界面
+* 多设备同步
 
 ---
 
-## 3. Functional Flow
+## 3. 功能流程
 
 ```text
-User presses F12
-→ start recording microphone audio
-→ user releases F12
-→ stop recording
-→ run Whisper transcription on buffered audio
-→ get raw_text
-→ optionally send raw_text to LLM rewrite module
-→ get clean_text
-→ simulate typing into active application
+用户按下 F12
+→ 开始录制麦克风音频
+→ 用户松开 F12
+→ 停止录音
+→ 对缓冲音频运行 Whisper 转写
+→ 得到 raw_text
+→ 可选地将 raw_text 发送给 LLM 改写模块
+→ 得到 clean_text
+→ 模拟键盘输入到当前应用
 ```
 
 ---
 
-## 4. Technical Architecture
+## 4. 技术架构
 
 ```text
 Hotkey Listener
@@ -98,41 +98,41 @@ LLM Rewrite
 System Input
 ```
 
-Data flow:
+数据流：
 
 ```text
-Microphone
-→ PCM audio buffer
-→ Whisper transcription
+麦克风
+→ PCM 音频缓冲
+→ Whisper 转写
 → raw text
-→ LLM cleanup
+→ LLM 清理
 → final text
-→ keyboard simulation
+→ 键盘模拟输入
 ```
 
 ---
 
-## 5. Recommended Rust Crates
+## 5. 推荐 Rust Crate
 
-| Capability        | Crate                           |
-| ----------------- | ------------------------------- |
-| CLI               | `clap`                          |
-| Config            | `serde`, `toml`                 |
-| Logging           | `tracing`, `tracing-subscriber` |
-| Audio capture     | `cpal`                          |
-| WAV writing/debug | `hound`                         |
-| Whisper inference | `whisper-rs`                    |
-| HTTP client       | `reqwest`                       |
-| JSON              | `serde_json`                    |
-| Hotkey            | `global-hotkey`                 |
-| Keyboard input    | `enigo`                         |
-| Error handling    | `anyhow`, `thiserror`           |
-| Async runtime     | `tokio`                         |
-| Paths/directories | `dirs`                          |
+| 能力 | Crate |
+| --- | --- |
+| CLI | `clap` |
+| 配置 | `serde`, `toml` |
+| 日志 | `tracing`, `tracing-subscriber` |
+| 音频采集 | `cpal` |
+| WAV 写入/调试 | `hound` |
+| Whisper 推理 | `whisper-rs` |
+| HTTP 客户端 | `reqwest` |
+| JSON | `serde_json` |
+| 全局热键 | `global-hotkey` |
+| 键盘输入模拟 | `enigo` |
+| 错误处理 | `anyhow`, `thiserror` |
+| 异步运行时 | `tokio` |
+| 路径/目录 | `dirs` |
 
 ---
 
-## 6. Full Cargo.toml
+## 6. 完整 Cargo.toml
 
 ```toml
 [package]
@@ -169,15 +169,15 @@ enigo = "0.2"
 whisper-rs = "0.11"
 ```
 
-Notes:
+说明：
 
-* Version numbers may need minor adjustment during implementation.
-* For Linux, some crates may require system packages such as ALSA / X11 / Wayland development libraries.
-* `whisper-rs` depends on underlying native compilation and may need tuning per platform.
+* 版本号在实际实现时可能需要小幅调整。
+* 在 Linux 上，部分 crate 可能依赖 ALSA / X11 / Wayland 等系统开发库。
+* `whisper-rs` 依赖底层原生编译能力，可能需要按平台做额外调优。
 
 ---
 
-## 7. Project Structure
+## 7. 项目结构
 
 ```text
 typechoai/
@@ -227,15 +227,15 @@ typechoai/
 
 ---
 
-## 8. Config Specification
+## 8. 配置规格
 
-Default config path:
+默认配置路径：
 
 ```text
 ~/.typechoai/config.toml
 ```
 
-Example config:
+示例配置：
 
 ```toml
 [hotkey]
@@ -265,24 +265,24 @@ log_level = "info"
 save_debug_wav = false
 ```
 
-Behavior rules:
+行为规则：
 
-* If LLM is disabled, raw Whisper text is typed directly.
-* If LLM fails, fallback to raw text.
-* If model file is missing, app should return a friendly error.
-* If hotkey backend is unsupported on the current platform, app should fail clearly.
+* 如果禁用 LLM，则直接输入原始 Whisper 文本。
+* 如果 LLM 调用失败，则回退到原始文本。
+* 如果模型文件缺失，应用应返回友好的错误提示。
+* 如果当前平台不支持热键后端，应用应明确失败原因。
 
 ---
 
-## 9. CLI Specification
+## 9. CLI 规格
 
-Binary name:
+二进制名称：
 
 ```text
 typecho
 ```
 
-Commands:
+命令：
 
 ```text
 typecho run
@@ -293,106 +293,106 @@ typecho config path
 typecho version
 ```
 
-### Expected command behavior
+### 预期命令行为
 
 #### `typecho run`
 
-Starts background hotkey listener and main app loop.
+启动后台热键监听和主应用循环。
 
 #### `typecho doctor`
 
-Checks:
+检查项：
 
-* config exists
-* Whisper model exists
-* microphone is accessible
-* hotkey backend seems available
-* optional LLM connectivity
+* 配置是否存在
+* Whisper 模型是否存在
+* 麦克风是否可访问
+* 热键后端是否可用
+* 可选的 LLM 连通性
 
 #### `typecho transcribe --file sample.wav`
 
-Runs Whisper on a WAV file and prints raw / cleaned text.
+对 WAV 文件运行 Whisper，并输出原始文本 / 清理后的文本。
 
 #### `typecho config init`
 
-Creates default config file if missing.
+如果默认配置文件不存在，则创建它。
 
 #### `typecho config path`
 
-Prints the config path.
+输出配置文件路径。
 
 ---
 
-## 10. Module Responsibilities
+## 10. 模块职责
 
 ### 10.1 `cli.rs`
 
-Responsibilities:
+职责：
 
-* parse CLI args
-* dispatch commands
-* call app bootstrap
+* 解析 CLI 参数
+* 分发命令
+* 调用应用启动逻辑
 
 ### 10.2 `config.rs`
 
-Responsibilities:
+职责：
 
-* load config from disk
-* validate config
-* create default config
+* 从磁盘加载配置
+* 校验配置
+* 创建默认配置
 
 ### 10.3 `audio/recorder.rs`
 
-Responsibilities:
+职责：
 
-* open microphone stream
-* start / stop buffering
-* return PCM audio frames
+* 打开麦克风流
+* 开始 / 停止缓冲
+* 返回 PCM 音频帧
 
 ### 10.4 `hotkey/listener.rs`
 
-Responsibilities:
+职责：
 
-* register global hotkey
-* emit `Press` and `Release` events
-* integrate with application state machine
+* 注册全局热键
+* 发出 `Press` 和 `Release` 事件
+* 与应用状态机集成
 
 ### 10.5 `stt/whisper.rs`
 
-Responsibilities:
+职责：
 
-* load Whisper model
-* convert audio buffer to transcription input
-* run transcription
-* return raw text
+* 加载 Whisper 模型
+* 将音频缓冲转换为转写输入
+* 执行转写
+* 返回原始文本
 
 ### 10.6 `llm/rewrite.rs`
 
-Responsibilities:
+职责：
 
-* call LLM provider
-* apply cleanup prompt
-* return cleaned text
-* fallback safely on errors
+* 调用 LLM 提供方
+* 应用清理 prompt
+* 返回清理后的文本
+* 出错时安全回退
 
 ### 10.7 `input/keyboard.rs`
 
-Responsibilities:
+职责：
 
-* type final text to focused application
-* configurable delay between keystrokes
+* 将最终文本输入到当前聚焦应用
+* 支持可配置的按键间延迟
 
 ### 10.8 `app.rs`
 
-Responsibilities:
+职责：
 
-* own app state
-* orchestrate hotkey → recording → transcription → rewrite → typing
-* manage errors and logging
+* 持有应用状态
+* 编排 热键 -> 录音 -> 转写 -> 改写 -> 输入 整体流程
+* 管理错误和日志
 
 ---
 
-## 11. Rust Skeleton
+## 11. Rust 骨架代码
 
 ### `src/main.rs`
 
@@ -869,9 +869,9 @@ pub enum TypechoError {
 
 ---
 
-## 12. Module Pseudocode
+## 12. 模块伪代码
 
-### 12.1 App State Machine
+### 12.1 应用状态机
 
 ```text
 state = Idle
@@ -901,7 +901,7 @@ on_hotkey_release:
 
 ---
 
-### 12.2 Audio Recorder Pseudocode
+### 12.2 音频录制伪代码
 
 ```text
 create shared buffer
@@ -924,7 +924,7 @@ stop():
 
 ---
 
-### 12.3 Whisper Transcription Pseudocode
+### 12.3 Whisper 转写伪代码
 
 ```text
 load whisper model once at startup
@@ -942,7 +942,7 @@ transcribe(samples):
 
 ---
 
-### 12.4 LLM Rewrite Pseudocode
+### 12.4 LLM 改写伪代码
 
 ```text
 if llm disabled:
@@ -964,7 +964,7 @@ else:
 
 ---
 
-### 12.5 Keyboard Typing Pseudocode
+### 12.5 键盘输入伪代码
 
 ```text
 focus stays on current app
@@ -976,220 +976,220 @@ if backend fails:
 
 ---
 
-## 13. Implementation Notes by Platform
+## 13. 各平台实现说明
 
 ### Linux
 
-Potential system dependencies:
+可能需要的系统依赖：
 
 ```bash
 sudo apt install libasound2-dev pkg-config build-essential
 ```
 
-Potential typing limitations:
+可能存在的输入限制：
 
-* X11 typing is generally easier
-* Wayland may restrict synthetic input in some environments
+* X11 下模拟输入通常更容易实现
+* Wayland 在部分环境下可能限制合成输入
 
-MVP recommendation:
+MVP 建议：
 
-* prioritize Ubuntu + X11 first
-* document Wayland limitations explicitly
+* 优先支持 Ubuntu + X11
+* 明确记录 Wayland 的限制
 
 ### macOS
 
-Notes:
+说明：
 
-* may require Accessibility permissions for keyboard simulation
-* hotkey registration and keyboard injection may require user approval
+* 键盘输入模拟可能需要辅助功能权限
+* 热键注册和键盘注入可能需要用户授权
 
 ### Windows
 
-Notes:
+说明：
 
-* add after Linux/macOS MVP stabilizes
-* keyboard simulation uses different APIs under the hood
+* 建议在 Linux/macOS MVP 稳定后再接入
+* 键盘模拟在底层会使用不同 API
 
 ---
 
-## 14. CloudCode / Codex Execution Plan
+## 14. CloudCode / Codex 执行计划
 
-This section is written specifically for AI coding agents.
+本节专门写给 AI 编码代理。
 
 ### Phase 1: Bootstrap Project
 
-Tasks:
+任务：
 
-1. initialize Rust project
-2. create module structure
-3. fill `Cargo.toml`
-4. implement CLI parsing
-5. implement config loading
+1. 初始化 Rust 项目
+2. 创建模块结构
+3. 完善 `Cargo.toml`
+4. 实现 CLI 参数解析
+5. 实现配置加载
 
-Expected output:
+预期产出：
 
-* builds successfully
+* 项目可成功构建
 * `typecho config init`
 * `typecho config path`
 * `typecho version`
 
 ### Phase 2: Implement Whisper File Transcription
 
-Tasks:
+任务：
 
-1. integrate `whisper-rs`
-2. load model file
-3. implement `typecho transcribe --file sample.wav`
-4. print raw transcription
-5. optionally print rewritten transcription
+1. 集成 `whisper-rs`
+2. 加载模型文件
+3. 实现 `typecho transcribe --file sample.wav`
+4. 输出原始转写结果
+5. 可选输出改写后的文本
 
-Expected output:
+预期产出：
 
-* can transcribe local WAV files
-* can validate model loading
+* 能转写本地 WAV 文件
+* 能验证模型加载是否正常
 
 ### Phase 3: Implement Audio Recording
 
-Tasks:
+任务：
 
-1. integrate `cpal`
-2. record microphone audio
-3. buffer audio samples
-4. support start / stop recording
-5. optional WAV debug dump
+1. 集成 `cpal`
+2. 录制麦克风音频
+3. 缓冲音频采样
+4. 支持开始 / 停止录音
+5. 可选导出 WAV 调试文件
 
-Expected output:
+预期产出：
 
-* record from microphone
-* can save or inspect captured audio
+* 能从麦克风录音
+* 可以保存或检查采集到的音频
 
 ### Phase 4: Implement Hotkey Integration
 
-Tasks:
+任务：
 
-1. integrate `global-hotkey`
-2. bind F12
-3. on press start recorder
-4. on release stop recorder
-5. log event sequence
+1. 集成 `global-hotkey`
+2. 绑定 F12
+3. 按下时启动录音
+4. 松开时停止录音
+5. 记录事件序列日志
 
-Expected output:
+预期产出：
 
-* physical hotkey controls recording lifecycle
+* 物理热键可以控制录音生命周期
 
 ### Phase 5: Implement System Typing
 
-Tasks:
+任务：
 
-1. integrate `enigo`
-2. type arbitrary text to focused app
-3. test against text editor
-4. add failure handling
+1. 集成 `enigo`
+2. 将任意文本输入到当前聚焦应用
+3. 在文本编辑器中测试
+4. 增加失败处理
 
-Expected output:
+预期产出：
 
-* sample text appears in focused app
+* 示例文本能出现在当前聚焦应用中
 
 ### Phase 6: Full Pipeline Integration
 
-Tasks:
+任务：
 
-1. wire hotkey + recording + whisper + rewrite + typing
-2. add fallback if rewrite fails
-3. add logging and diagnostics
-4. validate end-to-end workflow
+1. 串联热键 + 录音 + Whisper + 改写 + 输入
+2. 在改写失败时增加回退逻辑
+3. 增加日志和诊断
+4. 验证端到端工作流
 
-Expected output:
+预期产出：
 
-* hold F12
-* speak
-* release
-* transcribed and cleaned text types into active app
+* 按住 F12
+* 说话
+* 松开
+* 转写并清理后的文本自动输入到当前应用
 
 ### Phase 7: Hardening
 
-Tasks:
+任务：
 
-1. improve error messages
-2. add doctor checks
-3. add config validation
-4. optimize startup and model loading
-5. add graceful shutdown
+1. 改善错误提示
+2. 增加 doctor 检查
+3. 增加配置校验
+4. 优化启动速度和模型加载
+5. 增加优雅退出
 
-Expected output:
+预期产出：
 
-* stable MVP ready for real usage
-
----
-
-## 15. Agent Rules for Implementation
-
-AI coding agents should follow these rules:
-
-1. Keep changes modular.
-2. Prefer compiling code frequently.
-3. Use minimal placeholder logic first, then replace iteratively.
-4. Do not attempt streaming transcription in MVP.
-5. Keep Linux support first-class.
-6. Treat Wayland restrictions as a known limitation, not an implementation failure.
-7. Ensure LLM rewrite is optional and can be disabled.
-8. Always fall back to raw Whisper output if rewrite fails.
-9. Avoid unnecessary abstraction in MVP.
-10. Prioritize end-to-end usability over architectural perfection.
+* MVP 足够稳定，可用于真实使用
 
 ---
 
-## 16. Acceptance Criteria
+## 15. 实现规则（给 Agent）
 
-The MVP is complete when all of the following are true:
+AI 编码代理应遵循以下规则：
 
-* `cargo build --release` succeeds
-* `typecho config init` works
-* `typecho doctor` reports useful diagnostics
-* `typecho transcribe --file sample.wav` returns text
-* pressing F12 starts recording
-* releasing F12 stops recording
-* speech is transcribed locally with Whisper
-* LLM rewrite can be enabled/disabled
-* final text is typed into the active application
-* failure cases are understandable and recoverable
-
----
-
-## 17. Future Extensions
-
-Post-MVP roadmap:
-
-1. streaming transcription
-2. local LLM rewrite via Ollama
-3. smarter prompt-mode for AI coding
-4. clipboard paste fallback
-5. tray icon / lightweight GUI
-6. multilingual auto-detection
-7. model auto-download
-8. punctuation mode / code mode
-9. noise suppression
-10. word-by-word live preview
+1. 保持改动模块化。
+2. 优先频繁编译验证。
+3. 先实现最小占位逻辑，再逐步替换。
+4. MVP 不要尝试流式转写。
+5. 优先保障 Linux 支持。
+6. 将 Wayland 限制视为已知平台限制，而不是实现失败。
+7. LLM 改写必须是可选能力，且支持关闭。
+8. 改写失败时必须始终回退到原始 Whisper 输出。
+9. MVP 阶段避免不必要的抽象。
+10. 端到端可用性优先于架构完美。
 
 ---
 
-## 18. Suggested First Deliverable
+## 16. 验收标准
 
-The first implementation milestone should be:
+当以下条件全部满足时，MVP 视为完成：
+
+* `cargo build --release` 成功
+* `typecho config init` 可用
+* `typecho doctor` 能输出有价值的诊断信息
+* `typecho transcribe --file sample.wav` 能返回文本
+* 按下 F12 会开始录音
+* 松开 F12 会停止录音
+* 语音可通过本地 Whisper 完成转写
+* LLM 改写可开启/关闭
+* 最终文本能自动输入到当前应用
+* 失败场景可理解、可恢复
+
+---
+
+## 17. 后续扩展
+
+MVP 之后的路线图：
+
+1. 流式转写
+2. 通过 Ollama 实现本地 LLM 改写
+3. 面向 AI Coding 的更智能 prompt 模式
+4. 剪贴板粘贴兜底方案
+5. 托盘图标 / 轻量 GUI
+6. 多语言自动识别
+7. 模型自动下载
+8. 标点模式 / 代码模式
+9. 噪声抑制
+10. 逐词实时预览
+
+---
+
+## 18. 建议的首个交付物
+
+第一个实现里程碑建议是：
 
 ```text
 CLI + config + Whisper WAV transcription
 ```
 
-Reason:
+原因：
 
-* easiest to validate
-* isolates model integration first
-* reduces debugging complexity before microphone/hotkey/system-input integration
+* 最容易验证
+* 可以先隔离模型集成问题
+* 在引入麦克风 / 热键 / 系统输入前，能先降低调试复杂度
 
 ---
 
-## 19. Suggested GitHub README Tagline
+## 19. 建议的 GitHub README 标语
 
 ```text
 TypechoAI — Cross-platform AI voice dictation powered by Whisper, LLM cleanup, and system typing.
@@ -1197,27 +1197,25 @@ TypechoAI — Cross-platform AI voice dictation powered by Whisper, LLM cleanup,
 
 ---
 
-## 20. Final Summary
+## 20. 最终总结
 
-TypechoAI is a Rust-based AI voice dictation tool with this workflow:
+TypechoAI 是一个基于 Rust 的 AI 语音输入工具，工作流如下：
 
 ```text
-Hotkey
-→ Record audio
-→ Whisper transcription
-→ LLM cleanup
-→ Type text into current app
+热键
+→ 录音
+→ Whisper 转写
+→ LLM 清理
+→ 将文本输入到当前应用
 ```
 
-Recommended MVP priorities:
+推荐的 MVP 优先级：
 
 ```text
 1. CLI + config
-2. Whisper file transcription
-3. microphone recording
-4. hotkey
-5. system typing
-6. full integration
+2. Whisper 文件转写
+3. 麦克风录音
+4. 热键
+5. 系统输入
+6. 全链路集成
 ```
-
-This spec is intentionally designed so AI coding agents can implement the project incrementally and verify progress at each step.
