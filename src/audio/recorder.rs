@@ -4,13 +4,14 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use parking_lot::Mutex;
 
 /// 音频录制器
 pub struct AudioRecorder {
     sample_rate: u32,
     channels: u16,
     is_recording: Arc<AtomicBool>,
-    audio_buffer: Arc<parking_lot::Mutex<Vec<f32>>>,
+    audio_buffer: Arc<Mutex<Vec<f32>>>,
 }
 
 impl AudioRecorder {
@@ -20,7 +21,7 @@ impl AudioRecorder {
             sample_rate,
             channels,
             is_recording: Arc::new(AtomicBool::new(false)),
-            audio_buffer: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            audio_buffer: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -40,9 +41,12 @@ impl AudioRecorder {
             .context("无法获取音频配置")?;
 
         let sample_rate = self.sample_rate;
-        let channels = self.channels;
         let is_recording = self.is_recording.clone();
         let audio_buffer = self.audio_buffer.clone();
+
+        // 克隆 config 以便在闭包中使用
+        let config_clone = config.clone();
+        let config_sample_rate = config.sample_rate();
 
         is_recording.store(true, Ordering::SeqCst);
         audio_buffer.lock().clear();
@@ -54,13 +58,12 @@ impl AudioRecorder {
                 let audio_buffer = audio_buffer.clone();
                 let is_recording = is_recording.clone();
                 device.build_input_stream(
-                    &config.into(),
+                    &config_clone.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_recording.load(Ordering::SeqCst) {
-                            // 转换为目标采样率
                             let mut buffer = audio_buffer.lock();
                             // 降采样处理
-                            let ratio = config.sample_rate().0 as f32 / sample_rate as f32;
+                            let ratio = config_sample_rate.0 as f32 / sample_rate as f32;
                             if ratio > 1.0 {
                                 for (i, &sample) in data.iter().enumerate() {
                                     if i % ratio as usize == 0 {
@@ -79,7 +82,7 @@ impl AudioRecorder {
             _ => {
                 return Err(anyhow::anyhow!("不支持的音频格式"));
             }
-        }?;
+        };
 
         stream.play()?;
 
