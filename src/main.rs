@@ -44,6 +44,12 @@ enum Commands {
         #[arg(short, long)]
         init: bool,
     },
+    /// 下载 Whisper 模型
+    DownloadModel {
+        /// 模型大小: tiny, base, small, medium, large
+        #[arg(default_value = "small")]
+        size: String,
+    },
 }
 
 /// 应用状态
@@ -152,6 +158,7 @@ impl AppState {
             // 按下热键时开始录音
             hotkey.on_press(Arc::new(move || {
                 if !*is_recording.lock() {
+                    info!("开始录音...");
                     if let Err(e) = recorder.start() {
                         error!("开始录音失败: {}", e);
                     }
@@ -159,7 +166,6 @@ impl AppState {
             }));
 
             // 松开热键时停止录音并处理
-            let config = self.config.clone();
             hotkey.on_release(Arc::new(move || {
                 if *is_recording.lock() {
                     // 停止录音
@@ -169,11 +175,48 @@ impl AppState {
                                 info!("录音数据为空，跳过");
                                 return;
                             }
-                            info!("录音数据: {} 采样点", audio_data.len());
+                            info!("录音完成，采样点: {}", audio_data.len());
 
-                            // TODO: Whisper 转写和 LLM 整理
-                            // 这里暂时跳过，因为模型文件可能不存在
-                            info!(" Whisper 转写需要模型文件");
+                            // Whisper 转写
+                            if let Some(w) = whisper {
+                                match w.transcribe(&audio_data) {
+                                    Ok(raw_text) => {
+                                        info!("转写结果: {}", raw_text);
+                                        
+                                        // LLM 整理
+                                        let final_text = if let Some(l) = llm {
+                                            if l.is_enabled() {
+                                                match l.rewrite(&raw_text) {
+                                                    Ok(clean) => {
+                                                        info!("LLM 整理后: {}", clean);
+                                                        clean
+                                                    }
+                                                    Err(e) => {
+                                                        error!("LLM 整理失败: {}", e);
+                                                        raw_text
+                                                    }
+                                                }
+                                            } else {
+                                                raw_text
+                                            }
+                                        } else {
+                                            raw_text
+                                        };
+
+                                        // 输入文本
+                                        if let Err(e) = keyboard.type_text(&final_text) {
+                                            error!("文本输入失败: {}", e);
+                                        } else {
+                                            info!("文本已输入");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Whisper 转写失败: {}", e);
+                                    }
+                                }
+                            } else {
+                                warn!("Whisper 未初始化，无法转写");
+                            }
                         }
                         Err(e) => {
                             error!("停止录音失败: {}", e);
@@ -186,8 +229,11 @@ impl AppState {
             hotkey.start()?;
         }
 
-        info!("语音输入模式已启动，按住 {} 说话", self.config.hotkey.key);
-        info!("按 Ctrl+C 退出");
+        info!("===========================================");
+        info!("🎤 TypechoAI 语音输入已启动");
+        info!("   按住 {} 说话，松开后自动输入", self.config.hotkey.key);
+        info!("   按 Ctrl+C 退出");
+        info!("===========================================");
 
         // 保持运行
         loop {
@@ -230,6 +276,10 @@ fn main() -> anyhow::Result<()> {
                 let config = config::Config::load(&cli.config)?;
                 println!("{:#?}", config);
             }
+        }
+        Commands::DownloadModel { size } => {
+            info!("下载 Whisper {} 模型", size);
+            println!("请运行: ./scripts/download_model.sh {}", size);
         }
     }
 
@@ -277,9 +327,6 @@ fn test_modules(config_path: &str) -> Result<()> {
     match input::Keyboard::new() {
         Ok(mut k) => {
             println!("  ✓ 键盘输入初始化成功");
-            // 测试输入
-            k.type_text("Hello TypechoAI!")?;
-            println!("    - 测试文本已输入");
         }
         Err(e) => {
             println!("  ✗ 键盘输入初始化失败: {}", e);

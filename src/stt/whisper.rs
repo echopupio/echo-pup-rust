@@ -13,11 +13,27 @@ pub struct WhisperSTT {
 impl WhisperSTT {
     /// 创建新的 Whisper 实例
     pub fn new(model_path: &str) -> Result<Self> {
-        // 检查模型文件是否存在
         let path = Path::new(model_path);
         if !path.exists() {
             tracing::warn!("Whisper 模型文件不存在: {}", model_path);
             tracing::info!("请下载 Whisper 模型到 models/ 目录");
+            // 尝试从系统路径加载
+            let default_paths = [
+                "/usr/share/whisper/models/ggml-small.bin",
+                "/usr/local/share/whisper/models/ggml-small.bin",
+            ];
+            for p in &default_paths {
+                if Path::new(p).exists() {
+                    let context = WhisperContext::new(p)
+                        .context("无法加载 Whisper 模型")?;
+                    tracing::info!("Whisper 模型已从系统路径加载: {}", p);
+                    return Ok(Self {
+                        context,
+                        model_path: p.to_string(),
+                    });
+                }
+            }
+            return Err(anyhow::anyhow!("未找到 Whisper 模型"));
         }
 
         let context = WhisperContext::new(model_path)
@@ -41,6 +57,10 @@ impl WhisperSTT {
         params.set_language(self.get_language());
         params.set_translate(false);
         params.set_n_threads(4);
+        // 禁用打印
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
 
         let mut state = self.context.create_state()
             .context("无法创建 Whisper 状态")?;
@@ -57,20 +77,26 @@ impl WhisperSTT {
         for i in 0..num_segments {
             if let Ok(text) = state.full_get_segment_text(i) {
                 result.push_str(&text);
+                result.push(' ');
             }
         }
 
+        let result = result.trim().to_string();
         tracing::info!("转写完成，文本长度: {} 字符", result.len());
         Ok(result)
     }
 
     /// 获取语言设置
     fn get_language(&self) -> Option<&str> {
-        // 从模型路径推断语言，或者使用默认中文
         if self.model_path.contains("zh") {
             Some("zh")
         } else {
-            Some("zh") // 默认中文
+            Some("zh")
         }
+    }
+
+    /// 检查模型是否已加载
+    pub fn is_ready(&self) -> bool {
+        true
     }
 }
