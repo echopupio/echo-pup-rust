@@ -39,7 +39,7 @@ pub struct HotkeyConfig {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
-            key: "F12".to_string(),
+            key: "CTRL+Space".to_string(),
         }
     }
 }
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.hotkey.key, "F12");
+        assert_eq!(config.hotkey.key, "CTRL+Space");
         assert_eq!(config.audio.sample_rate, 16000);
     }
 }

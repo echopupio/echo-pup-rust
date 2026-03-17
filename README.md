@@ -51,9 +51,9 @@ cargo build --release
 ## 使用方法
 
 1. 运行 `./target/release/typechoai run`
-2. 在需要输入文本的应用中，按住 **F12**（默认热键）
+2. 在需要输入文本的应用中，按住 CTRL+Space（默认热键）
 3. 对着麦克风说话
-4. 松开 F12，识别文本将自动输入
+4. 松开 CTRL+Space，识别文本将自动输入
 
 ### 配置
 
@@ -61,7 +61,7 @@ cargo build --release
 
 ```toml
 [hotkey]
-key = "F12"
+key = "CTRL+Space"
 
 [audio]
 sample_rate = 16000
