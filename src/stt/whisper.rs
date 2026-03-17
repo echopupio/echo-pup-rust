@@ -39,7 +39,7 @@ impl WhisperSTT {
             language: Some("zh".to_string()),
             translate: false,
             temperature: 0.0,  // 确定性输出，提高准确率
-            initial_prompt: Some("以下是中文语音转文字的内容。".to_string()),
+            initial_prompt: Some("以下是语音识别任务，请识别以下内容：开始、结束、测试、你好、再见、下一句。请注意使用中文标点符号。".to_string()),
         })
     }
 
@@ -56,7 +56,7 @@ impl WhisperSTT {
         self.temperature = temperature;
     }
 
-    /// 设置初始提示（帮助提高识别准确率）
+    /// 设置初始提示（帮助提高识别准确率，可传入热词列表）
     pub fn set_initial_prompt(&mut self, prompt: Option<String>) {
         self.initial_prompt = prompt;
     }
@@ -115,7 +115,67 @@ impl WhisperSTT {
             }
         }
 
+        // 修复标点符号
+        let result = Self::fix_punctuation(&result);
+
         Ok(result)
+    }
+
+    /// 修复标点符号（中文场景下 Whisper 往往不带标点）
+    /// 在句尾添加适当的标点（句号、问号等）
+    fn fix_punctuation(text: &str) -> String {
+        if text.is_empty() {
+            return text.to_string();
+        }
+
+        let mut result = String::with_capacity(text.len() + 16);
+        let mut chars = text.chars().peekable();
+
+        // 中文标点符号列表
+        let chinese_punctuation = ['。', '？', '！', '，', '；', '：', '"', '"', '\''];
+
+        // 句尾需要添加标点的情况
+        let end_marks = ['。', '？', '！'];
+
+        while let Some(c) = chars.next() {
+            result.push(c);
+
+            // 检查当前字符是否为句尾字符（字母、数字或中文）
+            if c.is_alphanumeric() || '\u{4E00}' <= c && c <= '\u{9FFF}' {
+                // 查看下一个字符
+                match chars.peek() {
+                    Some(&next) => {
+                        // 如果下一个字符是换行或结束，且当前字符不是标点，则添加句号
+                        if (next == '\n' || next.is_whitespace()) && !chinese_punctuation.contains(&c) {
+                            // 检查当前字符是否已经是标点
+                            let needs_punct = !end_marks.iter().any(|&m| {
+                                result.ends_with(m)
+                            });
+                            if needs_punct && !c.is_whitespace() {
+                                result.push('。');
+                            }
+                        }
+                    }
+                    None => {
+                        // 文本结束，检查是否需要添加句号
+                        if !chinese_punctuation.contains(&c) {
+                            result.push('。');
+                        }
+                    }
+                }
+            }
+        }
+
+        // 清理多余的空格和换行
+        let result = result
+            .replace("  ", " ")
+            .replace("\n ", "\n")
+            .replace(" \n", "\n");
+
+        // 连续多个句号只保留一个
+        let result = result.replace("。。", "。");
+
+        result
     }
 
     /// 检查模型是否已加载
