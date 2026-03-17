@@ -21,8 +21,75 @@ pub struct AudioRecorder {
 unsafe impl Send for AudioRecorder {}
 unsafe impl Sync for AudioRecorder {}
 
-/// 重采样音频到目标采样率（简单线性插值）
+/// 使用立方样条插值重采样音频（比线性插值更好的质量）
 fn resample_audio(audio: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate {
+        return audio.to_vec();
+    }
+
+    let ratio = to_rate as f64 / from_rate as f64;
+    let new_len = (audio.len() as f64 * ratio) as usize;
+    
+    if new_len == 0 || audio.len() < 4 {
+        return resample_audio_linear(audio, from_rate, to_rate);
+    }
+
+    let mut result = Vec::with_capacity(new_len);
+    
+    // 预计算二阶差分用于立方插值
+    let n = audio.len();
+    let mut y2 = vec![0.0f32; n];
+    let mut y = audio.to_vec();
+    
+    // 设定边界条件：自然样条（假设二阶导数为零）
+    let mut u = vec![0.0f32; n - 1];
+    y2[0] = 0.0;
+    y2[n - 1] = 0.0;
+    u[0] = 0.0;
+    
+    for i in 1..(n - 1) {
+        let sig = (y[i + 1] - y[i - 1]) / (2.0 * (y[i] - y[i + 1]).abs().max(1e-10));
+        let p = sig * y2[i - 1] + 2.0;
+        y2[i] = (sig - 1.0) / p.max(1e-10);
+        u[i] = (y[i + 1] - y[i]) / ((y[i + 1] - y[i]).abs().max(1e-10)) 
+            - (y[i] - y[i - 1]) / ((y[i] - y[i - 1]).abs().max(1e-10));
+        u[i] = (6.0 * u[i] / (2.0 * ((y[i + 1] - y[i]).abs().max(1e-10) + (y[i] - y[i - 1]).abs().max(1e-10))) - sig * y2[i - 1]) / p.max(1e-10);
+    }
+    
+    // 反向扫描以得到正确的样条系数
+    for i in (1..n - 1).rev() {
+        y2[i] = y2[i] * y2[i + 1] + u[i];
+    }
+
+    // 进行立方插值
+    for i in 0..new_len {
+        let src_idx = i as f64 / ratio;
+        let idx = src_idx as usize;
+        let frac = (src_idx - idx as f64) as f32;
+        
+        if idx + 1 < n {
+            // 立方样条插值
+            let h0 = (1.0 - frac).powi(3) / 6.0;
+            let h1 = (3.0 * frac.powi(3) - 6.0 * frac.powi(2) + 4.0) / 6.0;
+            let h2 = (-3.0 * frac.powi(3) + 3.0 * frac.powi(2) + 3.0 * frac + 1.0) / 6.0;
+            let h3 = frac.powi(3) / 6.0;
+            
+            let idx_prev = if idx > 0 { idx - 1 } else { 0 };
+            let idx_next = if idx + 1 < n { idx + 1 } else { n - 1 };
+            let idx_next2 = if idx + 2 < n { idx + 2 } else { n - 1 };
+            
+            let sample = h0 * y[idx_prev] + h1 * y[idx] + h2 * y[idx_next] + h3 * y[idx_next2];
+            result.push(sample);
+        } else if idx < n {
+            result.push(y[idx]);
+        }
+    }
+    
+    result
+}
+
+/// 简单的线性插值重采样（作为备选）
+fn resample_audio_linear(audio: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if from_rate == to_rate {
         return audio.to_vec();
     }

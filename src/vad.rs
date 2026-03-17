@@ -31,8 +31,8 @@ impl Default for VadConfig {
             frame_size: 400,    // 25ms 帧
             frame_shift: 160,   // 10ms 帧移
             threshold: 0.01,    // 能量阈值
-            min_speech_frames: 3,   // 至少 30ms 的语音
-            min_silence_frames: 15, // 150ms 静音才认为语音结束
+            min_speech_frames: 10,   // 至少 100ms 的语音（减少误检）
+            min_silence_frames: 30, // 300ms 静音才认为语音结束（减少语音被切断）
         }
     }
 }
