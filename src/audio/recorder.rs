@@ -14,11 +14,39 @@ pub struct AudioRecorder {
     is_recording: Arc<AtomicBool>,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
     stream: Arc<Mutex<Option<Stream>>>,
+    device_sample_rate: Arc<Mutex<u32>>,  // 设备的实际采样率
 }
 
 // 确保 AudioRecorder 可以安全地在线程间共享
 unsafe impl Send for AudioRecorder {}
 unsafe impl Sync for AudioRecorder {}
+
+/// 重采样音频到目标采样率（简单线性插值）
+fn resample_audio(audio: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate {
+        return audio.to_vec();
+    }
+    
+    let ratio = to_rate as f64 / from_rate as f64;
+    let new_len = (audio.len() as f64 * ratio) as usize;
+    let mut result = Vec::with_capacity(new_len);
+    
+    for i in 0..new_len {
+        let src_idx = i as f64 / ratio;
+        let idx = src_idx as usize;
+        let frac = (src_idx - idx as f64) as f32;
+        
+        if idx + 1 < audio.len() {
+            // 线性插值
+            let sample = audio[idx] * (1.0 - frac) + audio[idx + 1] * frac;
+            result.push(sample);
+        } else if idx < audio.len() {
+            result.push(audio[idx]);
+        }
+    }
+    
+    result
+}
 
 impl AudioRecorder {
     /// 创建新的录音器
@@ -29,6 +57,7 @@ impl AudioRecorder {
             is_recording: Arc::new(AtomicBool::new(false)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
             stream: Arc::new(Mutex::new(None)),
+            device_sample_rate: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -59,7 +88,6 @@ impl AudioRecorder {
         let audio_buffer = self.audio_buffer.clone();
 
         let config_clone = config.clone();
-        let config_sample_rate = config.sample_rate();
 
         is_recording.store(true, Ordering::SeqCst);
         audio_buffer.lock().clear();
@@ -111,11 +139,16 @@ impl AudioRecorder {
         stream.play()?;
         *self.stream.lock() = Some(stream);
 
+        // 保存设备实际采样率
+        *self.device_sample_rate.lock() = config.sample_rate().0;
+        tracing::info!("[Recorder] 设备采样率: {} Hz, 目标采样率: {} Hz", 
+            config.sample_rate().0, self.sample_rate);
+
         tracing::info!("[Recorder] 录音已开始");
         Ok(())
     }
 
-    /// 停止录音并返回音频数据
+    /// 停止录音并返回音频数据（已重采样到目标采样率）
     pub fn stop(&self) -> Result<Vec<f32>> {
         if !self.is_recording.load(Ordering::SeqCst) {
             tracing::warn!("[Recorder] 未在录音中");
@@ -126,7 +159,15 @@ impl AudioRecorder {
         self.is_recording.store(false, Ordering::SeqCst);
         *self.stream.lock() = None;
 
-        let buffer = self.audio_buffer.lock().clone();
+        let mut buffer = self.audio_buffer.lock().clone();
+        
+        // 重采样到目标采样率（Whisper 需要 16000 Hz）
+        let device_rate = *self.device_sample_rate.lock();
+        if device_rate != 0 && device_rate != self.sample_rate {
+            tracing::info!("[Recorder] 重采样: {} Hz -> {} Hz", device_rate, self.sample_rate);
+            buffer = resample_audio(&buffer, device_rate, self.sample_rate);
+        }
+        
         tracing::info!("[Recorder] 录音已停止，采样点数: {}", buffer.len());
 
         Ok(buffer)
