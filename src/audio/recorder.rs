@@ -7,15 +7,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use parking_lot::Mutex;
 
-/// 音频录制器
+/// 音频录制器 - 线程安全
 pub struct AudioRecorder {
     sample_rate: u32,
     channels: u16,
     is_recording: Arc<AtomicBool>,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
-    // 使用 Arc 存储 stream 以正确管理其生命周期
     stream: Arc<Mutex<Option<Stream>>>,
 }
+
+// 确保 AudioRecorder 可以安全地在线程间共享
+unsafe impl Send for AudioRecorder {}
+unsafe impl Sync for AudioRecorder {}
 
 impl AudioRecorder {
     /// 创建新的录音器
@@ -48,7 +51,6 @@ impl AudioRecorder {
         let is_recording = self.is_recording.clone();
         let audio_buffer = self.audio_buffer.clone();
 
-        // 克隆 config 以便在闭包中使用
         let config_clone = config.clone();
         let config_sample_rate = config.sample_rate();
 
@@ -66,7 +68,6 @@ impl AudioRecorder {
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_recording.load(Ordering::SeqCst) {
                             let mut buffer = audio_buffer.lock();
-                            // 降采样处理
                             let ratio = config_sample_rate.0 as f32 / sample_rate as f32;
                             if ratio > 1.0 {
                                 for (i, &sample) in data.iter().enumerate() {
@@ -90,8 +91,6 @@ impl AudioRecorder {
         };
 
         stream.play()?;
-
-        // 保存 stream 以便后续停止
         *self.stream.lock() = Some(stream);
 
         tracing::info!("录音已开始");
@@ -105,8 +104,6 @@ impl AudioRecorder {
         }
 
         self.is_recording.store(false, Ordering::SeqCst);
-
-        // 清理 stream - 将其置为 None 以释放资源
         *self.stream.lock() = None;
 
         let buffer = self.audio_buffer.lock().clone();
