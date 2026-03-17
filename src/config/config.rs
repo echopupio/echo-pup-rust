@@ -77,7 +77,7 @@ pub struct WhisperConfig {
 impl Default for WhisperConfig {
     fn default() -> Self {
         Self {
-            model_path: "models/ggml-small.bin".to_string(),
+            model_path: "models/ggml-large-v3.bin".to_string(),
             translate: false,
             language: Some("zh".to_string()),
         }
