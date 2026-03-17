@@ -178,9 +178,12 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             tracing::info!("[Callback] 开始 Whisper 转写...");
                             match whisper.transcribe(&audio_data) {
                                 Ok(text) => {
-                                    if text.is_empty() {
-                                        info!("转写结果为空");
-                                        tracing::warn!("[Callback] 转写结果为空");
+                                    // 过滤无效结果
+                                    let trimmed = text.trim();
+                                    if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
+                                        info!("转写结果为空或无效（可能没有说话或音量太小）");
+                                        tracing::warn!("[Callback] 转写结果为空或无效: {}", text);
+                                        // 不返回，让用户知道问题
                                         return;
                                     }
                                     info!("转写完成: {}", text);
