@@ -10,6 +10,8 @@ pub struct WhisperSTT {
     model_path: String,
     language: Option<String>,
     translate: bool,
+    temperature: f32,
+    initial_prompt: Option<String>,
 }
 
 impl WhisperSTT {
@@ -36,6 +38,8 @@ impl WhisperSTT {
             model_path: model_path.to_string(),
             language: Some("zh".to_string()),
             translate: false,
+            temperature: 0.0,  // 确定性输出，提高准确率
+            initial_prompt: Some("以下是中文语音转文字的内容。".to_string()),
         })
     }
 
@@ -45,6 +49,16 @@ impl WhisperSTT {
         instance.language = language;
         instance.translate = translate;
         Ok(instance)
+    }
+
+    /// 设置 temperature（0.0 = 确定性输出，更准确）
+    pub fn set_temperature(&mut self, temperature: f32) {
+        self.temperature = temperature;
+    }
+
+    /// 设置初始提示（帮助提高识别准确率）
+    pub fn set_initial_prompt(&mut self, prompt: Option<String>) {
+        self.initial_prompt = prompt;
     }
 
     /// 转写音频数据
@@ -62,6 +76,14 @@ impl WhisperSTT {
         params.set_print_progress(false);
         params.set_print_timestamps(false);
         params.set_print_special(false);
+
+        // 设置温度 (0.0 = 确定性输出，提高准确率)
+        params.set_temperature(self.temperature);
+
+        // 设置初始提示（帮助识别）
+        if let Some(ref prompt) = self.initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         // 设置语言
         if let Some(ref lang) = self.language {

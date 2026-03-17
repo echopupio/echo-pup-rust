@@ -6,6 +6,7 @@ mod hotkey;
 mod input;
 mod llm;
 mod stt;
+mod vad;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -142,7 +143,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     };
     // 使用 Mutex 包装，以便在回调中共享（transcribe 需要 &mut self）
     let whisper = Arc::new(Mutex::new(whisper));
-    
+
     let llm = if config.llm.enabled {
         match llm::LLMRewrite::new(
             &config.llm.provider, 
@@ -209,15 +210,31 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         return;
                     }
                     info!("录音完成，采样点: {}", audio_data.len());
-                    
+
+                    // 1.5. VAD 语音活动检测 - 过滤静音段
+                    let processed_audio = {
+                        // 自动调整阈值以适应不同的麦克风音量
+                        let mut vad_clone = vad::VadDetector::new();
+                        vad_clone.auto_threshold(&audio_data);
+
+                        let speech_audio = vad_clone.filter_speech(&audio_data);
+                        if speech_audio.is_empty() {
+                            info!("未检测到语音内容");
+                            return;
+                        }
+                        let ratio = speech_audio.len() as f32 / audio_data.len() as f32;
+                        info!("VAD 过滤后保留 {:.1}% 语音数据", ratio * 100.0);
+                        speech_audio
+                    };
+
                     // 2. 音频转写 (Whisper)
                     let mut final_text = String::new();
                     let mut transcribe_success = false;
-                    
+
                     {
                         let mut whisper_guard = whisper_release.lock();
                         if let Some(ref mut whisper) = *whisper_guard {
-                            match whisper.transcribe(&audio_data) {
+                            match whisper.transcribe(&processed_audio) {
                                 Ok(text) => {
                                     // 过滤无效结果
                                     let trimmed = text.trim();
