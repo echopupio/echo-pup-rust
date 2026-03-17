@@ -39,7 +39,7 @@ impl WhisperSTT {
             language: Some("zh".to_string()),
             translate: false,
             temperature: 0.0,  // 确定性输出，提高准确率
-            initial_prompt: Some("以下是语音识别任务，请识别以下内容：开始、结束、测试、你好、再见、下一句。请注意使用中文标点符号。".to_string()),
+            initial_prompt: None, // 不使用 initial_prompt，避免干扰识别
         })
     }
 
