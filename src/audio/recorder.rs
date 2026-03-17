@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::Stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use parking_lot::Mutex;
@@ -12,6 +13,8 @@ pub struct AudioRecorder {
     channels: u16,
     is_recording: Arc<AtomicBool>,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
+    // 使用 Arc 存储 stream 以正确管理其生命周期
+    stream: Arc<Mutex<Option<Stream>>>,
 }
 
 impl AudioRecorder {
@@ -22,6 +25,7 @@ impl AudioRecorder {
             channels,
             is_recording: Arc::new(AtomicBool::new(false)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            stream: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -80,14 +84,15 @@ impl AudioRecorder {
                 )?
             }
             _ => {
+                is_recording.store(false, Ordering::SeqCst);
                 return Err(anyhow::anyhow!("不支持的音频格式"));
             }
         };
 
         stream.play()?;
 
-        // 保存 stream 以保持录音
-        std::mem::forget(stream);
+        // 保存 stream 以便后续停止
+        *self.stream.lock() = Some(stream);
 
         tracing::info!("录音已开始");
         Ok(())
@@ -100,6 +105,9 @@ impl AudioRecorder {
         }
 
         self.is_recording.store(false, Ordering::SeqCst);
+
+        // 清理 stream - 将其置为 None 以释放资源
+        *self.stream.lock() = None;
 
         let buffer = self.audio_buffer.lock().clone();
         tracing::info!("录音已停止，采样点数: {}", buffer.len());

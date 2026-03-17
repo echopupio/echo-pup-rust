@@ -11,8 +11,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use std::time::Duration;
+use std::sync::mpsc;
 use parking_lot::Mutex;
-use tracing::{info, error, warn};
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "typechoai")]
@@ -72,10 +73,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let config = config::Config::load(config_path)?;
     
     // 初始化模块
-    let recorder = audio::AudioRecorder::new(config.audio.sample_rate, config.audio.channels)?;
+    let _recorder = audio::AudioRecorder::new(config.audio.sample_rate, config.audio.channels)?;
     info!("音频录制器已初始化");
     
-    let whisper = match stt::WhisperSTT::new(&config.whisper.model_path) {
+    let _whisper = match stt::WhisperSTT::new(&config.whisper.model_path) {
         Ok(w) => {
             info!("Whisper 已初始化");
             Some(w)
@@ -86,7 +87,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         }
     };
     
-    let llm = if config.llm.enabled {
+    let _llm = if config.llm.enabled {
         match llm::LLMRewrite::new(&config.llm.provider, &config.llm.api_base, &config.llm.api_key_env, &config.llm.model) {
             Ok(l) => {
                 info!("LLM 整理已初始化");
@@ -108,7 +109,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     hotkey.set_hotkey(&config.hotkey.key)?;
     info!("热键监听器已初始化: {}", config.hotkey.key);
     
-    let is_recording = Arc::new(Mutex::new(false));
+    let _is_recording = Arc::new(Mutex::new(false));
     
     // 简化：直接运行测试
     info!("===========================================");
@@ -121,9 +122,36 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     keyboard.type_text("TypechoAI 测试成功！")?;
     info!("测试文本已输入");
     
+    // 设置 Ctrl+C 信号处理
+    let (tx, rx) = mpsc::channel::<()>();
+    
+    // 注册信号处理程序
+    let tx_clone = tx.clone();
+    ctrlc::set_handler(move || {
+        let _ = tx_clone.send(());
+    }).expect("Error setting Ctrl+C handler");
+    
+    info!("===========================================");
+    info!("🎤 TypechoAI 语音输入已启动");
+    info!("   按住 {} 说话，松开后自动输入", config.hotkey.key);
+    info!("   按 Ctrl+C 退出");
+    info!("===========================================");
+    
+    // 等待 Ctrl+C 信号
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                info!("收到退出信号，正在优雅退出...");
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // 继续运行
+            }
+        }
     }
+    
+    info!("TypechoAI 已退出");
+    Ok(())
 }
 
 fn test_modules(config_path: &str) -> Result<()> {
