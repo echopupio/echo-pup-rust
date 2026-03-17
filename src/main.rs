@@ -355,49 +355,57 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     });
     
     // ===== 设置端点检测（VAD）回调 =====
-    // 当检测到语音结束时自动触发转写
-    let vad_recorder = recorder.clone();
-    let vad_whisper = whisper.clone();
-    let vad_llm = llm.clone();
-    let vad_keyboard = keyboard.clone();
-    let vad_is_recording = is_recording.clone();
-    let vad_triggered_callback = vad_triggered.clone();
-    let vad_recording_animation = recording_animation.clone();
+    // 根据配置决定是否启用 VAD
+    let vad_enabled = config.audio.vad_enabled;
     
-    let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        info!("端点检测：语音结束，触发自动转写");
+    if vad_enabled {
+        info!("端点检测已启用");
         
-        // 标记 VAD 已触发
-        vad_triggered_callback.store(true, Ordering::SeqCst);
+        let vad_recorder = recorder.clone();
+        let vad_whisper = whisper.clone();
+        let vad_llm = llm.clone();
+        let vad_keyboard = keyboard.clone();
+        let vad_is_recording = is_recording.clone();
+        let vad_triggered_callback = vad_triggered.clone();
+        let vad_recording_animation = recording_animation.clone();
         
-        // 停止录音
-        if vad_is_recording.load(Ordering::SeqCst) {
-            vad_is_recording.store(false, Ordering::SeqCst);
-            // 停止动画
-            vad_recording_animation.store(false, Ordering::SeqCst);
-            print!("\r");  // 清除动画行
-        }
-        
-        // 获取音频数据并处理
-        let audio_data = match vad_recorder.stop() {
-            Ok(data) => data,
-            Err(e) => {
-                error!("VAD 停止录音失败: {}", e);
-                return;
+        let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            info!("端点检测：语音结束，触发自动转写");
+            
+            // 标记 VAD 已触发
+            vad_triggered_callback.store(true, Ordering::SeqCst);
+            
+            // 停止录音
+            if vad_is_recording.load(Ordering::SeqCst) {
+                vad_is_recording.store(false, Ordering::SeqCst);
+                // 停止动画
+                vad_recording_animation.store(false, Ordering::SeqCst);
+                print!("\r");  // 清除动画行
             }
-        };
+            
+            // 获取音频数据并处理
+            let audio_data = match vad_recorder.stop() {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("VAD 停止录音失败: {}", e);
+                    return;
+                }
+            };
+            
+            // 处理音频
+            process_audio(&audio_data, &vad_whisper, &vad_llm, &vad_keyboard, true);
+        });
         
-        // 处理音频
-        process_audio(&audio_data, &vad_whisper, &vad_llm, &vad_keyboard, true);
-    });
-    
-    // 配置 VAD 参数并启用
-    recorder.set_vad_params(1500, 0.01);  // 1.5秒静音阈值，能量阈值 0.01
-    recorder.set_vad_callback(move || {
-        // 调用 VAD 回调
-        vad_callback();
-    });
-    recorder.enable_vad();
+        // 配置 VAD 参数并启用
+        let silence_threshold = config.audio.vad_silence_threshold_ms as u64;
+        recorder.set_vad_params(silence_threshold, 0.01);
+        recorder.set_vad_callback(move || {
+            vad_callback();
+        });
+        recorder.enable_vad();
+    } else {
+        info!("端点检测已关闭（vad_enabled=false）");
+    }
     info!("端点检测已启用：持续静音 1500ms 将自动结束录音");
     
     // ===== 初始化热键监听器 =====
