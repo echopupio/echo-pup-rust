@@ -66,9 +66,11 @@ impl WhisperSTT {
         // 设置语言
         if let Some(ref lang) = self.language {
             if lang != "auto" {
-                if let Some(_lang_id) = whisper_rs::get_lang_id(lang) {
-                    // 语言设置通过 set_language_n_tokens 或默认处理
-                }
+                // 设置目标语言
+                params.set_language(Some(lang.as_str()));
+            } else {
+                // 自动检测语言
+                params.set_detect_language(true);
             }
         }
 
