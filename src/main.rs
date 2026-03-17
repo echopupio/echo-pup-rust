@@ -130,8 +130,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         tracing::info!("[Callback] 热键按下事件触发");
         if !is_recording_press.load(Ordering::SeqCst) {
             info!("[Main] 开始录音...");
-            if let Err(e) = recorder_press.start() {
-                error!("[Main] 开始录音失败: {}", e);
+            match recorder_press.start() {
+                Ok(_) => {
+                    is_recording_press.store(true, Ordering::SeqCst);
+                    tracing::info!("[Callback] 录音已启动，状态已更新");
+                }
+                Err(e) => {
+                    error!("[Main] 开始录音失败: {}", e);
+                    tracing::error!("[Callback] 开始录音失败: {}", e);
+                }
             }
         } else {
             tracing::warn!("[Callback] 跳过录音，已在录音中");
@@ -147,6 +154,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         tracing::info!("[Callback] 热键松开事件触发");
         if is_recording_release.load(Ordering::SeqCst) {
+            // 先标记为非录音状态
+            is_recording_release.store(false, Ordering::SeqCst);
             tracing::info!("[Callback] 开始处理录音数据...");
             // 1. 停止录音，获取音频数据
             match recorder_release.stop() {
