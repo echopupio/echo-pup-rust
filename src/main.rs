@@ -71,6 +71,56 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_voice_input(config_path: &str) -> Result<()> {
+    // ===== 首次运行引导 =====
+    if config::Config::is_first_run(config_path) {
+        println!("");
+        println!("===========================================");
+        println!("🎉 欢迎使用 TypechoAI！");
+        println!("===========================================");
+        println!("");
+        println!("首次运行，请先配置 LLM 以启用文本整理功能。");
+        println!("");
+        println!("📝 配置示例 (Ollama - 本地部署):");
+        println!("");
+        println!("  [llm]");
+        println!("  enabled = true");
+        println!("  provider = \"ollama\"");
+        println!("  model = \"llama3\"");
+        println!("  api_base = \"http://localhost:11434/v1\"");
+        println!("  api_key_env = \"\"");
+        println!("");
+        println!("📝 配置示例 (OpenAI):");
+        println!("");
+        println!("  [llm]");
+        println!("  enabled = true");
+        println!("  provider = \"openai\"");
+        println!("  model = \"gpt-4o-mini\"");
+        println!("  api_base = \"https://api.openai.com/v1\"");
+        println!("  api_key_env = \"OPENAI_API_KEY\"");
+        println!("");
+        println!("💡 提示：");
+        println!("  - Ollama: 从 https://ollama.com 下载安装");
+        println!("  - 运行 'ollama serve' 启动 Ollama 服务");
+        println!("  - 使用 'ollama pull llama3' 下载模型");
+        println!("");
+        println!("编辑配置文件: {}", config_path.replace("~", &dirs::home_dir().unwrap_or_default().display().to_string()));
+        println!("");
+        println!("===========================================");
+        println!("");
+        
+        // 如果默认配置下 LLM 未配置，也显示提示
+        let default_config = config::Config::default();
+        if !default_config.is_llm_configured() {
+            info!("首次运行引导：LLM 未配置，将以基础模式运行（仅语音转文字）");
+        }
+    } else {
+        // 非首次运行，检查 LLM 配置状态
+        let config = config::Config::load(config_path)?;
+        if !config.is_llm_configured() {
+            info!("LLM 未配置，将以基础模式运行（仅语音转文字）");
+        }
+    }
+
     let config = config::Config::load(config_path)?;
     
     // ===== 初始化模块 =====
@@ -127,21 +177,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let recorder_press = recorder.clone();
     let is_recording_press = is_recording.clone();
     let press_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        tracing::info!("[Callback] 热键按下事件触发");
         if !is_recording_press.load(Ordering::SeqCst) {
-            info!("[Main] 开始录音...");
+            info!("开始录音...");
             match recorder_press.start() {
                 Ok(_) => {
                     is_recording_press.store(true, Ordering::SeqCst);
-                    tracing::info!("[Callback] 录音已启动，状态已更新");
                 }
                 Err(e) => {
-                    error!("[Main] 开始录音失败: {}", e);
-                    tracing::error!("[Callback] 开始录音失败: {}", e);
+                    error!("开始录音失败: {}", e);
                 }
             }
-        } else {
-            tracing::warn!("[Callback] 跳过录音，已在录音中");
         }
     });
     
@@ -152,21 +197,18 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let keyboard_release = keyboard.clone();
     let is_recording_release = is_recording.clone();
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        tracing::info!("[Callback] 热键松开事件触发");
         if is_recording_release.load(Ordering::SeqCst) {
             // 先标记为非录音状态
             is_recording_release.store(false, Ordering::SeqCst);
-            tracing::info!("[Callback] 开始处理录音数据...");
+            
             // 1. 停止录音，获取音频数据
             match recorder_release.stop() {
                 Ok(audio_data) => {
                     if audio_data.is_empty() {
-                        tracing::warn!("[Callback] 录音数据为空");
                         info!("录音数据为空");
                         return;
                     }
                     info!("录音完成，采样点: {}", audio_data.len());
-                    tracing::info!("[Callback] 录音完成，采样点: {}", audio_data.len());
                     
                     // 2. 音频转写 (Whisper)
                     let mut final_text = String::new();
@@ -175,30 +217,24 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     {
                         let mut whisper_guard = whisper_release.lock();
                         if let Some(ref mut whisper) = *whisper_guard {
-                            tracing::info!("[Callback] 开始 Whisper 转写...");
                             match whisper.transcribe(&audio_data) {
                                 Ok(text) => {
                                     // 过滤无效结果
                                     let trimmed = text.trim();
                                     if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
                                         info!("转写结果为空或无效（可能没有说话或音量太小）");
-                                        tracing::warn!("[Callback] 转写结果为空或无效: {}", text);
-                                        // 不返回，让用户知道问题
                                         return;
                                     }
                                     info!("转写完成: {}", text);
-                                    tracing::info!("[Callback] 转写完成: {}", text);
                                     final_text = text;
                                     transcribe_success = true;
                                 }
                                 Err(e) => {
                                     error!("转写失败: {}", e);
-                                    tracing::error!("[Callback] 转写失败: {}", e);
                                 }
                             }
                         } else {
                             error!("Whisper 未初始化");
-                            tracing::error!("[Callback] Whisper 未初始化");
                         }
                     }
                     
@@ -213,48 +249,37 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     };
                     
                     if llm_enabled {
-                        tracing::info!("[Callback] 开始 LLM 整理...");
                         let llm_guard = llm_release.lock();
                         if let Some(ref llm) = *llm_guard {
                             match llm.rewrite(&final_text) {
                                 Ok(rewritten) => {
                                     info!("LLM 整理完成: {}", rewritten);
-                                    tracing::info!("[Callback] LLM 整理完成: {}", rewritten);
                                     final_text = rewritten;
                                 }
                                 Err(e) => {
                                     error!("LLM 整理失败: {}，使用原始转写结果", e);
-                                    tracing::error!("[Callback] LLM 整理失败: {}", e);
                                 }
                             }
                         }
-                    } else {
-                        tracing::info!("[Callback] LLM 整理未启用，跳过");
                     }
                     
                     // 4. 键盘输入
-                    tracing::info!("[Callback] 开始键盘输入...");
                     {
                         let mut keyboard_guard = keyboard_release.lock();
                         match keyboard_guard.type_text(&final_text) {
                             Ok(_) => {
                                 info!("文本已输入");
-                                tracing::info!("[Callback] 文本已输入");
                             }
                             Err(e) => {
                                 error!("键盘输入失败: {}", e);
-                                tracing::error!("[Callback] 键盘输入失败: {}", e);
                             }
                         }
                     }
                 }
                 Err(e) => {
                     error!("停止录音失败: {}", e);
-                    tracing::error!("[Callback] 停止录音失败: {}", e);
                 }
             }
-        } else {
-            tracing::warn!("[Callback] 跳过，未在录音状态");
         }
     });
     

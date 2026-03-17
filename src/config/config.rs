@@ -120,6 +120,28 @@ impl Config {
             .join("config.toml")
     }
 
+    /// 检查是否是首次运行（配置文件不存在）
+    pub fn is_first_run(path: &str) -> bool {
+        let path = path.replace("~", &dirs::home_dir().unwrap_or_default().display().to_string());
+        !PathBuf::from(path).exists()
+    }
+
+    /// 检查 LLM 是否已配置（用于首次运行引导）
+    pub fn is_llm_configured(&self) -> bool {
+        // 检查是否启用了 LLM
+        if !self.llm.enabled {
+            return false;
+        }
+        
+        // 对于 Ollama（api_key_env 为空），不需要检查环境变量
+        if self.llm.api_key_env.is_empty() {
+            return true;
+        }
+        
+        // 检查环境变量是否存在
+        std::env::var(&self.llm.api_key_env).is_ok()
+    }
+
     /// 加载配置
     pub fn load(path: &str) -> Result<Self> {
         let path = path.replace("~", &dirs::home_dir().unwrap_or_default().display().to_string());

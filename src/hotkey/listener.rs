@@ -63,7 +63,6 @@ impl HotkeyListener {
             
             // 注册新热键
             manager.register(hotkey)?;
-            tracing::info!("热键已注册: {}", key);
         }
         
         self.hotkey = Some(hotkey);
@@ -98,7 +97,6 @@ impl HotkeyListener {
         let release_callback = self.release_callback.clone();
         
         if self.event_receiver.is_none() {
-            tracing::warn!("热键事件接收器未初始化");
             return Ok(());
         }
         
@@ -121,14 +119,12 @@ impl HotkeyListener {
                         match event.state {
                             global_hotkey::HotKeyState::Pressed => {
                                 *is_pressed.lock() = true;
-                                tracing::info!("[Hotkey] 热键按下");
                                 if let Some(ref cb) = press_callback {
                                     cb();
                                 }
                             }
                             global_hotkey::HotKeyState::Released => {
                                 *is_pressed.lock() = false;
-                                tracing::info!("[Hotkey] 热键松开");
                                 if let Some(ref cb) = release_callback {
                                     cb();
                                 }
@@ -137,10 +133,8 @@ impl HotkeyListener {
                     }
                 }
             }
-            tracing::debug!("热键监听线程已退出");
         });
         
-        tracing::info!("热键监听已启动");
         Ok(())
     }
 
@@ -161,7 +155,6 @@ impl HotkeyListener {
             let _ = sender.send(());
         }
         
-        tracing::info!("热键监听已停止");
         Ok(())
     }
 }

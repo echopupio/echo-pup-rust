@@ -15,7 +15,7 @@ pub struct LLMRewrite {
     enabled: bool,
 }
 
-/// API 请求
+/// OpenAI API 请求
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
@@ -30,7 +30,7 @@ struct Message {
     content: String,
 }
 
-/// API 响应
+/// OpenAI API 响应
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
@@ -48,22 +48,27 @@ struct ResponseMessage {
     content: String,
 }
 
+/// Ollama API 请求
+#[derive(Serialize)]
+struct OllamaRequest {
+    model: String,
+    prompt: String,
+    stream: bool,
+}
+
+/// Ollama 流式响应
+#[derive(Deserialize)]
+struct OllamaResponse {
+    response: String,
+}
+
 impl LLMRewrite {
     /// 创建新的 LLM 整理器
     pub fn new(provider: &str, api_base: &str, api_key_env: &str, model: &str) -> Result<Self> {
         let api_key = env::var(api_key_env)
-            .unwrap_or_else(|_| {
-                tracing::warn!("环境变量 {} 未设置", api_key_env);
-                String::new()
-            });
+            .unwrap_or_else(|_| String::new());
 
         let enabled = !api_key.is_empty();
-
-        if !enabled {
-            tracing::warn!("LLM API Key 未配置，文本整理功能将不可用");
-        } else {
-            tracing::info!("LLM 整理已启用，使用模型: {}", model);
-        }
 
         Ok(Self {
             client: Client::new(),
@@ -78,22 +83,27 @@ impl LLMRewrite {
     /// 整理/润色文本
     pub fn rewrite(&self, text: &str) -> Result<String> {
         if !self.enabled || text.is_empty() {
-            tracing::warn!("[LLM] 未启用或文本为空，跳过整理");
             return Ok(text.to_string());
         }
-
-        tracing::info!("[LLM] 开始整理文本，原文长度: {}", text.len());
 
         let prompt = format!(
             "请将以下语音转写的文本进行整理和润色：\n1. 修正明显的识别错误\n2. 添加适当的标点符号\n3. 使语句更通顺自然\n\n原始文本：\n{}",
             text
         );
 
+        match self.provider.as_str() {
+            "ollama" => self.rewrite_ollama(&prompt),
+            _ => self.rewrite_openai(&prompt),
+        }
+    }
+
+    /// 使用 OpenAI API 整理文本
+    fn rewrite_openai(&self, prompt: &str) -> Result<String> {
         let request = ChatRequest {
             model: self.model.clone(),
             messages: vec![Message {
                 role: "user".to_string(),
-                content: prompt,
+                content: prompt.to_string(),
             }],
             temperature: 0.7,
         };
@@ -112,8 +122,7 @@ impl LLMRewrite {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().unwrap_or_default();
-            tracing::error!("LLM API 错误: {} - {}", status, text);
-            return Err(anyhow::anyhow!("LLM API 错误: {}", status));
+            return Err(anyhow::anyhow!("LLM API 错误: {} - {}", status, text));
         }
 
         let chat_response: ChatResponse = response
@@ -124,11 +133,40 @@ impl LLMRewrite {
             .choices
             .first()
             .map(|c| c.message.content.clone())
-            .unwrap_or_else(|| text.to_string());
+            .unwrap_or_else(|| prompt.to_string());
 
-        tracing::info!("[LLM] 整理完成");
-        tracing::debug!("[LLM] 整理结果: {}", result);
         Ok(result)
+    }
+
+    /// 使用 Ollama API 整理文本（流式）
+    fn rewrite_ollama(&self, prompt: &str) -> Result<String> {
+        let request = OllamaRequest {
+            model: self.model.clone(),
+            prompt: prompt.to_string(),
+            stream: false,
+        };
+
+        let url = format!("{}/api/generate", self.api_base);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .context("Ollama API 请求失败")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().unwrap_or_default();
+            return Err(anyhow::anyhow!("Ollama API 错误: {} - {}", status, text));
+        }
+
+        let ollama_response: OllamaResponse = response
+            .json()
+            .context("解析 Ollama 响应失败")?;
+
+        Ok(ollama_response.response)
     }
 
     /// 检查是否启用

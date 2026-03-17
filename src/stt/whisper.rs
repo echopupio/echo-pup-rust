@@ -16,19 +16,13 @@ impl WhisperSTT {
     pub fn new(model_path: &str) -> Result<Self> {
         let path = std::path::Path::new(model_path);
         if !path.exists() {
-            tracing::warn!("Whisper 模型文件不存在: {}", model_path);
-            tracing::info!("请下载 Whisper 模型到 models/ 目录");
             return Err(anyhow::anyhow!("未找到 Whisper 模型: {}", model_path));
         }
 
         // 尝试加载模型
         let context = match WhisperContext::new(model_path) {
-            Ok(ctx) => {
-                tracing::info!("Whisper 模型加载成功: {}", model_path);
-                Some(ctx)
-            }
+            Ok(ctx) => Some(ctx),
             Err(e) => {
-                tracing::error!("Whisper 模型加载失败: {:?}", e);
                 return Err(anyhow::anyhow!("模型加载失败: {:?}", e));
             }
         };
@@ -55,11 +49,8 @@ impl WhisperSTT {
             .context("Whisper 模型未加载")?;
 
         if audio.is_empty() {
-            tracing::warn!("[Whisper] 音频数据为空");
             return Ok(String::new());
         }
-
-        tracing::info!("[Whisper] 开始转写，音频采样点: {}", audio.len());
 
         // 创建转写参数
         let mut params = FullParams::new(SamplingStrategy::Greedy { n_past: 0 });
@@ -68,14 +59,11 @@ impl WhisperSTT {
         params.set_print_timestamps(false);
         params.set_print_special(false);
 
-        // 设置语言 - 使用 set_language 方法
+        // 设置语言
         if let Some(ref lang) = self.language {
-            // whisper-rs 语言设置通过 language 属性
             if lang != "auto" {
-                if let Some(lang_id) = whisper_rs::get_lang_id(lang) {
-                    // 由于没有公开的 setter，我们需要创建一个带语言的 params
-                    // 这里简化处理：忽略语言设置，使用默认行为
-                    tracing::debug!("设置语言: {} (id: {})", lang, lang_id);
+                if let Some(_lang_id) = whisper_rs::get_lang_id(lang) {
+                    // 语言设置通过默认行为处理
                 }
             }
         }
@@ -86,7 +74,6 @@ impl WhisperSTT {
         // 执行转写
         context.full(params, audio)
             .map_err(|e| {
-                tracing::error!("[Whisper] 转写执行失败: {:?}", e);
                 anyhow::anyhow!("Whisper 转写失败: {:?}", e)
             })?;
 
@@ -99,9 +86,6 @@ impl WhisperSTT {
                 result.push_str(&text);
             }
         }
-
-        tracing::debug!("[Whisper] 转写完成，片段数: {}, 文本长度: {}", num_segments, result.len());
-        tracing::info!("[Whisper] 转写完成: {}", result);
 
         Ok(result)
     }
