@@ -126,12 +126,14 @@ impl HotkeyListener {
                         match event.state {
                             global_hotkey::HotKeyState::Pressed => {
                                 *is_pressed.lock() = true;
+                                tracing::info!("[Hotkey] 热键按下");
                                 if let Some(ref cb) = callback {
                                     cb(HotkeyEvent::Pressed);
                                 }
                             }
                             global_hotkey::HotKeyState::Released => {
                                 *is_pressed.lock() = false;
+                                tracing::info!("[Hotkey] 热键松开");
                                 if let Some(ref cb) = callback {
                                     cb(HotkeyEvent::Released);
                                 }

@@ -127,11 +127,14 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let recorder_press = recorder.clone();
     let is_recording_press = is_recording.clone();
     let press_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        tracing::info!("[Callback] 热键按下事件触发");
         if !is_recording_press.load(Ordering::SeqCst) {
-            info!("开始录音...");
+            info!("[Main] 开始录音...");
             if let Err(e) = recorder_press.start() {
-                error!("开始录音失败: {}", e);
+                error!("[Main] 开始录音失败: {}", e);
             }
+        } else {
+            tracing::warn!("[Callback] 跳过录音，已在录音中");
         }
     });
     
@@ -142,15 +145,19 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let keyboard_release = keyboard.clone();
     let is_recording_release = is_recording.clone();
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        tracing::info!("[Callback] 热键松开事件触发");
         if is_recording_release.load(Ordering::SeqCst) {
+            tracing::info!("[Callback] 开始处理录音数据...");
             // 1. 停止录音，获取音频数据
             match recorder_release.stop() {
                 Ok(audio_data) => {
                     if audio_data.is_empty() {
+                        tracing::warn!("[Callback] 录音数据为空");
                         info!("录音数据为空");
                         return;
                     }
                     info!("录音完成，采样点: {}", audio_data.len());
+                    tracing::info!("[Callback] 录音完成，采样点: {}", audio_data.len());
                     
                     // 2. 音频转写 (Whisper)
                     let mut final_text = String::new();
@@ -159,22 +166,27 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     {
                         let mut whisper_guard = whisper_release.lock();
                         if let Some(ref mut whisper) = *whisper_guard {
+                            tracing::info!("[Callback] 开始 Whisper 转写...");
                             match whisper.transcribe(&audio_data) {
                                 Ok(text) => {
                                     if text.is_empty() {
                                         info!("转写结果为空");
+                                        tracing::warn!("[Callback] 转写结果为空");
                                         return;
                                     }
                                     info!("转写完成: {}", text);
+                                    tracing::info!("[Callback] 转写完成: {}", text);
                                     final_text = text;
                                     transcribe_success = true;
                                 }
                                 Err(e) => {
                                     error!("转写失败: {}", e);
+                                    tracing::error!("[Callback] 转写失败: {}", e);
                                 }
                             }
                         } else {
                             error!("Whisper 未初始化");
+                            tracing::error!("[Callback] Whisper 未初始化");
                         }
                     }
                     
@@ -189,37 +201,48 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     };
                     
                     if llm_enabled {
+                        tracing::info!("[Callback] 开始 LLM 整理...");
                         let llm_guard = llm_release.lock();
                         if let Some(ref llm) = *llm_guard {
                             match llm.rewrite(&final_text) {
                                 Ok(rewritten) => {
                                     info!("LLM 整理完成: {}", rewritten);
+                                    tracing::info!("[Callback] LLM 整理完成: {}", rewritten);
                                     final_text = rewritten;
                                 }
                                 Err(e) => {
                                     error!("LLM 整理失败: {}，使用原始转写结果", e);
+                                    tracing::error!("[Callback] LLM 整理失败: {}", e);
                                 }
                             }
                         }
+                    } else {
+                        tracing::info!("[Callback] LLM 整理未启用，跳过");
                     }
                     
                     // 4. 键盘输入
+                    tracing::info!("[Callback] 开始键盘输入...");
                     {
                         let mut keyboard_guard = keyboard_release.lock();
                         match keyboard_guard.type_text(&final_text) {
                             Ok(_) => {
                                 info!("文本已输入");
+                                tracing::info!("[Callback] 文本已输入");
                             }
                             Err(e) => {
                                 error!("键盘输入失败: {}", e);
+                                tracing::error!("[Callback] 键盘输入失败: {}", e);
                             }
                         }
                     }
                 }
                 Err(e) => {
                     error!("停止录音失败: {}", e);
+                    tracing::error!("[Callback] 停止录音失败: {}", e);
                 }
             }
+        } else {
+            tracing::warn!("[Callback] 跳过，未在录音状态");
         }
     });
     

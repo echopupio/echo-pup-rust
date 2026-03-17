@@ -35,17 +35,24 @@ impl AudioRecorder {
     /// 开始录音
     pub fn start(&self) -> Result<()> {
         if self.is_recording.load(Ordering::SeqCst) {
+            tracing::warn!("[Recorder] 已经在录音中，跳过");
             return Ok(());
         }
+
+        tracing::info!("[Recorder] 开始录音...");
 
         let host = cpal::default_host();
         let device = host
             .default_input_device()
             .context("无法获取音频输入设备")?;
 
+        tracing::debug!("[Recorder] 音频设备: {:?}", device.name());
+
         let config = device
             .default_input_config()
             .context("无法获取音频配置")?;
+
+        tracing::debug!("[Recorder] 音频配置: {:?}", config);
 
         let sample_rate = self.sample_rate;
         let is_recording = self.is_recording.clone();
@@ -93,21 +100,23 @@ impl AudioRecorder {
         stream.play()?;
         *self.stream.lock() = Some(stream);
 
-        tracing::info!("录音已开始");
+        tracing::info!("[Recorder] 录音已开始");
         Ok(())
     }
 
     /// 停止录音并返回音频数据
     pub fn stop(&self) -> Result<Vec<f32>> {
         if !self.is_recording.load(Ordering::SeqCst) {
+            tracing::warn!("[Recorder] 未在录音中");
             return Ok(Vec::new());
         }
 
+        tracing::info!("[Recorder] 停止录音...");
         self.is_recording.store(false, Ordering::SeqCst);
         *self.stream.lock() = None;
 
         let buffer = self.audio_buffer.lock().clone();
-        tracing::info!("录音已停止，采样点数: {}", buffer.len());
+        tracing::info!("[Recorder] 录音已停止，采样点数: {}", buffer.len());
 
         Ok(buffer)
     }

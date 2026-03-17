@@ -55,8 +55,11 @@ impl WhisperSTT {
             .context("Whisper 模型未加载")?;
 
         if audio.is_empty() {
+            tracing::warn!("[Whisper] 音频数据为空");
             return Ok(String::new());
         }
+
+        tracing::info!("[Whisper] 开始转写，音频采样点: {}", audio.len());
 
         // 创建转写参数
         let mut params = FullParams::new(SamplingStrategy::Greedy { n_past: 0 });
@@ -82,7 +85,10 @@ impl WhisperSTT {
 
         // 执行转写
         context.full(params, audio)
-            .map_err(|e| anyhow::anyhow!("Whisper 转写失败: {:?}", e))?;
+            .map_err(|e| {
+                tracing::error!("[Whisper] 转写执行失败: {:?}", e);
+                anyhow::anyhow!("Whisper 转写失败: {:?}", e)
+            })?;
 
         // 获取结果
         let num_segments = context.full_n_segments();
@@ -94,7 +100,8 @@ impl WhisperSTT {
             }
         }
 
-        tracing::debug!("Whisper 转写完成，片段数: {}, 文本长度: {}", num_segments, result.len());
+        tracing::debug!("[Whisper] 转写完成，片段数: {}, 文本长度: {}", num_segments, result.len());
+        tracing::info!("[Whisper] 转写完成: {}", result);
 
         Ok(result)
     }

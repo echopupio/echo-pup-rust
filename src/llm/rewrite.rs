@@ -78,8 +78,11 @@ impl LLMRewrite {
     /// 整理/润色文本
     pub fn rewrite(&self, text: &str) -> Result<String> {
         if !self.enabled || text.is_empty() {
+            tracing::warn!("[LLM] 未启用或文本为空，跳过整理");
             return Ok(text.to_string());
         }
+
+        tracing::info!("[LLM] 开始整理文本，原文长度: {}", text.len());
 
         let prompt = format!(
             "请将以下语音转写的文本进行整理和润色：\n1. 修正明显的识别错误\n2. 添加适当的标点符号\n3. 使语句更通顺自然\n\n原始文本：\n{}",
@@ -123,7 +126,8 @@ impl LLMRewrite {
             .map(|c| c.message.content.clone())
             .unwrap_or_else(|| text.to_string());
 
-        tracing::info!("LLM 整理完成");
+        tracing::info!("[LLM] 整理完成");
+        tracing::debug!("[LLM] 整理结果: {}", result);
         Ok(result)
     }
 
