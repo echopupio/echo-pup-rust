@@ -39,7 +39,8 @@ pub struct HotkeyConfig {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
-            key: "Control".to_string(),
+            // 使用 ctrl+space，这是最常见的语音输入热键
+            key: "ctrl+space".to_string(),
         }
     }
 }
@@ -157,7 +158,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.hotkey.key, "Control");
+        assert_eq!(config.hotkey.key, "ctrl+space");
         assert_eq!(config.audio.sample_rate, 16000);
     }
 }
