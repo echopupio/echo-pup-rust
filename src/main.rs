@@ -90,6 +90,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             None
         }
     };
+    // 使用 Mutex 包装，以便在回调中共享（transcribe 需要 &mut self）
+    let whisper = Arc::new(Mutex::new(whisper));
     
     let llm = if config.llm.enabled {
         match llm::LLMRewrite::new(
@@ -111,6 +113,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         info!("LLM 整理未启用");
         None
     };
+    // 使用 Mutex 包装，以便在回调中共享
+    let llm = Arc::new(Mutex::new(llm));
     
     let keyboard = Arc::new(Mutex::new(input::Keyboard::new()?));
     info!("键盘输入已初始化");
@@ -131,11 +135,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         }
     });
     
-    // 松开热键时停止录音并处理
+    // 松开热键时停止录音并处理（转写 -> LLM整理 -> 键盘输入）
     let recorder_release = recorder.clone();
+    let whisper_release = whisper.clone();
+    let llm_release = llm.clone();
+    let keyboard_release = keyboard.clone();
     let is_recording_release = is_recording.clone();
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if is_recording_release.load(Ordering::SeqCst) {
+            // 1. 停止录音，获取音频数据
             match recorder_release.stop() {
                 Ok(audio_data) => {
                     if audio_data.is_empty() {
@@ -144,9 +152,69 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     }
                     info!("录音完成，采样点: {}", audio_data.len());
                     
-                    // 这里需要用全局变量或 channels 来处理转写
-                    // 为简化，先打印日志
-                    info!("音频数据已获取，等待转写处理...");
+                    // 2. 音频转写 (Whisper)
+                    let mut final_text = String::new();
+                    let mut transcribe_success = false;
+                    
+                    {
+                        let mut whisper_guard = whisper_release.lock();
+                        if let Some(ref mut whisper) = *whisper_guard {
+                            match whisper.transcribe(&audio_data) {
+                                Ok(text) => {
+                                    if text.is_empty() {
+                                        info!("转写结果为空");
+                                        return;
+                                    }
+                                    info!("转写完成: {}", text);
+                                    final_text = text;
+                                    transcribe_success = true;
+                                }
+                                Err(e) => {
+                                    error!("转写失败: {}", e);
+                                }
+                            }
+                        } else {
+                            error!("Whisper 未初始化");
+                        }
+                    }
+                    
+                    if !transcribe_success {
+                        return;
+                    }
+                    
+                    // 3. LLM 整理（如果启用）
+                    let llm_enabled = {
+                        let llm_guard = llm_release.lock();
+                        llm_guard.as_ref().map(|l| l.is_enabled()).unwrap_or(false)
+                    };
+                    
+                    if llm_enabled {
+                        let llm_guard = llm_release.lock();
+                        if let Some(ref llm) = *llm_guard {
+                            match llm.rewrite(&final_text) {
+                                Ok(rewritten) => {
+                                    info!("LLM 整理完成: {}", rewritten);
+                                    final_text = rewritten;
+                                }
+                                Err(e) => {
+                                    error!("LLM 整理失败: {}，使用原始转写结果", e);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 4. 键盘输入
+                    {
+                        let mut keyboard_guard = keyboard_release.lock();
+                        match keyboard_guard.type_text(&final_text) {
+                            Ok(_) => {
+                                info!("文本已输入");
+                            }
+                            Err(e) => {
+                                error!("键盘输入失败: {}", e);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("停止录音失败: {}", e);
