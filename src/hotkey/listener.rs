@@ -24,6 +24,8 @@ pub struct HotkeyListener {
     hotkey: Option<HotKey>,
     manager: Option<GlobalHotKeyManager>,
     callback: Option<HotkeyCallback>,
+    press_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+    release_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     is_pressed: Arc<Mutex<bool>>,
     stop_sender: Option<Sender<()>>,
     event_receiver: Option<GlobalHotKeyEventReceiver>,
@@ -39,6 +41,8 @@ impl HotkeyListener {
             hotkey: None,
             manager: Some(manager),
             callback: None,
+            press_callback: None,
+            release_callback: None,
             is_pressed: Arc::new(Mutex::new(false)),
             stop_sender: None,
             event_receiver: None,
@@ -78,29 +82,20 @@ impl HotkeyListener {
 
     /// 设置按下回调 (兼容旧接口)
     pub fn on_press(&mut self, callback: Arc<dyn Fn() + Send + Sync>) {
-        let callback_clone = callback;
-        self.callback = Some(Arc::new(move |event| {
-            if event == HotkeyEvent::Pressed {
-                callback_clone();
-            }
-        }));
+        self.press_callback = Some(callback);
     }
 
     /// 设置松开回调 (兼容旧接口)
     pub fn on_release(&mut self, callback: Arc<dyn Fn() + Send + Sync>) {
-        let callback_clone = callback;
-        self.callback = Some(Arc::new(move |event| {
-            if event == HotkeyEvent::Released {
-                callback_clone();
-            }
-        }));
+        self.release_callback = Some(callback);
     }
 
     /// 开始监听热键事件
     pub fn start(&mut self) -> Result<()> {
         // 启动事件处理线程
         let is_pressed = self.is_pressed.clone();
-        let callback = self.callback.clone();
+        let press_callback = self.press_callback.clone();
+        let release_callback = self.release_callback.clone();
         
         if self.event_receiver.is_none() {
             tracing::warn!("热键事件接收器未初始化");
@@ -127,15 +122,15 @@ impl HotkeyListener {
                             global_hotkey::HotKeyState::Pressed => {
                                 *is_pressed.lock() = true;
                                 tracing::info!("[Hotkey] 热键按下");
-                                if let Some(ref cb) = callback {
-                                    cb(HotkeyEvent::Pressed);
+                                if let Some(ref cb) = press_callback {
+                                    cb();
                                 }
                             }
                             global_hotkey::HotKeyState::Released => {
                                 *is_pressed.lock() = false;
                                 tracing::info!("[Hotkey] 热键松开");
-                                if let Some(ref cb) = callback {
-                                    cb(HotkeyEvent::Released);
+                                if let Some(ref cb) = release_callback {
+                                    cb();
                                 }
                             }
                         }
