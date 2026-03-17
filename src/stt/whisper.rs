@@ -1,11 +1,12 @@
-//! Whisper 语音识别实现
+//! Whisper 语音识别实现 (whisper-rs 0.16+)
 
 use anyhow::{Context, Result};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 /// Whisper 语音识别
 pub struct WhisperSTT {
-    context: Option<WhisperContext>,
+    context: WhisperContext,
+    state: Option<WhisperState>,
     model_path: String,
     language: Option<String>,
     translate: bool,
@@ -19,16 +20,19 @@ impl WhisperSTT {
             return Err(anyhow::anyhow!("未找到 Whisper 模型: {}", model_path));
         }
 
-        // 尝试加载模型
-        let context = match WhisperContext::new(model_path) {
-            Ok(ctx) => Some(ctx),
-            Err(e) => {
-                return Err(anyhow::anyhow!("模型加载失败: {:?}", e));
-            }
-        };
+        // 使用新版本 API 创建 context
+        let context = WhisperContext::new_with_params(
+            model_path,
+            WhisperContextParameters::default(),
+        ).map_err(|e| anyhow::anyhow!("模型加载失败: {:?}", e))?;
+
+        // 预先创建 state
+        let state = context.create_state()
+            .map_err(|e| anyhow::anyhow!("创建 state 失败: {:?}", e))?;
 
         Ok(Self {
             context,
+            state: Some(state),
             model_path: model_path.to_string(),
             language: Some("zh".to_string()),
             translate: false,
@@ -45,15 +49,15 @@ impl WhisperSTT {
 
     /// 转写音频数据
     pub fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
-        let context = self.context.as_mut()
-            .context("Whisper 模型未加载")?;
+        let state = self.state.as_mut()
+            .context("Whisper state 未创建")?;
 
         if audio.is_empty() {
             return Ok(String::new());
         }
 
         // 创建转写参数
-        let mut params = FullParams::new(SamplingStrategy::Greedy { n_past: 0 });
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(4);
         params.set_print_progress(false);
         params.set_print_timestamps(false);
@@ -63,7 +67,7 @@ impl WhisperSTT {
         if let Some(ref lang) = self.language {
             if lang != "auto" {
                 if let Some(_lang_id) = whisper_rs::get_lang_id(lang) {
-                    // 语言设置通过默认行为处理
+                    // 语言设置通过 set_language_n_tokens 或默认处理
                 }
             }
         }
@@ -71,19 +75,19 @@ impl WhisperSTT {
         // 设置翻译
         params.set_translate(self.translate);
 
-        // 执行转写
-        context.full(params, audio)
-            .map_err(|e| {
-                anyhow::anyhow!("Whisper 转写失败: {:?}", e)
-            })?;
+        // 执行转写 - 新版本 API
+        state.full(params, audio)
+            .map_err(|e| anyhow::anyhow!("Whisper 转写失败: {:?}", e))?;
 
         // 获取结果
-        let num_segments = context.full_n_segments();
+        let num_segments = state.full_n_segments();
         let mut result = String::new();
 
         for i in 0..num_segments {
-            if let Ok(text) = context.full_get_segment_text(i) {
-                result.push_str(&text);
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(text) = segment.to_str() {
+                    result.push_str(text);
+                }
             }
         }
 
@@ -92,7 +96,7 @@ impl WhisperSTT {
 
     /// 检查模型是否已加载
     pub fn is_ready(&self) -> bool {
-        self.context.is_some()
+        self.state.is_some()
     }
 
     /// 获取模型路径
