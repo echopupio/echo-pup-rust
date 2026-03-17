@@ -66,6 +66,7 @@ impl AudioRecorder {
 
         let err_fn = |err| eprintln!("音频流错误: {}", err);
 
+        // 直接使用设备原始采样率，不做降采样
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 let audio_buffer = audio_buffer.clone();
@@ -75,15 +76,25 @@ impl AudioRecorder {
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_recording.load(Ordering::SeqCst) {
                             let mut buffer = audio_buffer.lock();
-                            let ratio = config_sample_rate.0 as f32 / sample_rate as f32;
-                            if ratio > 1.0 {
-                                for (i, &sample) in data.iter().enumerate() {
-                                    if i % ratio as usize == 0 {
-                                        buffer.push(sample);
-                                    }
-                                }
-                            } else {
-                                buffer.extend_from_slice(data);
+                            // 直接复制原始数据，不做降采样
+                            buffer.extend_from_slice(data);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )?
+            }
+            cpal::SampleFormat::I16 => {
+                let audio_buffer = audio_buffer.clone();
+                let is_recording = is_recording.clone();
+                device.build_input_stream(
+                    &config_clone.into(),
+                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                        if is_recording.load(Ordering::SeqCst) {
+                            let mut buffer = audio_buffer.lock();
+                            // 转换为 f32
+                            for &sample in data.iter() {
+                                buffer.push(sample as f32 / 32768.0);
                             }
                         }
                     },
