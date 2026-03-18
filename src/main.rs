@@ -5,7 +5,9 @@ mod config;
 mod hotkey;
 mod input;
 mod llm;
+mod runtime;
 mod stt;
+mod ui;
 mod vad;
 
 use anyhow::Result;
@@ -25,12 +27,13 @@ struct Cli {
     config: String,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     Run,
+    Ui,
     Test,
     Config { show: bool, init: bool },
     DownloadModel { size: String },
@@ -59,7 +62,6 @@ fn process_audio(
     }
     info!("[{}] 录音完成，采样点: {}", trigger_type, audio_data.len());
 
-    let mut stt_ms = 0u128;
     let mut llm_ms = 0u128;
     let mut postprocess_ms = 0u128;
     let mut type_ms = 0u128;
@@ -94,7 +96,7 @@ fn process_audio(
             error!("Whisper 未初始化");
         }
     }
-    stt_ms = stt_start.elapsed().as_millis();
+    let stt_ms = stt_start.elapsed().as_millis();
 
     if !transcribe_success {
         info!(
@@ -180,9 +182,18 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run => run_voice_input(&cli.config)?,
-        Commands::Test => test_modules(&cli.config)?,
-        Commands::Config { show, init } => {
+        Some(Commands::Run) => run_voice_input(&cli.config)?,
+        Some(Commands::Ui) => {
+            let (ui_guard, acquire_mode) = runtime::acquire_ui_guard_for_foreground()?;
+            if matches!(acquire_mode, runtime::UiAcquireMode::TookOverPrevious) {
+                println!("检测到已有 catecho ui，已切换到当前终端。");
+            }
+            let ui_result = ui::run_ui(&cli.config);
+            drop(ui_guard);
+            ui_result?;
+        }
+        Some(Commands::Test) => test_modules(&cli.config)?,
+        Some(Commands::Config { show, init }) => {
             if init {
                 let config = config::Config::default();
                 config.save(&cli.config)?;
@@ -193,16 +204,39 @@ fn main() -> anyhow::Result<()> {
                 println!("{:#?}", config);
             }
         }
-        Commands::DownloadModel { size } => {
+        Some(Commands::DownloadModel { size }) => {
             info!("下载 Whisper {} 模型", size);
             println!("请运行: ./scripts/download_model.sh {}", size);
         }
+        None => start_background_mode(&cli.config)?,
     }
 
     Ok(())
 }
 
+fn start_background_mode(config_path: &str) -> Result<()> {
+    if runtime::is_running()? {
+        println!("catecho 已在后台运行，不会重复创建进程。");
+        println!("可使用 `catecho ui` 管理配置。");
+        return Ok(());
+    }
+
+    let pid = runtime::spawn_background(config_path)?;
+    println!("catecho 已在后台启动 (pid: {})", pid);
+    println!("可使用 `catecho ui` 管理配置。");
+    Ok(())
+}
+
 fn run_voice_input(config_path: &str) -> Result<()> {
+    let _instance_guard = match runtime::InstanceGuard::try_acquire()? {
+        Some(guard) => guard,
+        None => {
+            println!("catecho 已在运行，不会启动新实例。");
+            println!("可使用 `catecho ui` 管理配置。");
+            return Ok(());
+        }
+    };
+
     // ===== 首次运行引导 =====
     if config::Config::is_first_run(config_path) {
         println!("");

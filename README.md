@@ -44,16 +44,20 @@ cargo build --release
 # 测试各模块
 ./target/release/catecho test
 
-# 运行
-./target/release/catecho run
+# 启动后台服务（默认行为）
+./target/release/catecho
+
+# 打开管理 TUI
+./target/release/catecho ui
 ```
 
 ## 使用方法
 
-1. 运行 `./target/release/catecho run`
-2. 在需要输入文本的应用中，按住 CTRL+Space（默认热键）
-3. 对着麦克风说话
-4. 松开 CTRL+Space，识别文本将自动输入
+1. 运行 `./target/release/catecho`（默认后台启动，且单实例）
+2. 如需管理配置和模型，运行 `./target/release/catecho ui`（全局单实例，重复执行会接管到当前终端）
+3. 在需要输入文本的应用中，按住 CTRL+Space（默认热键）
+4. 对着麦克风说话
+5. 松开 CTRL+Space，识别文本将自动输入
 
 ### 配置
 
@@ -117,6 +121,7 @@ Usage: catecho [OPTIONS] [COMMAND]
 
 Commands:
   run              运行语音输入
+  ui               打开管理 TUI（仅管理，不执行语音输入）
   test             测试各模块
   config           配置管理
   download-model   下载 Whisper 模型
