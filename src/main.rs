@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -45,6 +45,7 @@ fn process_audio(
     post_processor: &Arc<stt::TextPostProcessor>,
     keyboard: &Arc<Mutex<input::Keyboard>>,
     is_vad_triggered: bool,
+    e2e_start: Instant,
 ) {
     let trigger_type = if is_vad_triggered {
         "VAD自动"
@@ -58,11 +59,17 @@ fn process_audio(
     }
     info!("[{}] 录音完成，采样点: {}", trigger_type, audio_data.len());
 
+    let mut stt_ms = 0u128;
+    let mut llm_ms = 0u128;
+    let mut postprocess_ms = 0u128;
+    let mut type_ms = 0u128;
+
     // 1. 音频转写 (Whisper)
     // 为避免轻音/尾音被误裁剪，这里关闭“转写前二次 VAD 裁剪”
     let processed_audio = audio_data;
     let mut final_text = String::new();
     let mut transcribe_success = false;
+    let stt_start = Instant::now();
 
     {
         let mut whisper_guard = whisper.lock();
@@ -87,8 +94,18 @@ fn process_audio(
             error!("Whisper 未初始化");
         }
     }
+    stt_ms = stt_start.elapsed().as_millis();
 
     if !transcribe_success {
+        info!(
+            "[{}] 性能埋点: stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
+            trigger_type,
+            stt_ms,
+            llm_ms,
+            postprocess_ms,
+            type_ms,
+            e2e_start.elapsed().as_millis()
+        );
         return;
     }
 
@@ -99,6 +116,7 @@ fn process_audio(
     };
 
     if llm_enabled {
+        let llm_start = Instant::now();
         let llm_guard = llm.lock();
         if let Some(ref llm) = *llm_guard {
             match llm.rewrite(&final_text) {
@@ -111,16 +129,20 @@ fn process_audio(
                 }
             }
         }
+        llm_ms = llm_start.elapsed().as_millis();
     }
 
     // 3. 谐音纠错（规则映射）
+    let postprocess_start = Instant::now();
     let corrected = post_processor.process(&final_text);
     if corrected != final_text {
         info!("谐音纠错已应用");
         final_text = corrected;
     }
+    postprocess_ms = postprocess_start.elapsed().as_millis();
 
     // 4. 键盘输入
+    let type_start = Instant::now();
     {
         let mut keyboard_guard = keyboard.lock();
         match keyboard_guard.type_text(&final_text) {
@@ -132,6 +154,17 @@ fn process_audio(
             }
         }
     }
+    type_ms = type_start.elapsed().as_millis();
+
+    info!(
+        "[{}] 性能埋点: stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
+        trigger_type,
+        stt_ms,
+        llm_ms,
+        postprocess_ms,
+        type_ms,
+        e2e_start.elapsed().as_millis()
+    );
 }
 
 fn main() -> anyhow::Result<()> {
@@ -398,6 +431,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
             // 检查是否由 VAD 触发
             let is_vad = vad_triggered_release.swap(false, Ordering::SeqCst);
+            let e2e_start = Instant::now();
 
             process_audio(
                 &audio_data,
@@ -406,6 +440,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &post_processor_release,
                 &keyboard_release,
                 is_vad,
+                e2e_start,
             );
         }
     });
@@ -450,6 +485,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             };
 
             // 处理音频
+            let e2e_start = Instant::now();
             process_audio(
                 &audio_data,
                 &vad_whisper,
@@ -457,6 +493,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &vad_post_processor,
                 &vad_keyboard,
                 true,
+                e2e_start,
             );
         });
 
