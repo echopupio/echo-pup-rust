@@ -20,6 +20,8 @@ pub struct Config {
     pub llm: LLMConfig,
     /// 文本纠错配置
     pub text_correction: TextCorrectionConfig,
+    /// 反馈配置（通知/声音）
+    pub feedback: FeedbackConfig,
 }
 
 impl Default for Config {
@@ -30,6 +32,7 @@ impl Default for Config {
             whisper: WhisperConfig::default(),
             llm: LLMConfig::default(),
             text_correction: TextCorrectionConfig::default(),
+            feedback: FeedbackConfig::default(),
         }
     }
 }
@@ -253,6 +256,28 @@ impl Default for TextCorrectionConfig {
     }
 }
 
+/// 反馈配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeedbackConfig {
+    /// 是否启用状态栏反馈（当前实现：macOS 菜单栏）
+    pub status_bar_enabled: bool,
+    /// 是否启用录音开始/结束提示音
+    pub sound_enabled: bool,
+    /// 启动时是否提示 macOS 通知设置
+    pub notify_tip_on_start: bool,
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            status_bar_enabled: true,
+            sound_enabled: true,
+            notify_tip_on_start: true,
+        }
+    }
+}
+
 /// LLM 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -365,6 +390,9 @@ mod tests {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(config.hotkey.key, "ctrl+space");
         assert_eq!(config.audio.sample_rate, 16000);
+        assert!(config.feedback.status_bar_enabled);
+        assert!(config.feedback.sound_enabled);
+        assert!(config.feedback.notify_tip_on_start);
         assert!(
             Path::new(&config.whisper.model_path).ends_with(".echopup/models/ggml-large-v3.bin")
         );

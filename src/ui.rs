@@ -1,9 +1,13 @@
 //! 终端管理界面（TUI）
 
 use crate::config::Config;
+use crate::hotkey;
 use crate::runtime;
 use anyhow::{anyhow, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    ModifierKeyCode, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -42,7 +46,7 @@ const DOWNLOAD_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 const DOWNLOAD_NO_PROGRESS_TIMEOUT_SECS: u64 = 45;
 const DOWNLOAD_MAX_RETRIES: usize = 6;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum InputTarget {
     Hotkey,
     LlmProvider,
@@ -129,6 +133,11 @@ pub fn run_ui(config_path: &str) -> Result<()> {
     stdout
         .execute(EnterAlternateScreen)
         .context("进入备用屏幕失败")?;
+    let _ = stdout.execute(PushKeyboardEnhancementFlags(
+        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+    ));
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("初始化 TUI 终端失败")?;
@@ -136,6 +145,10 @@ pub fn run_ui(config_path: &str) -> Result<()> {
     let run_result = run_app(&mut terminal, &mut app);
 
     disable_raw_mode().ok();
+    terminal
+        .backend_mut()
+        .execute(PopKeyboardEnhancementFlags)
+        .ok();
     terminal.backend_mut().execute(LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
 
@@ -157,7 +170,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut AppState
                 }
 
                 if app.input_target.is_some() {
-                    handle_input_mode_key(app, key.code)?;
+                    handle_input_mode_event(app, key)?;
                 } else {
                     handle_menu_mode_key(app, key.code)?;
                 }
@@ -239,11 +252,25 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     frame.render_widget(detail, body_chunks[1]);
 
     let bottom_text = if let Some(target) = app.input_target {
-        format!(
-            "输入模式（{}）: {}  [Enter保存 / Esc取消]",
-            input_target_label(target),
-            app.input_buffer
-        )
+        if target == InputTarget::Hotkey {
+            let captured = if app.input_buffer.is_empty() {
+                "（未捕获）".to_string()
+            } else {
+                app.input_buffer.clone()
+            };
+            format!(
+                "热键捕获模式（{}）: {}  [按组合键捕获(最多3键) / Enter保存 / Backspace清空 / Esc取消]\n{}",
+                input_target_label(target),
+                captured,
+                hotkey::hotkey_policy_hint()
+            )
+        } else {
+            format!(
+                "输入模式（{}）: {}  [Enter保存 / Esc取消]",
+                input_target_label(target),
+                app.input_buffer
+            )
+        }
     } else {
         format!("状态: {}\n当前选中: {}", app.status, app.selected_label())
     };
@@ -299,6 +326,14 @@ fn handle_menu_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
+fn handle_input_mode_event(app: &mut AppState, key: KeyEvent) -> Result<()> {
+    if app.input_target == Some(InputTarget::Hotkey) {
+        handle_hotkey_capture_event(app, key)
+    } else {
+        handle_input_mode_key(app, key.code)
+    }
+}
+
 fn handle_input_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => {
@@ -318,6 +353,134 @@ fn handle_input_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn handle_hotkey_capture_event(app: &mut AppState, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc if key.modifiers.is_empty() => {
+            app.input_target = None;
+            app.input_buffer.clear();
+            app.status = "已取消热键编辑".to_string();
+            return Ok(());
+        }
+        KeyCode::Enter if key.modifiers.is_empty() => {
+            return apply_input(app);
+        }
+        KeyCode::Backspace if key.modifiers.is_empty() => {
+            app.input_buffer.clear();
+            app.status = "已清空捕获热键".to_string();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let Some(value) = key_event_to_hotkey(&key) else {
+        app.status = "该按键暂不支持作为热键，请换一个".to_string();
+        return Ok(());
+    };
+
+    let total_keys = hotkey_key_count(&value);
+    if total_keys > 3 {
+        app.status = format!("热键最多支持 3 个键，当前为 {} 个", total_keys);
+        return Ok(());
+    }
+
+    if let Err(err) = hotkey::validate_hotkey_config(&value) {
+        app.status = format!("热键不安全: {}", err);
+        return Ok(());
+    }
+
+    app.input_buffer = value.clone();
+    app.status = format!("已捕获热键: {}（Enter 保存）", value);
+    Ok(())
+}
+
+fn hotkey_key_count(value: &str) -> usize {
+    value.split('+').filter(|s| !s.is_empty()).count()
+}
+
+fn key_event_to_hotkey(key: &KeyEvent) -> Option<String> {
+    if let KeyCode::Modifier(modifier) = key.code {
+        return modifier_only_hotkey(modifier).map(ToOwned::to_owned);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl".to_string());
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt".to_string());
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift".to_string());
+    }
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        parts.push("super".to_string());
+    }
+
+    if let Some(main) = key_code_to_hotkey_key(key.code) {
+        parts.push(main);
+        return Some(parts.join("+"));
+    }
+
+    None
+}
+
+fn modifier_only_hotkey(modifier: ModifierKeyCode) -> Option<&'static str> {
+    match modifier {
+        ModifierKeyCode::RightControl => Some("right_ctrl"),
+        _ => None,
+    }
+}
+
+fn key_code_to_hotkey_key(code: KeyCode) -> Option<String> {
+    let key = match code {
+        KeyCode::Char(c) => return char_to_hotkey_key(c),
+        KeyCode::F(n) => return Some(format!("f{}", n)),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Tab | KeyCode::BackTab => "tab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::Insert => "insert".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Esc => "esc".to_string(),
+        KeyCode::CapsLock => "capslock".to_string(),
+        KeyCode::ScrollLock => "scrolllock".to_string(),
+        KeyCode::NumLock => "numlock".to_string(),
+        KeyCode::PrintScreen => "printscreen".to_string(),
+        KeyCode::Pause => "pause".to_string(),
+        _ => return None,
+    };
+    Some(key)
+}
+
+fn char_to_hotkey_key(c: char) -> Option<String> {
+    let key = match c {
+        'a'..='z' | '0'..='9' => c.to_string(),
+        'A'..='Z' => c.to_ascii_lowercase().to_string(),
+        ' ' => "space".to_string(),
+        '+' | '=' => "equal".to_string(),
+        '-' | '_' => "minus".to_string(),
+        ',' | '<' => "comma".to_string(),
+        '.' | '>' => "period".to_string(),
+        ';' | ':' => "semicolon".to_string(),
+        '/' | '?' => "slash".to_string(),
+        '\'' | '"' => "quote".to_string(),
+        '[' | '{' => "bracketleft".to_string(),
+        ']' | '}' => "bracketright".to_string(),
+        '\\' | '|' => "backslash".to_string(),
+        '`' | '~' => "backquote".to_string(),
+        _ => return None,
+    };
+    Some(key)
 }
 
 fn execute_menu_action(app: &mut AppState) -> Result<()> {
@@ -376,7 +539,14 @@ fn execute_menu_action(app: &mut AppState) -> Result<()> {
 fn start_input(app: &mut AppState, target: InputTarget, current_value: String) {
     app.input_target = Some(target);
     app.input_buffer = current_value;
-    app.status = format!("编辑 {}", input_target_label(target));
+    if target == InputTarget::Hotkey {
+        app.status = format!(
+            "请按下热键组合进行捕获（最多3键）。{}",
+            hotkey::hotkey_policy_hint()
+        );
+    } else {
+        app.status = format!("编辑 {}", input_target_label(target));
+    }
 }
 
 fn apply_input(app: &mut AppState) -> Result<()> {
@@ -388,6 +558,13 @@ fn apply_input(app: &mut AppState) -> Result<()> {
     if value.is_empty() {
         app.status = "输入不能为空".to_string();
         return Ok(());
+    }
+
+    if target == InputTarget::Hotkey {
+        if let Err(err) = hotkey::validate_hotkey_config(&value) {
+            app.status = format!("热键不安全: {}", err);
+            return Ok(());
+        }
     }
 
     match target {
@@ -954,7 +1131,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
     use std::sync::mpsc;
 
     fn make_app() -> AppState {
@@ -1151,5 +1328,78 @@ mod tests {
         assert_eq!(app.download_logs.len(), 2);
         assert_eq!(app.download_logs[0], "line-1");
         assert_eq!(app.download_logs[1], "line-2");
+    }
+
+    #[test]
+    fn test_key_event_to_hotkey_basic_combos() {
+        let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert_eq!(
+            key_event_to_hotkey(&ctrl_space).as_deref(),
+            Some("ctrl+space")
+        );
+
+        let ctrl_shift_a = KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            key_event_to_hotkey(&ctrl_shift_a).as_deref(),
+            Some("ctrl+shift+a")
+        );
+    }
+
+    #[test]
+    fn test_key_event_to_hotkey_modifier_only() {
+        let right_ctrl = KeyEvent::new(
+            KeyCode::Modifier(ModifierKeyCode::RightControl),
+            KeyModifiers::empty(),
+        );
+        assert_eq!(
+            key_event_to_hotkey(&right_ctrl).as_deref(),
+            Some("right_ctrl")
+        );
+    }
+
+    #[test]
+    fn test_hotkey_capture_limit_max_three_keys() {
+        let mut app = make_app();
+        app.input_target = Some(InputTarget::Hotkey);
+        app.input_buffer = "ctrl+space".to_string();
+
+        let too_many = KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+        );
+
+        handle_hotkey_capture_event(&mut app, too_many).unwrap();
+
+        assert_eq!(app.input_buffer, "ctrl+space");
+        assert!(app.status.contains("最多支持 3 个键"));
+    }
+
+    #[test]
+    fn test_hotkey_capture_rejects_unsafe_single_key() {
+        let mut app = make_app();
+        app.input_target = Some(InputTarget::Hotkey);
+        app.input_buffer = app.config.hotkey.key.clone();
+
+        let unsafe_key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
+        handle_hotkey_capture_event(&mut app, unsafe_key).unwrap();
+
+        assert_eq!(app.input_buffer, app.config.hotkey.key);
+        assert!(app.status.contains("热键不安全"));
+    }
+
+    #[test]
+    fn test_apply_input_rejects_unsafe_hotkey() {
+        let mut app = make_app();
+        app.input_target = Some(InputTarget::Hotkey);
+        app.input_buffer = "z".to_string();
+
+        apply_input(&mut app).unwrap();
+
+        assert_eq!(app.config.hotkey.key, Config::default().hotkey.key);
+        assert!(app.input_target.is_some());
+        assert!(app.status.contains("热键不安全"));
     }
 }

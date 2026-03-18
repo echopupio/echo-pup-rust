@@ -11,6 +11,7 @@ use std::time::Duration;
 
 const RUN_LOCK_FILE_NAME: &str = "echopup.lock";
 const UI_LOCK_FILE_NAME: &str = "echopup-ui.pid";
+const RUN_LOG_FILE_NAME: &str = "echopup.log";
 const STOP_WAIT_RETRY: usize = 50;
 const STOP_WAIT_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -36,6 +37,10 @@ fn runtime_dir() -> Result<PathBuf> {
 
 pub fn model_dir() -> Result<PathBuf> {
     Ok(runtime_dir_path()?.join("models"))
+}
+
+pub fn background_log_path() -> Result<PathBuf> {
+    Ok(runtime_dir_path()?.join(RUN_LOG_FILE_NAME))
 }
 
 fn lock_file_path(name: &str) -> Result<PathBuf> {
@@ -339,13 +344,21 @@ pub fn acquire_ui_guard_for_foreground() -> Result<(UiGuard, UiAcquireMode)> {
 /// 后台启动 echopup run
 pub fn spawn_background(config_path: &str) -> Result<u32> {
     let exe = std::env::current_exe().context("获取当前可执行文件路径失败")?;
+    let log_path = background_log_path()?;
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("打开后台日志文件失败: {}", log_path.display()))?;
+    let log_file_stderr = log_file.try_clone().context("克隆后台日志文件句柄失败")?;
+
     let child = Command::new(exe)
         .arg("--config")
         .arg(config_path)
         .arg("run")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_stderr))
         .spawn()
         .context("后台启动 echopup 失败")?;
 

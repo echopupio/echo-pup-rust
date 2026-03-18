@@ -18,6 +18,7 @@ AI 语音输入工具 - 按住热键说话，自动识别并输入文本
   - `pkg-config`
   - `libssl-dev`
   - `libasound2-dev`
+  - `libnotify-bin`（用于桌面通知）
 
 ## 快速开始
 
@@ -107,7 +108,21 @@ api_key_env = "OPENAI_API_KEY"
 [text_correction]
 enabled = true
 homophone_map = { "公做" = "工作", "行好" = "型号" }
+
+[feedback]
+# macOS 状态栏反馈（录音/识别状态）
+status_bar_enabled = true
+# 录音开始/结束提示音（默认开启）
+sound_enabled = true
+# 启动时显示 macOS 通知设置提示（默认开启）
+notify_tip_on_start = true
 ```
+
+热键建议与限制：
+- 推荐：`right_ctrl`（默认）
+- 允许：单独 `F1-F24`，或至少包含 `ctrl/alt/super` 的组合键
+- macOS 额外说明：`F1-F12` 可能被系统/键盘映射为媒体键，若触发不稳定建议改用 `F13-F24` 或 `ctrl+F*` 组合
+- 限制：最多 3 键；不支持仅 `shift+字母`；不建议也不允许将普通输入键（如 `z`、`space`）单独设为热键，避免影响正常打字
 
 ### 启用 LLM 整理
 
@@ -185,6 +200,15 @@ A: 检查模型文件是否存在于 `~/.echopup/models/` 目录，且 `model_pa
 
 ### Q: 录音没有声音
 A: 检查麦克风权限和系统音频配置
+
+### Q: 后台运行时没有通知提示
+A: macOS 需要系统通知权限；Linux 需要安装 `notify-send`（`libnotify-bin`）并在图形会话中运行（存在 `DISPLAY` 或 `WAYLAND_DISPLAY`）
+
+### Q: 为什么 macOS 通知来源显示为“脚本编辑器”？
+A: 当前使用 `osascript` 发送系统通知，这是 macOS 常见行为。请在“系统设置 -> 通知 -> 脚本编辑器”里开启通知并选择“横幅/提醒”；全屏下若看不到横幅，通知仍会进入通知中心。
+
+### Q: 菜单栏状态怎么理解？
+A: `⚪️ EchoPup` 表示待机，`🔴` 表示录音阶段，`🟡` 表示识别中，`🟢/🟠` 表示本次识别完成/失败；完成或失败后会自动回到待机。
 
 ## License
 

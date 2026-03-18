@@ -6,19 +6,31 @@ mod hotkey;
 mod input;
 mod llm;
 mod runtime;
+mod status_indicator;
 mod stt;
 mod ui;
 mod vad;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use parking_lot::Mutex;
 use std::io::IsTerminal;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
+
+#[cfg(target_os = "macos")]
+const MAC_OSASCRIPT_PATH: &str = "/usr/bin/osascript";
+#[cfg(target_os = "macos")]
+const MAC_AFPLAY_PATH: &str = "/usr/bin/afplay";
+#[cfg(target_os = "macos")]
+const MAC_SOUND_RECORDING_START: &str = "/System/Library/Sounds/Tink.aiff";
+#[cfg(target_os = "macos")]
+const MAC_SOUND_RECORDING_END: &str = "/System/Library/Sounds/Pop.aiff";
 
 #[derive(Parser)]
 #[command(name = "echopup")]
@@ -50,6 +62,8 @@ enum Commands {
     DownloadModel {
         size: String,
     },
+    #[command(hide = true)]
+    StatusIndicator,
 }
 
 #[derive(Subcommand)]
@@ -58,6 +72,80 @@ enum UiCommands {
     Stop,
     Status,
     Restart,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+struct TerminalEchoGuard {
+    fd: RawFd,
+    original: Option<libc::termios>,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl TerminalEchoGuard {
+    fn try_disable_stdin_echo() -> Result<Option<Self>> {
+        let fd = std::io::stdin().as_raw_fd();
+        let is_tty = unsafe { libc::isatty(fd) };
+        if is_tty != 1 {
+            return Ok(None);
+        }
+
+        let mut current = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let read_res = unsafe { libc::tcgetattr(fd, current.as_mut_ptr()) };
+        if read_res != 0 {
+            return Err(anyhow::anyhow!(
+                "读取终端属性失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let current = unsafe { current.assume_init() };
+
+        let mut no_echo = current;
+        no_echo.c_lflag &= !libc::ECHO;
+        let set_res = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &no_echo) };
+        if set_res != 0 {
+            return Err(anyhow::anyhow!(
+                "关闭终端输入回显失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        info!("终端输入回显已关闭（TTY）");
+        Ok(Some(Self {
+            fd,
+            original: Some(current),
+        }))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl Drop for TerminalEchoGuard {
+    fn drop(&mut self) {
+        if let Some(original) = self.original.as_ref() {
+            let restore_res = unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, original) };
+            if restore_res != 0 {
+                warn!("恢复终端输入回显失败: {}", std::io::Error::last_os_error());
+            } else {
+                info!("终端输入回显已恢复");
+            }
+        }
+    }
+}
+
+fn clear_terminal_artifacts_if_tty() {
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    // 尽量清掉功能键在前台终端里留下的转义序列/乱码
+    print!("\r\x1b[2K");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+}
+
+fn set_status_indicator_state(
+    indicator: &Arc<Mutex<status_indicator::StatusIndicatorClient>>,
+    state: status_indicator::IndicatorState,
+) {
+    let mut guard = indicator.lock();
+    guard.send(state);
 }
 
 /// 处理音频数据：转写 -> LLM 整理 -> 谐音纠错 -> 键盘输入
@@ -71,7 +159,7 @@ fn process_audio(
     is_vad_triggered: bool,
     e2e_start: Instant,
     desktop_notify_enabled: bool,
-) {
+) -> bool {
     let trigger_type = if is_vad_triggered {
         "VAD自动"
     } else {
@@ -81,7 +169,7 @@ fn process_audio(
     if audio_data.is_empty() {
         info!("[{}] 录音数据为空", trigger_type);
         desktop_notify(desktop_notify_enabled, "EchoPup", "未检测到语音输入");
-        return;
+        return false;
     }
     info!("[{}] 录音完成，采样点: {}", trigger_type, audio_data.len());
 
@@ -106,7 +194,7 @@ fn process_audio(
                     if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
                         info!("转写结果为空或无效（可能没有说话或音量太小）");
                         desktop_notify(desktop_notify_enabled, "EchoPup", "未识别到有效语音");
-                        return;
+                        return false;
                     }
                     info!("转写完成: {}", text);
                     final_text = text;
@@ -137,7 +225,7 @@ fn process_audio(
             type_ms,
             e2e_start.elapsed().as_millis()
         );
-        return;
+        return false;
     }
 
     // 2. LLM 整理（如果启用）
@@ -174,11 +262,13 @@ fn process_audio(
 
     // 4. 键盘输入
     let type_start = Instant::now();
+    let mut type_success = false;
     {
         let mut keyboard_guard = keyboard.lock();
         match keyboard_guard.type_text(&final_text) {
             Ok(_) => {
                 info!("文本已输入");
+                type_success = true;
                 desktop_notify(
                     desktop_notify_enabled,
                     "EchoPup",
@@ -202,6 +292,8 @@ fn process_audio(
         type_ms,
         e2e_start.elapsed().as_millis()
     );
+
+    type_success
 }
 
 fn desktop_notify(enabled: bool, title: &str, body: &str) {
@@ -209,29 +301,221 @@ fn desktop_notify(enabled: bool, title: &str, body: &str) {
         return;
     }
 
+    if let Err(err) = send_desktop_notify(title, body) {
+        warn!("桌面通知发送失败: {}", err);
+    }
+}
+
+fn detect_desktop_notify_capability() -> (bool, String) {
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("notify-send")
+        if !command_exists("notify-send") {
+            return (
+                false,
+                "未找到 notify-send（请安装 libnotify-bin）".to_string(),
+            );
+        }
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if !has_display {
+            return (
+                false,
+                "未检测到 DISPLAY/WAYLAND_DISPLAY（需要图形会话）".to_string(),
+            );
+        }
+        return (true, "linux notify-send".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if !std::path::Path::new(MAC_OSASCRIPT_PATH).is_file() {
+            return (false, format!("未找到 osascript: {}", MAC_OSASCRIPT_PATH));
+        }
+        return (true, format!("macOS osascript ({})", MAC_OSASCRIPT_PATH));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        (false, "当前系统未实现桌面通知后端".to_string())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FeedbackSoundEvent {
+    RecordingStart,
+    RecordingEnd,
+}
+
+fn detect_sound_feedback_capability(user_enabled: bool) -> (bool, String) {
+    if !user_enabled {
+        return (false, "已在配置中关闭 sound_enabled".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if !std::path::Path::new(MAC_AFPLAY_PATH).is_file() {
+            return (
+                false,
+                format!("未找到 afplay: {}（无法播放提示音）", MAC_AFPLAY_PATH),
+            );
+        }
+        return (true, format!("macOS afplay ({})", MAC_AFPLAY_PATH));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if command_exists("paplay") {
+            return (true, "linux paplay".to_string());
+        }
+        if command_exists("aplay") {
+            return (true, "linux aplay".to_string());
+        }
+        return (
+            false,
+            "未找到 paplay/aplay（请安装 pulseaudio-utils 或 alsa-utils）".to_string(),
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        (false, "当前系统未实现提示音后端".to_string())
+    }
+}
+
+fn play_feedback_sound(enabled: bool, event: FeedbackSoundEvent) {
+    if !enabled {
+        return;
+    }
+
+    if let Err(err) = send_feedback_sound(event) {
+        warn!("提示音播放失败: {}", err);
+    }
+}
+
+fn send_feedback_sound(event: FeedbackSoundEvent) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let sound_path = match event {
+            FeedbackSoundEvent::RecordingStart => MAC_SOUND_RECORDING_START,
+            FeedbackSoundEvent::RecordingEnd => MAC_SOUND_RECORDING_END,
+        };
+        if !std::path::Path::new(sound_path).is_file() {
+            anyhow::bail!("找不到系统提示音文件: {}", sound_path);
+        }
+        let _child = std::process::Command::new(MAC_AFPLAY_PATH)
+            .arg(sound_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("启动 afplay 失败")?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = if command_exists("paplay") {
+            std::process::Command::new("paplay")
+                .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .context("执行 paplay 失败")?
+        } else if command_exists("aplay") {
+            std::process::Command::new("aplay")
+                .arg("/usr/share/sounds/alsa/Front_Center.wav")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .context("执行 aplay 失败")?
+        } else {
+            anyhow::bail!("未找到 paplay/aplay");
+        };
+
+        if !status.success() {
+            anyhow::bail!("提示音命令返回非零状态: {}", status);
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = event;
+        Ok(())
+    }
+}
+
+fn print_macos_notification_setup_tip(show_tip: bool) {
+    if !show_tip {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("提示: macOS 通知由 osascript 发送，通知来源通常显示为“脚本编辑器”。");
+        println!(
+            "若全屏时看不到横幅，请到“系统设置 -> 通知 -> 脚本编辑器”开启通知，并选择“横幅”或“提醒”。"
+        );
+        println!("若仍不弹出，请检查“专注模式”和“通知摘要”设置。");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn command_exists(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.contains('/') {
+        return std::path::Path::new(name).is_file();
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| dir.join(name).is_file())
+}
+
+fn send_desktop_notify(title: &str, body: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::process::Command::new("notify-send")
             .arg("-a")
             .arg("EchoPup")
             .arg("-u")
             .arg("low")
             .arg(title)
             .arg(body)
-            .status();
+            .status()
+            .context("执行 notify-send 失败")?;
+        if !status.success() {
+            anyhow::bail!("notify-send 返回非零状态: {}", status);
+        }
+        return Ok(());
     }
 
     #[cfg(target_os = "macos")]
     {
         let escaped_title = title.replace('"', "\\\"");
         let escaped_body = body.replace('"', "\\\"");
-        let _ = std::process::Command::new("osascript")
+        let status = std::process::Command::new(MAC_OSASCRIPT_PATH)
             .arg("-e")
             .arg(format!(
                 "display notification \"{}\" with title \"{}\"",
                 escaped_body, escaped_title
             ))
-            .status();
+            .status()
+            .context("执行 osascript 失败")?;
+        if !status.success() {
+            anyhow::bail!("osascript 返回非零状态: {}", status);
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (title, body);
+        Ok(())
     }
 }
 
@@ -271,6 +555,7 @@ fn main() -> anyhow::Result<()> {
             println!("请运行: ./scripts/download_model.sh {}", size);
             println!("模型目录: ~/.echopup/models");
         }
+        Some(Commands::StatusIndicator) => status_indicator::run_status_indicator_process()?,
         None => start_background_mode(&cli.config)?,
     }
 
@@ -278,6 +563,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn start_background_mode(config_path: &str) -> Result<()> {
+    validate_hotkey_before_background_start(config_path)?;
+    let config = config::Config::load(config_path)?;
+
     if runtime::is_running()? {
         if let Some(pid) = runtime::running_instance_pid()? {
             println!("echopup 已在后台运行 (pid: {})，不会重复创建进程。", pid);
@@ -289,7 +577,10 @@ fn start_background_mode(config_path: &str) -> Result<()> {
     }
 
     let pid = runtime::spawn_background(config_path)?;
+    let log_path = runtime::background_log_path()?;
     println!("echopup 已在后台启动 (pid: {})", pid);
+    println!("日志文件: {}", log_path.display());
+    print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
     println!("可使用 `echopup ui` 管理配置。");
     Ok(())
 }
@@ -304,20 +595,43 @@ fn stop_background_mode() -> Result<()> {
 
 fn show_background_status() -> Result<()> {
     match runtime::running_instance_pid()? {
-        Some(pid) => println!("echopup 正在运行 (pid: {})", pid),
+        Some(pid) => {
+            println!("echopup 正在运行 (pid: {})", pid);
+            if let Ok(log_path) = runtime::background_log_path() {
+                println!("日志文件: {}", log_path.display());
+            }
+        }
         None => println!("echopup 未运行。"),
     }
     Ok(())
 }
 
 fn restart_background_mode(config_path: &str) -> Result<()> {
+    validate_hotkey_before_background_start(config_path)?;
+    let config = config::Config::load(config_path)?;
+
     if let Some(pid) = runtime::stop_running_instance()? {
         println!("已停止旧实例 (pid: {})", pid);
     }
 
     let pid = runtime::spawn_background(config_path)?;
+    let log_path = runtime::background_log_path()?;
     println!("echopup 已重启并在后台运行 (pid: {})", pid);
+    println!("日志文件: {}", log_path.display());
+    print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
     println!("可使用 `echopup ui` 管理配置。");
+    Ok(())
+}
+
+fn validate_hotkey_before_background_start(config_path: &str) -> Result<()> {
+    let config = config::Config::load(config_path)?;
+    if let Err(err) = hotkey::validate_hotkey_config(&config.hotkey.key) {
+        anyhow::bail!(
+            "热键配置不安全/不可用: {}。{}",
+            err,
+            hotkey::hotkey_policy_hint()
+        );
+    }
     Ok(())
 }
 
@@ -424,6 +738,41 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     }
 
     let config = config::Config::load(config_path)?;
+    if let Err(err) = hotkey::validate_hotkey_config(&config.hotkey.key) {
+        anyhow::bail!(
+            "热键配置不安全/不可用: {}。{}",
+            err,
+            hotkey::hotkey_policy_hint()
+        );
+    }
+    print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
+
+    let status_indicator = Arc::new(Mutex::new(status_indicator::StatusIndicatorClient::start(
+        config.feedback.status_bar_enabled,
+        config_path,
+    )));
+    let status_indicator_enabled = {
+        let guard = status_indicator.lock();
+        guard.is_enabled()
+    };
+    if status_indicator_enabled {
+        info!("状态栏反馈已启用: macOS 菜单栏");
+        set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
+    } else if config.feedback.status_bar_enabled {
+        warn!("状态栏反馈未启用（macOS 菜单栏子进程未启动）");
+    } else {
+        info!("状态栏反馈已关闭（feedback.status_bar_enabled=false）");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _terminal_echo_guard = match TerminalEchoGuard::try_disable_stdin_echo() {
+        Ok(guard) => guard,
+        Err(err) => {
+            warn!("无法关闭终端输入回显，将继续运行: {}", err);
+            None
+        }
+    };
+
     let whisper_cfg = config.whisper.effective();
 
     // ===== 初始化模块 =====
@@ -514,7 +863,25 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     let keyboard = Arc::new(Mutex::new(input::Keyboard::new()?));
     info!("键盘输入已初始化");
-    let desktop_notify_enabled = !std::io::stdout().is_terminal();
+
+    let (desktop_notify_enabled, notify_desc) = detect_desktop_notify_capability();
+    if desktop_notify_enabled {
+        info!("桌面通知已启用: {}", notify_desc);
+    } else {
+        warn!("桌面通知未启用: {}", notify_desc);
+    }
+    #[cfg(target_os = "macos")]
+    if desktop_notify_enabled {
+        info!("提示：macOS 通知来源显示为“脚本编辑器”属于系统行为（由 osascript 发送）");
+    }
+
+    let (sound_feedback_enabled, sound_desc) =
+        detect_sound_feedback_capability(config.feedback.sound_enabled);
+    if sound_feedback_enabled {
+        info!("提示音反馈已启用: {}", sound_desc);
+    } else {
+        warn!("提示音反馈未启用: {}", sound_desc);
+    }
 
     // ===== 状态标记 =====
     let is_recording = Arc::new(AtomicBool::new(false));
@@ -551,19 +918,38 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let is_recording_press = is_recording.clone();
     let recording_animation_press = recording_animation.clone();
     let desktop_notify_on_press = desktop_notify_enabled;
+    let sound_feedback_on_press = sound_feedback_enabled;
+    let status_indicator_on_press = status_indicator.clone();
     let press_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_press.load(Ordering::SeqCst) {
+            clear_terminal_artifacts_if_tty();
             // 启动动画
             recording_animation_press.store(true, Ordering::SeqCst);
             info!("开始录音...");
+            set_status_indicator_state(
+                &status_indicator_on_press,
+                status_indicator::IndicatorState::RecordingStart,
+            );
             match recorder_press.start() {
                 Ok(_) => {
                     is_recording_press.store(true, Ordering::SeqCst);
+                    set_status_indicator_state(
+                        &status_indicator_on_press,
+                        status_indicator::IndicatorState::Recording,
+                    );
+                    play_feedback_sound(
+                        sound_feedback_on_press,
+                        FeedbackSoundEvent::RecordingStart,
+                    );
                     desktop_notify(desktop_notify_on_press, "EchoPup", "开始录音");
                 }
                 Err(e) => {
                     error!("开始录音失败: {}", e);
                     recording_animation_press.store(false, Ordering::SeqCst);
+                    set_status_indicator_state(
+                        &status_indicator_on_press,
+                        status_indicator::IndicatorState::Failed,
+                    );
                     desktop_notify(desktop_notify_on_press, "EchoPup", "开始录音失败");
                 }
             }
@@ -580,6 +966,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let vad_triggered_release = vad_triggered.clone();
     let recording_animation_release = recording_animation.clone();
     let desktop_notify_on_release = desktop_notify_enabled;
+    let sound_feedback_on_release = sound_feedback_enabled;
+    let status_indicator_on_release = status_indicator.clone();
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         // 无论 VAD 是否触发，都需要检查是否正在录音
         if is_recording_release.load(Ordering::SeqCst) {
@@ -588,23 +976,33 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             // 停止动画
             recording_animation_release.store(false, Ordering::SeqCst);
             print!("\r"); // 清除动画行
+            clear_terminal_artifacts_if_tty();
 
             // 获取音频数据
             let audio_data = match recorder_release.stop() {
                 Ok(data) => data,
                 Err(e) => {
                     error!("停止录音失败: {}", e);
+                    set_status_indicator_state(
+                        &status_indicator_on_release,
+                        status_indicator::IndicatorState::Failed,
+                    );
                     desktop_notify(desktop_notify_on_release, "EchoPup", "停止录音失败");
                     return;
                 }
             };
+            play_feedback_sound(sound_feedback_on_release, FeedbackSoundEvent::RecordingEnd);
 
             // 检查是否由 VAD 触发
             let is_vad = vad_triggered_release.swap(false, Ordering::SeqCst);
             let e2e_start = Instant::now();
+            set_status_indicator_state(
+                &status_indicator_on_release,
+                status_indicator::IndicatorState::Transcribing,
+            );
             desktop_notify(desktop_notify_on_release, "EchoPup", "识别中...");
 
-            process_audio(
+            let ok = process_audio(
                 &audio_data,
                 &whisper_release,
                 &llm_release,
@@ -613,6 +1011,14 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 is_vad,
                 e2e_start,
                 desktop_notify_on_release,
+            );
+            set_status_indicator_state(
+                &status_indicator_on_release,
+                if ok {
+                    status_indicator::IndicatorState::Completed
+                } else {
+                    status_indicator::IndicatorState::Failed
+                },
             );
         }
     });
@@ -633,6 +1039,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let vad_triggered_callback = vad_triggered.clone();
         let vad_recording_animation = recording_animation.clone();
         let desktop_notify_on_vad = desktop_notify_enabled;
+        let sound_feedback_on_vad = sound_feedback_enabled;
+        let status_indicator_on_vad = status_indicator.clone();
 
         let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             info!("端点检测：语音结束，触发自动转写");
@@ -653,15 +1061,24 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 Ok(data) => data,
                 Err(e) => {
                     error!("VAD 停止录音失败: {}", e);
+                    set_status_indicator_state(
+                        &status_indicator_on_vad,
+                        status_indicator::IndicatorState::Failed,
+                    );
                     desktop_notify(desktop_notify_on_vad, "EchoPup", "停止录音失败");
                     return;
                 }
             };
+            play_feedback_sound(sound_feedback_on_vad, FeedbackSoundEvent::RecordingEnd);
 
             // 处理音频
             let e2e_start = Instant::now();
+            set_status_indicator_state(
+                &status_indicator_on_vad,
+                status_indicator::IndicatorState::Transcribing,
+            );
             desktop_notify(desktop_notify_on_vad, "EchoPup", "识别中...");
-            process_audio(
+            let ok = process_audio(
                 &audio_data,
                 &vad_whisper,
                 &vad_llm,
@@ -670,6 +1087,14 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 true,
                 e2e_start,
                 desktop_notify_on_vad,
+            );
+            set_status_indicator_state(
+                &status_indicator_on_vad,
+                if ok {
+                    status_indicator::IndicatorState::Completed
+                } else {
+                    status_indicator::IndicatorState::Failed
+                },
             );
         });
 
@@ -726,6 +1151,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     animation_should_stop.store(true, Ordering::SeqCst);
     recording_animation.store(false, Ordering::SeqCst);
     let _ = animation_handle.join();
+    set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
 
     info!("EchoPup 已退出");
     Ok(())
