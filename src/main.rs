@@ -1,4 +1,4 @@
-//! TypechoAI - AI Voice Dictation Tool
+//! CatEcho - AI Voice Dictation Tool
 
 mod audio;
 mod config;
@@ -18,10 +18,10 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
-#[command(name = "typechoai")]
+#[command(name = "catecho")]
 #[command(about = "AI Voice Dictation Tool", long_about = None)]
 struct Cli {
-    #[arg(short, long, default_value = "~/.typechoai/config.toml")]
+    #[arg(short, long, default_value = "~/.catecho/config.toml")]
     config: String,
 
     #[command(subcommand)]
@@ -142,7 +142,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    info!("TypechoAI 启动中...");
+    info!("CatEcho 启动中...");
 
     let cli = Cli::parse();
 
@@ -174,7 +174,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     if config::Config::is_first_run(config_path) {
         println!("");
         println!("===========================================");
-        println!("🎉 欢迎使用 TypechoAI！");
+        println!("🎉 欢迎使用 CatEcho！");
         println!("===========================================");
         println!("");
         println!("首次运行，请先配置 LLM 以启用文本整理功能。");
@@ -478,7 +478,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     info!("===========================================");
-    info!("🎤 TypechoAI 语音输入已启动");
+    info!("🎤 CatEcho 语音输入已启动");
     info!("   按住 {} 说话，松开后自动输入", config.hotkey.key);
     info!("   按 Ctrl+C 退出");
     info!("===========================================");
@@ -501,7 +501,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     recording_animation.store(false, Ordering::SeqCst);
     let _ = animation_handle.join();
 
-    info!("TypechoAI 已退出");
+    info!("CatEcho 已退出");
     Ok(())
 }
 

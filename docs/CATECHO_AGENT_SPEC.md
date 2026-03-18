@@ -1,6 +1,6 @@
-# TypechoAI Agent 实现规格
+# CatEcho Agent 实现规格
 
-**项目名称：** TypechoAI  
+**项目名称：** CatEcho  
 **项目类型：** 跨平台 AI 语音听写工具  
 **主要语言：** Rust  
 **核心流程：** 热键 -> 录音 -> Whisper 语音转文本 -> LLM 文本整理 -> 系统键盘输入
@@ -9,7 +9,7 @@
 
 ## 1. 项目目标
 
-TypechoAI 是一个跨平台 AI 语音输入工具。
+CatEcho 是一个跨平台 AI 语音输入工具。
 
 目标用户体验：
 
@@ -136,10 +136,10 @@ System Input
 
 ```toml
 [package]
-name = "typechoai"
+name = "cat-echo"
 version = "0.1.0"
 edition = "2021"
-authors = ["TypechoAI"]
+authors = ["CatEcho"]
 description = "Cross-platform AI voice dictation tool powered by Whisper + LLM + system typing"
 license = "MIT"
 
@@ -180,7 +180,7 @@ whisper-rs = "0.11"
 ## 7. 项目结构
 
 ```text
-typechoai/
+cat-echo/
 ├─ Cargo.toml
 ├─ README.md
 ├─ LICENSE
@@ -221,7 +221,7 @@ typechoai/
 │  └─ utils/
 │     ├─ mod.rs
 │     └─ paths.rs
-└─ .typechoai/
+└─ .catecho/
    └─ config.toml.example
 ```
 
@@ -232,7 +232,7 @@ typechoai/
 默认配置路径：
 
 ```text
-~/.typechoai/config.toml
+~/.catecho/config.toml
 ```
 
 示例配置：
@@ -279,27 +279,27 @@ save_debug_wav = false
 二进制名称：
 
 ```text
-typecho
+catecho
 ```
 
 命令：
 
 ```text
-typecho run
-typecho doctor
-typecho transcribe --file sample.wav
-typecho config init
-typecho config path
-typecho version
+catecho run
+catecho doctor
+catecho transcribe --file sample.wav
+catecho config init
+catecho config path
+catecho version
 ```
 
 ### 预期命令行为
 
-#### `typecho run`
+#### `catecho run`
 
 启动后台热键监听和主应用循环。
 
-#### `typecho doctor`
+#### `catecho doctor`
 
 检查项：
 
@@ -309,15 +309,15 @@ typecho version
 * 热键后端是否可用
 * 可选的 LLM 连通性
 
-#### `typecho transcribe --file sample.wav`
+#### `catecho transcribe --file sample.wav`
 
 对 WAV 文件运行 Whisper，并输出原始文本 / 清理后的文本。
 
-#### `typecho config init`
+#### `catecho config init`
 
 如果默认配置文件不存在，则创建它。
 
-#### `typecho config path`
+#### `catecho config path`
 
 输出配置文件路径。
 
@@ -426,9 +426,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "typecho")]
+#[command(name = "catecho")]
 #[command(version)]
-#[command(about = "TypechoAI voice dictation tool")]
+#[command(about = "CatEcho voice dictation tool")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -536,7 +536,7 @@ pub struct AppConfig {
 
 pub fn config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("home directory not found")?;
-    Ok(home.join(".typechoai").join("config.toml"))
+    Ok(home.join(".catecho").join("config.toml"))
 }
 
 pub fn load() -> Result<Config> {
@@ -597,7 +597,7 @@ use anyhow::Result;
 pub async fn run() -> Result<()> {
     let cfg = crate::config::load()?;
 
-    println!("Starting TypechoAI...");
+    println!("Starting CatEcho...");
     println!("Hotkey: {}", cfg.hotkey.key);
 
     // TODO:
@@ -855,7 +855,7 @@ impl HotkeyListener {
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum TypechoError {
+pub enum CatEchoError {
     #[error("microphone not available")]
     MicrophoneUnavailable,
 
@@ -1029,9 +1029,9 @@ MVP 建议：
 预期产出：
 
 * 项目可成功构建
-* `typecho config init`
-* `typecho config path`
-* `typecho version`
+* `catecho config init`
+* `catecho config path`
+* `catecho version`
 
 ### Phase 2: Implement Whisper File Transcription
 
@@ -1039,7 +1039,7 @@ MVP 建议：
 
 1. 集成 `whisper-rs`
 2. 加载模型文件
-3. 实现 `typecho transcribe --file sample.wav`
+3. 实现 `catecho transcribe --file sample.wav`
 4. 输出原始转写结果
 5. 可选输出改写后的文本
 
@@ -1144,9 +1144,9 @@ AI 编码代理应遵循以下规则：
 当以下条件全部满足时，MVP 视为完成：
 
 * `cargo build --release` 成功
-* `typecho config init` 可用
-* `typecho doctor` 能输出有价值的诊断信息
-* `typecho transcribe --file sample.wav` 能返回文本
+* `catecho config init` 可用
+* `catecho doctor` 能输出有价值的诊断信息
+* `catecho transcribe --file sample.wav` 能返回文本
 * 按下 F12 会开始录音
 * 松开 F12 会停止录音
 * 语音可通过本地 Whisper 完成转写
@@ -1192,14 +1192,14 @@ CLI + config + Whisper WAV transcription
 ## 19. 建议的 GitHub README 标语
 
 ```text
-TypechoAI — Cross-platform AI voice dictation powered by Whisper, LLM cleanup, and system typing.
+CatEcho — Cross-platform AI voice dictation powered by Whisper, LLM cleanup, and system typing.
 ```
 
 ---
 
 ## 20. 最终总结
 
-TypechoAI 是一个基于 Rust 的 AI 语音输入工具，工作流如下：
+CatEcho 是一个基于 Rust 的 AI 语音输入工具，工作流如下：
 
 ```text
 热键

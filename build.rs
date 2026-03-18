@@ -1,4 +1,4 @@
-// Build script for typechoai
+// Build script for CatEcho
 // Fixes C++ linking issues with whisper-rs-sys
 
 fn main() {

@@ -1,8 +1,8 @@
-# TypechoAI
+# CatEcho
 
 **AI Voice Dictation Tool (Whisper + LLM + System Typing)**
 
-TypechoAI 是一个 **跨平台 AI 语音输入工具**，允许用户通过语音输入文本到任意应用程序。
+CatEcho 是一个 **跨平台 AI 语音输入工具**，允许用户通过语音输入文本到任意应用程序。
 
 核心体验：
 
@@ -33,13 +33,13 @@ LLM 自动整理文本
 实现一个 **跨平台 AI 语音输入 CLI 工具**：
 
 ```
-TypechoAI
+CatEcho
 ```
 
 CLI 命令：
 
 ```
-typecho
+catecho
 ```
 
 核心功能：
@@ -130,7 +130,7 @@ global-hotkey
 推荐项目结构：
 
 ```
-typechoai/
+cat-echo/
 │
 ├─ Cargo.toml
 │
@@ -373,7 +373,7 @@ simulate keyboard typing
 配置文件：
 
 ```
-~/.typechoai/config.toml
+~/.catecho/config.toml
 ```
 
 示例：
@@ -415,10 +415,10 @@ cargo build --release
 
 | 平台          | Binary            |
 | ----------- | ----------------- |
-| Linux       | typecho-linux     |
-| macOS ARM   | typecho-macos-arm |
-| macOS Intel | typecho-macos     |
-| Windows     | typecho.exe       |
+| Linux       | catecho-linux     |
+| macOS ARM   | catecho-macos-arm |
+| macOS Intel | catecho-macos     |
+| Windows     | catecho.exe       |
 
 Whisper 模型：
 
@@ -673,7 +673,7 @@ AI Prompt Optimization
 如果你愿意，我还可以 **再帮你做一个 AI Agent 专用版本**，把这个文档升级成：
 
 ```
-TypechoAI Agent Spec
+CatEcho Agent Spec
 ```
 
 包含：
