@@ -227,6 +227,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     }
 
     let config = config::Config::load(config_path)?;
+    let whisper_cfg = config.whisper.effective();
 
     // ===== 初始化模块 =====
     let recorder = Arc::new(audio::AudioRecorder::new(
@@ -235,28 +236,35 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     )?);
     info!("音频录制器已初始化");
 
+    if let Some(profile) = config.whisper.performance_profile {
+        info!(
+            "Whisper 性能档位: {:?}，模型: {}，策略: {:?}",
+            profile, whisper_cfg.model_path, whisper_cfg.decoding_strategy
+        );
+    }
+
     let whisper = match stt::WhisperSTT::with_options(
-        &config.whisper.model_path,
-        config.whisper.language.clone(),
-        config.whisper.translate,
+        &whisper_cfg.model_path,
+        whisper_cfg.language.clone(),
+        whisper_cfg.translate,
     ) {
         Ok(mut w) => {
             // 从配置注入解码参数
-            let strategy = match config.whisper.decoding_strategy.clone() {
+            let strategy = match whisper_cfg.decoding_strategy.clone() {
                 config::WhisperDecodingStrategy::Greedy => stt::DecodingStrategy::Greedy {
-                    best_of: config.whisper.greedy_best_of,
+                    best_of: whisper_cfg.greedy_best_of,
                 },
                 config::WhisperDecodingStrategy::BeamSearch => stt::DecodingStrategy::BeamSearch {
-                    beam_size: config.whisper.beam_size,
+                    beam_size: whisper_cfg.beam_size,
                 },
             };
             w.set_decoding_strategy(strategy);
-            w.set_temperature(config.whisper.temperature);
-            w.set_no_context(config.whisper.no_context);
-            w.set_suppress_nst(config.whisper.suppress_nst);
-            w.set_n_threads(config.whisper.n_threads);
-            w.set_initial_prompt(config.whisper.initial_prompt.clone());
-            w.set_hotwords(config.whisper.hotwords.clone());
+            w.set_temperature(whisper_cfg.temperature);
+            w.set_no_context(whisper_cfg.no_context);
+            w.set_suppress_nst(whisper_cfg.suppress_nst);
+            w.set_n_threads(whisper_cfg.n_threads);
+            w.set_initial_prompt(whisper_cfg.initial_prompt.clone());
+            w.set_hotwords(whisper_cfg.hotwords.clone());
 
             info!("Whisper 已初始化");
             Some(w)
@@ -519,7 +527,8 @@ fn test_modules(config_path: &str) -> Result<()> {
     }
 
     println!("\n[3/4] 测试 Whisper...");
-    match stt::WhisperSTT::new(&config.whisper.model_path) {
+    let whisper_cfg = config.whisper.effective();
+    match stt::WhisperSTT::new(&whisper_cfg.model_path) {
         Ok(w) => {
             if w.is_ready() {
                 println!("  ✓ Whisper 模型加载成功");

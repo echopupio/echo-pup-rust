@@ -80,6 +80,8 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WhisperConfig {
+    /// 性能档位（accurate / balanced / fast）
+    pub performance_profile: Option<WhisperPerformanceProfile>,
     /// 模型路径
     pub model_path: String,
     /// 是否翻译
@@ -114,6 +116,15 @@ pub enum WhisperDecodingStrategy {
     BeamSearch,
 }
 
+/// Whisper 性能档位
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhisperPerformanceProfile {
+    Accurate,
+    Balanced,
+    Fast,
+}
+
 impl Default for WhisperDecodingStrategy {
     fn default() -> Self {
         Self::BeamSearch
@@ -123,6 +134,7 @@ impl Default for WhisperDecodingStrategy {
 impl Default for WhisperConfig {
     fn default() -> Self {
         Self {
+            performance_profile: None,
             model_path: "models/ggml-large-v3.bin".to_string(),
             translate: false,
             language: Some("zh".to_string()),
@@ -136,6 +148,35 @@ impl Default for WhisperConfig {
             initial_prompt: None,
             hotwords: Vec::new(),
         }
+    }
+}
+
+impl WhisperConfig {
+    /// 根据性能档位生成生效配置
+    pub fn effective(&self) -> Self {
+        let mut effective = self.clone();
+
+        if let Some(profile) = self.performance_profile {
+            match profile {
+                WhisperPerformanceProfile::Accurate => {
+                    effective.model_path = "models/ggml-large-v3.bin".to_string();
+                    effective.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
+                    effective.beam_size = 5;
+                }
+                WhisperPerformanceProfile::Balanced => {
+                    effective.model_path = "models/ggml-large-v3-turbo.bin".to_string();
+                    effective.decoding_strategy = WhisperDecodingStrategy::Greedy;
+                    effective.greedy_best_of = 2;
+                }
+                WhisperPerformanceProfile::Fast => {
+                    effective.model_path = "models/ggml-medium.bin".to_string();
+                    effective.decoding_strategy = WhisperDecodingStrategy::Greedy;
+                    effective.greedy_best_of = 1;
+                }
+            }
+        }
+
+        effective
     }
 }
 

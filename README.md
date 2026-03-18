@@ -68,6 +68,8 @@ sample_rate = 16000
 channels = 1
 
 [whisper]
+# 可选: "accurate" / "balanced" / "fast"
+# performance_profile = "balanced"
 model_path = "models/ggml-large-v3.bin"
 translate = false
 language = "zh"
