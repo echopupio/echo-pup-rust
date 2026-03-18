@@ -9,14 +9,14 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const RUN_LOCK_FILE_NAME: &str = "catecho.lock";
-const UI_LOCK_FILE_NAME: &str = "catecho-ui.pid";
+const RUN_LOCK_FILE_NAME: &str = "echopup.lock";
+const UI_LOCK_FILE_NAME: &str = "echopup-ui.pid";
 
 fn runtime_dir() -> Result<PathBuf> {
     let path = dirs::home_dir()
         .context("无法获取用户目录")?
-        .join(".catecho");
-    std::fs::create_dir_all(&path).context("创建 ~/.catecho 目录失败")?;
+        .join(".echopup");
+    std::fs::create_dir_all(&path).context("创建 ~/.echopup 目录失败")?;
     Ok(path)
 }
 
@@ -128,7 +128,7 @@ fn write_pid_file_create_new(path: &PathBuf, pid: u32) -> Result<bool> {
     }
 }
 
-fn is_catecho_ui_process(pid: u32) -> bool {
+fn is_echopup_ui_process(pid: u32) -> bool {
     let output = Command::new("ps")
         .arg("-p")
         .arg(pid.to_string())
@@ -139,7 +139,7 @@ fn is_catecho_ui_process(pid: u32) -> bool {
     match output {
         Ok(out) if out.status.success() => {
             let cmd = String::from_utf8_lossy(&out.stdout).to_lowercase();
-            cmd.contains("catecho") && cmd.contains(" ui")
+            cmd.contains("echopup") && cmd.contains(" ui")
         }
         _ => false,
     }
@@ -162,7 +162,7 @@ pub fn acquire_ui_guard_for_foreground() -> Result<(UiGuard, UiAcquireMode)> {
 
     if let Ok(Some(pid)) = read_pid_file(&lock_path) {
         if pid != std::process::id() {
-            if is_catecho_ui_process(pid) {
+            if is_echopup_ui_process(pid) {
                 let _ = Command::new("kill")
                     .arg("-TERM")
                     .arg(pid.to_string())
@@ -186,7 +186,7 @@ pub fn acquire_ui_guard_for_foreground() -> Result<(UiGuard, UiAcquireMode)> {
             ));
         }
         if let Ok(Some(pid)) = read_pid_file(&lock_path) {
-            if pid != current_pid && !is_catecho_ui_process(pid) {
+            if pid != current_pid && !is_echopup_ui_process(pid) {
                 let _ = std::fs::remove_file(&lock_path);
             }
         } else {
@@ -195,10 +195,10 @@ pub fn acquire_ui_guard_for_foreground() -> Result<(UiGuard, UiAcquireMode)> {
         thread::sleep(Duration::from_millis(100));
     }
 
-    anyhow::bail!("catecho ui 正在运行，且当前无法接管")
+    anyhow::bail!("echopup ui 正在运行，且当前无法接管")
 }
 
-/// 后台启动 catecho run
+/// 后台启动 echopup run
 pub fn spawn_background(config_path: &str) -> Result<u32> {
     let exe = std::env::current_exe().context("获取当前可执行文件路径失败")?;
     let child = Command::new(exe)
@@ -209,7 +209,7 @@ pub fn spawn_background(config_path: &str) -> Result<u32> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("后台启动 catecho 失败")?;
+        .context("后台启动 echopup 失败")?;
 
     Ok(child.id())
 }

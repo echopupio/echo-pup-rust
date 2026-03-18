@@ -130,7 +130,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
         ])
         .split(frame.area());
 
-    let title = Paragraph::new("CatEcho 管理界面 (catecho ui)")
+    let title = Paragraph::new("EchoPup 管理界面 (echopup ui)")
         .block(Block::default().borders(Borders::ALL).title("TUI"));
     frame.render_widget(title, chunks[0]);
 

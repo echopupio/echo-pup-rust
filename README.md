@@ -1,4 +1,4 @@
-# CatEcho
+# EchoPup
 
 AI 语音输入工具 - 按住热键说话，自动识别并输入文本
 
@@ -42,26 +42,26 @@ mkdir -p models
 cargo build --release
 
 # 测试各模块
-./target/release/catecho test
+./target/release/echopup test
 
 # 启动后台服务（默认行为）
-./target/release/catecho
+./target/release/echopup
 
 # 打开管理 TUI
-./target/release/catecho ui
+./target/release/echopup ui
 ```
 
 ## 使用方法
 
-1. 运行 `./target/release/catecho`（默认后台启动，且单实例）
-2. 如需管理配置和模型，运行 `./target/release/catecho ui`（全局单实例，重复执行会接管到当前终端）
+1. 运行 `./target/release/echopup`（默认后台启动，且单实例）
+2. 如需管理配置和模型，运行 `./target/release/echopup ui`（全局单实例，重复执行会接管到当前终端）
 3. 在需要输入文本的应用中，按住 CTRL+Space（默认热键）
 4. 对着麦克风说话
 5. 松开 CTRL+Space，识别文本将自动输入
 
 ### 配置
 
-默认配置文件: `~/.catecho/config.toml`
+默认配置文件: `~/.echopup/config.toml`
 
 ```toml
 [hotkey]
@@ -84,8 +84,8 @@ temperature = 0.0
 no_context = true
 suppress_nst = true
 n_threads = "auto"
-# initial_prompt = "可选热词：CatEcho, OpenAI, Rust, ..."
-hotwords = ["CatEcho", "OpenAI", "Rust"]
+# initial_prompt = "可选热词：EchoPup, OpenAI, Rust, ..."
+hotwords = ["EchoPup", "OpenAI", "Rust"]
 
 [llm]
 enabled = false
@@ -115,9 +115,9 @@ homophone_map = { "公做" = "工作", "行好" = "型号" }
 ## 命令行选项
 
 ```bash
-catecho - AI Voice Dictation Tool
+echopup - AI Voice Dictation Tool
 
-Usage: catecho [OPTIONS] [COMMAND]
+Usage: echopup [OPTIONS] [COMMAND]
 
 Commands:
   run              运行语音输入
@@ -127,7 +127,7 @@ Commands:
   download-model   下载 Whisper 模型
 
 Options:
-  -c, --config <CONFIG>  配置文件路径 [default: ~/.catecho/config.toml]
+  -c, --config <CONFIG>  配置文件路径 [default: ~/.echopup/config.toml]
   -h, --help            显示帮助信息
   -V, --version         显示版本信息
 ```
@@ -135,7 +135,7 @@ Options:
 ## 项目结构
 
 ```
-cat-echo/
+echo-pup-rust/
 ├── src/
 │   ├── main.rs        # 主程序入口
 │   ├── audio/         # 音频录制模块

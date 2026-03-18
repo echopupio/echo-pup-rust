@@ -1,8 +1,8 @@
-# CatEcho
+# EchoPup
 
 **AI Voice Dictation Tool (Whisper + LLM + System Typing)**
 
-CatEcho 是一个 **跨平台 AI 语音输入工具**，允许用户通过语音输入文本到任意应用程序。
+EchoPup 是一个 **跨平台 AI 语音输入工具**，允许用户通过语音输入文本到任意应用程序。
 
 核心体验：
 
@@ -33,13 +33,13 @@ LLM 自动整理文本
 实现一个 **跨平台 AI 语音输入 CLI 工具**：
 
 ```
-CatEcho
+EchoPup
 ```
 
 CLI 命令：
 
 ```
-catecho
+echopup
 ```
 
 核心功能：
@@ -130,7 +130,7 @@ global-hotkey
 推荐项目结构：
 
 ```
-cat-echo/
+echo-pup-rust/
 │
 ├─ Cargo.toml
 │
@@ -373,7 +373,7 @@ simulate keyboard typing
 配置文件：
 
 ```
-~/.catecho/config.toml
+~/.echopup/config.toml
 ```
 
 示例：
@@ -415,10 +415,10 @@ cargo build --release
 
 | 平台          | Binary            |
 | ----------- | ----------------- |
-| Linux       | catecho-linux     |
-| macOS ARM   | catecho-macos-arm |
-| macOS Intel | catecho-macos     |
-| Windows     | catecho.exe       |
+| Linux       | echopup-linux     |
+| macOS ARM   | echopup-macos-arm |
+| macOS Intel | echopup-macos     |
+| Windows     | echopup.exe       |
 
 Whisper 模型：
 
@@ -673,7 +673,7 @@ AI Prompt Optimization
 如果你愿意，我还可以 **再帮你做一个 AI Agent 专用版本**，把这个文档升级成：
 
 ```
-CatEcho Agent Spec
+EchoPup Agent Spec
 ```
 
 包含：

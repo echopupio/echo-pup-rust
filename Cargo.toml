@@ -1,11 +1,11 @@
 [package]
-name = "cat-echo"
+name = "echo-pup-rust"
 version = "0.1.0"
 edition = "2021"
-description = "CatEcho - AI Voice Dictation Tool - 按住 F12 说话，自动输入到任意应用"
+description = "EchoPup - AI Voice Dictation Tool - 按住 F12 说话，自动输入到任意应用"
 
 [[bin]]
-name = "catecho"
+name = "echopup"
 path = "src/main.rs"
 
 [dependencies]

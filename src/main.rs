@@ -1,4 +1,4 @@
-//! CatEcho - AI Voice Dictation Tool
+//! EchoPup - AI Voice Dictation Tool
 
 mod audio;
 mod config;
@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
-#[command(name = "catecho")]
+#[command(name = "echopup")]
 #[command(about = "AI Voice Dictation Tool", long_about = None)]
 struct Cli {
-    #[arg(short, long, default_value = "~/.catecho/config.toml")]
+    #[arg(short, long, default_value = "~/.echopup/config.toml")]
     config: String,
 
     #[command(subcommand)]
@@ -177,7 +177,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    info!("CatEcho 启动中...");
+    info!("EchoPup 启动中...");
 
     let cli = Cli::parse();
 
@@ -186,7 +186,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Ui) => {
             let (ui_guard, acquire_mode) = runtime::acquire_ui_guard_for_foreground()?;
             if matches!(acquire_mode, runtime::UiAcquireMode::TookOverPrevious) {
-                println!("检测到已有 catecho ui，已切换到当前终端。");
+                println!("检测到已有 echopup ui，已切换到当前终端。");
             }
             let ui_result = ui::run_ui(&cli.config);
             drop(ui_guard);
@@ -216,14 +216,14 @@ fn main() -> anyhow::Result<()> {
 
 fn start_background_mode(config_path: &str) -> Result<()> {
     if runtime::is_running()? {
-        println!("catecho 已在后台运行，不会重复创建进程。");
-        println!("可使用 `catecho ui` 管理配置。");
+        println!("echopup 已在后台运行，不会重复创建进程。");
+        println!("可使用 `echopup ui` 管理配置。");
         return Ok(());
     }
 
     let pid = runtime::spawn_background(config_path)?;
-    println!("catecho 已在后台启动 (pid: {})", pid);
-    println!("可使用 `catecho ui` 管理配置。");
+    println!("echopup 已在后台启动 (pid: {})", pid);
+    println!("可使用 `echopup ui` 管理配置。");
     Ok(())
 }
 
@@ -231,8 +231,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let _instance_guard = match runtime::InstanceGuard::try_acquire()? {
         Some(guard) => guard,
         None => {
-            println!("catecho 已在运行，不会启动新实例。");
-            println!("可使用 `catecho ui` 管理配置。");
+            println!("echopup 已在运行，不会启动新实例。");
+            println!("可使用 `echopup ui` 管理配置。");
             return Ok(());
         }
     };
@@ -241,7 +241,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     if config::Config::is_first_run(config_path) {
         println!("");
         println!("===========================================");
-        println!("🎉 欢迎使用 CatEcho！");
+        println!("🎉 欢迎使用 EchoPup！");
         println!("===========================================");
         println!("");
         println!("首次运行，请先配置 LLM 以启用文本整理功能。");
@@ -562,7 +562,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     info!("===========================================");
-    info!("🎤 CatEcho 语音输入已启动");
+    info!("🎤 EchoPup 语音输入已启动");
     info!("   按住 {} 说话，松开后自动输入", config.hotkey.key);
     info!("   按 Ctrl+C 退出");
     info!("===========================================");
@@ -585,7 +585,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     recording_animation.store(false, Ordering::SeqCst);
     let _ = animation_handle.join();
 
-    info!("CatEcho 已退出");
+    info!("EchoPup 已退出");
     Ok(())
 }
 

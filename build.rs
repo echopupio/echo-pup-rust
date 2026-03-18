@@ -1,4 +1,4 @@
-// Build script for CatEcho
+// Build script for EchoPup
 // Fixes C++ linking issues with whisper-rs-sys
 
 fn main() {

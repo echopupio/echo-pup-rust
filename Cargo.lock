@@ -185,32 +185,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cat-echo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "cpal",
- "crossterm 0.29.0",
- "ctrlc",
- "dirs",
- "enigo",
- "fs2",
- "global-hotkey",
- "hound",
- "parking_lot",
- "ratatui",
- "reqwest",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "whisper-rs",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -613,6 +587,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "echo-pup-rust"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cpal",
+ "crossterm 0.29.0",
+ "ctrlc",
+ "dirs",
+ "enigo",
+ "fs2",
+ "global-hotkey",
+ "hound",
+ "parking_lot",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "whisper-rs",
 ]
 
 [[package]]
