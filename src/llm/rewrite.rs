@@ -65,8 +65,7 @@ struct OllamaResponse {
 impl LLMRewrite {
     /// 创建新的 LLM 整理器
     pub fn new(provider: &str, api_base: &str, api_key_env: &str, model: &str) -> Result<Self> {
-        let api_key = env::var(api_key_env)
-            .unwrap_or_else(|_| String::new());
+        let api_key = env::var(api_key_env).unwrap_or_else(|_| String::new());
 
         let enabled = !api_key.is_empty();
 
@@ -125,9 +124,7 @@ impl LLMRewrite {
             return Err(anyhow::anyhow!("LLM API 错误: {} - {}", status, text));
         }
 
-        let chat_response: ChatResponse = response
-            .json()
-            .context("解析 LLM 响应失败")?;
+        let chat_response: ChatResponse = response.json().context("解析 LLM 响应失败")?;
 
         let result = chat_response
             .choices
@@ -162,9 +159,7 @@ impl LLMRewrite {
             return Err(anyhow::anyhow!("Ollama API 错误: {} - {}", status, text));
         }
 
-        let ollama_response: OllamaResponse = response
-            .json()
-            .context("解析 Ollama 响应失败")?;
+        let ollama_response: OllamaResponse = response.json().context("解析 Ollama 响应失败")?;
 
         Ok(ollama_response.response)
     }

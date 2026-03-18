@@ -32,7 +32,7 @@ sudo apt install pkg-config libssl-dev libasound2-dev
 ```bash
 # 在项目目录下
 mkdir -p models
-./scripts/download_model.sh small
+./scripts/download_model.sh large-v3
 ```
 
 ### 3. 编译运行
@@ -68,9 +68,18 @@ sample_rate = 16000
 channels = 1
 
 [whisper]
-model_path = "models/ggml-small.bin"
+model_path = "models/ggml-large-v3.bin"
 translate = false
 language = "zh"
+decoding_strategy = "beam_search"
+beam_size = 5
+greedy_best_of = 5
+temperature = 0.0
+no_context = true
+suppress_nst = true
+n_threads = 4
+# initial_prompt = "可选热词：TypechoAI, OpenAI, Rust, ..."
+hotwords = ["TypechoAI", "OpenAI", "Rust"]
 
 [llm]
 enabled = false
@@ -78,6 +87,10 @@ provider = "openai"
 model = "gpt-4o-mini"
 api_base = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+
+[text_correction]
+enabled = true
+homophone_map = { "公做" = "工作", "行好" = "型号" }
 ```
 
 ### 启用 LLM 整理
@@ -129,6 +142,10 @@ typecho_ai/
 ├── models/           # 模型文件目录
 └── Cargo.toml
 ```
+
+## 性能优化计划
+
+速度优化路线图文档：`docs/PERFORMANCE_OPTIMIZATION_ROADMAP.md`
 
 ## 常见问题
 

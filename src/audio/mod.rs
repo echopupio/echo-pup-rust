@@ -1,7 +1,7 @@
 //! 音频录制模块
 
-pub mod recorder;
 pub mod buffer;
+pub mod recorder;
 
-pub use recorder::AudioRecorder;
 pub use buffer::AudioBuffer;
+pub use recorder::AudioRecorder;

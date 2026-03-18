@@ -6,7 +6,9 @@ pub struct AudioBuffer {
 
 impl AudioBuffer {
     pub fn new() -> Self {
-        Self { samples: Vec::new() }
+        Self {
+            samples: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, sample: f32) {

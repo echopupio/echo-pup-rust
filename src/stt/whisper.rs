@@ -1,7 +1,18 @@
 //! Whisper 语音识别实现 (whisper-rs 0.16+)
 
 use anyhow::{Context, Result};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
+
+/// 解码策略
+#[derive(Debug, Clone, Copy)]
+pub enum DecodingStrategy {
+    /// 贪心解码，best_of 越高越稳
+    Greedy { best_of: i32 },
+    /// Beam Search，精度通常更好但更慢
+    BeamSearch { beam_size: i32 },
+}
 
 /// Whisper 语音识别
 pub struct WhisperSTT {
@@ -11,7 +22,12 @@ pub struct WhisperSTT {
     language: Option<String>,
     translate: bool,
     temperature: f32,
+    decoding_strategy: DecodingStrategy,
+    no_context: bool,
+    suppress_nst: bool,
+    n_threads: i32,
     initial_prompt: Option<String>,
+    hotwords: Vec<String>,
 }
 
 impl WhisperSTT {
@@ -23,13 +39,13 @@ impl WhisperSTT {
         }
 
         // 使用新版本 API 创建 context
-        let context = WhisperContext::new_with_params(
-            model_path,
-            WhisperContextParameters::default(),
-        ).map_err(|e| anyhow::anyhow!("模型加载失败: {:?}", e))?;
+        let context =
+            WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+                .map_err(|e| anyhow::anyhow!("模型加载失败: {:?}", e))?;
 
         // 预先创建 state
-        let state = context.create_state()
+        let state = context
+            .create_state()
             .map_err(|e| anyhow::anyhow!("创建 state 失败: {:?}", e))?;
 
         Ok(Self {
@@ -38,13 +54,22 @@ impl WhisperSTT {
             model_path: model_path.to_string(),
             language: Some("zh".to_string()),
             translate: false,
-            temperature: 0.0,  // 确定性输出，提高准确率
+            temperature: 0.0, // 确定性输出，提高准确率
+            decoding_strategy: DecodingStrategy::BeamSearch { beam_size: 5 },
+            no_context: true,
+            suppress_nst: true,
+            n_threads: 4,
             initial_prompt: None, // 不使用 initial_prompt，避免干扰识别
+            hotwords: Vec::new(),
         })
     }
 
     /// 创建实例并设置语言和翻译选项
-    pub fn with_options(model_path: &str, language: Option<String>, translate: bool) -> Result<Self> {
+    pub fn with_options(
+        model_path: &str,
+        language: Option<String>,
+        translate: bool,
+    ) -> Result<Self> {
         let mut instance = Self::new(model_path)?;
         instance.language = language;
         instance.translate = translate;
@@ -56,33 +81,105 @@ impl WhisperSTT {
         self.temperature = temperature;
     }
 
+    /// 设置解码策略
+    pub fn set_decoding_strategy(&mut self, strategy: DecodingStrategy) {
+        self.decoding_strategy = strategy;
+    }
+
+    /// 设置是否禁用跨段上下文
+    pub fn set_no_context(&mut self, no_context: bool) {
+        self.no_context = no_context;
+    }
+
+    /// 设置是否抑制非语音 token
+    pub fn set_suppress_nst(&mut self, suppress_nst: bool) {
+        self.suppress_nst = suppress_nst;
+    }
+
+    /// 设置线程数
+    pub fn set_n_threads(&mut self, n_threads: i32) {
+        self.n_threads = n_threads.max(1);
+    }
+
     /// 设置初始提示（帮助提高识别准确率，可传入热词列表）
     pub fn set_initial_prompt(&mut self, prompt: Option<String>) {
         self.initial_prompt = prompt;
     }
 
+    /// 设置热词词典
+    pub fn set_hotwords(&mut self, hotwords: Vec<String>) {
+        self.hotwords = hotwords;
+    }
+
+    /// 组合最终 initial prompt（用户提示词 + 热词词典）
+    fn build_initial_prompt(&self) -> Option<String> {
+        let base_prompt = self
+            .initial_prompt
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let hotwords: Vec<String> = self
+            .hotwords
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        let hotword_prompt = if hotwords.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "以下是高优先级热词，请尽量按原词输出：{}",
+                hotwords.join("、")
+            ))
+        };
+
+        match (base_prompt, hotword_prompt) {
+            (Some(base), Some(hot)) => Some(format!("{base}\n{hot}")),
+            (Some(base), None) => Some(base),
+            (None, Some(hot)) => Some(hot),
+            (None, None) => None,
+        }
+    }
+
     /// 转写音频数据
     pub fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
-        let state = self.state.as_mut()
-            .context("Whisper state 未创建")?;
-
         if audio.is_empty() {
             return Ok(String::new());
         }
 
-        // 创建转写参数
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_n_threads(4);
+        let initial_prompt = self.build_initial_prompt();
+        let state = self.state.as_mut().context("Whisper state 未创建")?;
+
+        // 创建转写参数（默认使用更稳的 Beam Search）
+        let strategy = match self.decoding_strategy {
+            DecodingStrategy::Greedy { best_of } => SamplingStrategy::Greedy {
+                best_of: best_of.max(1),
+            },
+            DecodingStrategy::BeamSearch { beam_size } => SamplingStrategy::BeamSearch {
+                beam_size: beam_size.max(1),
+                patience: -1.0,
+            },
+        };
+        let mut params = FullParams::new(strategy);
+        params.set_n_threads(self.n_threads.max(1));
         params.set_print_progress(false);
         params.set_print_timestamps(false);
         params.set_print_special(false);
+        params.set_no_timestamps(true);
+        params.set_no_context(self.no_context);
+        params.set_suppress_nst(self.suppress_nst);
+        params.set_suppress_blank(true);
 
         // 设置温度 (0.0 = 确定性输出，提高准确率)
         params.set_temperature(self.temperature);
 
         // 设置初始提示（帮助识别）
-        if let Some(ref prompt) = self.initial_prompt {
-            params.set_initial_prompt(prompt);
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(&prompt);
         }
 
         // 设置语言
@@ -100,7 +197,8 @@ impl WhisperSTT {
         params.set_translate(self.translate);
 
         // 执行转写 - 新版本 API
-        state.full(params, audio)
+        state
+            .full(params, audio)
             .map_err(|e| anyhow::anyhow!("Whisper 转写失败: {:?}", e))?;
 
         // 获取结果
@@ -146,11 +244,11 @@ impl WhisperSTT {
                 match chars.peek() {
                     Some(&next) => {
                         // 如果下一个字符是换行或结束，且当前字符不是标点，则添加句号
-                        if (next == '\n' || next.is_whitespace()) && !chinese_punctuation.contains(&c) {
+                        if (next == '\n' || next.is_whitespace())
+                            && !chinese_punctuation.contains(&c)
+                        {
                             // 检查当前字符是否已经是标点
-                            let needs_punct = !end_marks.iter().any(|&m| {
-                                result.ends_with(m)
-                            });
+                            let needs_punct = !end_marks.iter().any(|&m| result.ends_with(m));
                             if needs_punct && !c.is_whitespace() {
                                 result.push('。');
                             }

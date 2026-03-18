@@ -28,10 +28,10 @@ impl Default for VadConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            frame_size: 400,    // 25ms 帧
-            frame_shift: 160,   // 10ms 帧移
-            threshold: 0.01,    // 能量阈值
-            min_speech_frames: 10,   // 至少 100ms 的语音（减少误检）
+            frame_size: 400,        // 25ms 帧
+            frame_shift: 160,       // 10ms 帧移
+            threshold: 0.01,        // 能量阈值
+            min_speech_frames: 10,  // 至少 100ms 的语音（减少误检）
             min_silence_frames: 30, // 300ms 静音才认为语音结束（减少语音被切断）
         }
     }
@@ -90,9 +90,8 @@ impl VadDetector {
             return Vec::new();
         }
 
-        let num_frames = (audio.len().saturating_sub(self.config.frame_size))
-            / self.config.frame_shift
-            + 1;
+        let num_frames =
+            (audio.len().saturating_sub(self.config.frame_size)) / self.config.frame_shift + 1;
 
         if num_frames == 0 {
             return Vec::new();
@@ -148,8 +147,7 @@ impl VadDetector {
         if in_speech {
             let start_sample = speech_start * self.config.frame_shift;
             let end_sample = audio.len();
-            if end_sample - start_sample
-                >= self.config.min_speech_frames * self.config.frame_shift
+            if end_sample - start_sample >= self.config.min_speech_frames * self.config.frame_shift
             {
                 segments.push((start_sample, end_sample));
             }
@@ -207,10 +205,7 @@ impl VadDetector {
         }
 
         // 计算最大能量
-        let max_energy = audio
-            .iter()
-            .map(|&s| s * s)
-            .fold(0.0_f32, |a, b| a.max(b));
+        let max_energy = audio.iter().map(|&s| s * s).fold(0.0_f32, |a, b| a.max(b));
 
         if max_energy > 0.0 {
             // 阈值设为最大能量的 5%
@@ -251,7 +246,7 @@ mod tests {
         // 生成测试信号：0.1秒静音 + 0.2秒语音 + 0.1秒静音
         let mut audio = Vec::new();
         audio.extend(vec![0.0f32; 1600]); // 0.1秒静音
-        // 0.2秒语音 (正弦波)
+                                          // 0.2秒语音 (正弦波)
         for i in 0..3200 {
             let t = i as f32 / 16000.0;
             audio.push((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5);
