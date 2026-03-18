@@ -151,6 +151,8 @@ pub struct AudioRecorder {
     channels: u16,
     is_recording: Arc<AtomicBool>,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
+    captured_samples: Arc<AtomicU64>,
+    recording_started_at: Arc<Mutex<Option<Instant>>>,
     stream: Arc<Mutex<Option<Stream>>>,
     device_sample_rate: Arc<Mutex<u32>>, // 设备的实际采样率
 
@@ -232,6 +234,8 @@ impl AudioRecorder {
             channels,
             is_recording: Arc::new(AtomicBool::new(false)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            captured_samples: Arc::new(AtomicU64::new(0)),
+            recording_started_at: Arc::new(Mutex::new(None)),
             stream: Arc::new(Mutex::new(None)),
             device_sample_rate: Arc::new(Mutex::new(0)),
             gain: Arc::new(Mutex::new(1.0)), // 默认不增益
@@ -345,26 +349,42 @@ impl AudioRecorder {
         let device = host
             .default_input_device()
             .context("无法获取音频输入设备")?;
+        let device_name = device
+            .name()
+            .unwrap_or_else(|_| "unknown-input-device".to_string());
 
         let config = device.default_input_config().context("无法获取音频配置")?;
+        let sample_format = config.sample_format();
 
         let _sample_rate = self.sample_rate;
         let is_recording = self.is_recording.clone();
         let audio_buffer = self.audio_buffer.clone();
+        let captured_samples = self.captured_samples.clone();
 
         let config_clone = config.clone();
         let input_channels = config.channels() as usize;
 
         is_recording.store(true, Ordering::SeqCst);
         audio_buffer.lock().clear();
+        captured_samples.store(0, Ordering::SeqCst);
+        *self.recording_started_at.lock() = Some(Instant::now());
+
+        info!(
+            "开始录音: 设备={}, 设备采样率={}Hz, 声道={}, 格式={:?}",
+            device_name,
+            config.sample_rate().0,
+            config.channels(),
+            sample_format
+        );
 
         let err_fn = |err| eprintln!("音频流错误: {}", err);
 
         // 直接使用设备原始采样率，不做降采样
-        let stream = match config.sample_format() {
+        let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 let audio_buffer = audio_buffer.clone();
                 let is_recording = is_recording.clone();
+                let captured_samples = captured_samples.clone();
                 let gain = self.gain.clone();
                 let denoiser = self.denoiser.clone();
                 let denoise_enabled = self.denoise_enabled.clone();
@@ -390,6 +410,7 @@ impl AudioRecorder {
                                 processed = denoiser.denoise(&processed);
                             }
 
+                            captured_samples.fetch_add(processed.len() as u64, Ordering::SeqCst);
                             buffer.extend(processed);
                         }
                     },
@@ -400,6 +421,7 @@ impl AudioRecorder {
             cpal::SampleFormat::I16 => {
                 let audio_buffer = audio_buffer.clone();
                 let is_recording = is_recording.clone();
+                let captured_samples = captured_samples.clone();
                 let gain = self.gain.clone();
                 let denoiser = self.denoiser.clone();
                 let denoise_enabled = self.denoise_enabled.clone();
@@ -427,6 +449,7 @@ impl AudioRecorder {
                                 processed = denoiser.denoise(&processed);
                             }
 
+                            captured_samples.fetch_add(processed.len() as u64, Ordering::SeqCst);
                             buffer.extend(processed);
                         }
                     },
@@ -538,6 +561,12 @@ impl AudioRecorder {
         }
 
         self.is_recording.store(false, Ordering::SeqCst);
+        let elapsed_ms = self
+            .recording_started_at
+            .lock()
+            .take()
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
 
         // 停止 VAD 线程
         if let Some(handle) = self.vad_thread_handle.lock().take() {
@@ -554,6 +583,21 @@ impl AudioRecorder {
         let device_rate = *self.device_sample_rate.lock();
         if device_rate != 0 && device_rate != self.sample_rate {
             buffer = resample_audio(&buffer, device_rate, self.sample_rate);
+        }
+
+        let captured_samples = self.captured_samples.load(Ordering::SeqCst);
+        info!(
+            "停止录音: 时长={}ms, 捕获采样点={}, 重采样后采样点={}",
+            elapsed_ms,
+            captured_samples,
+            buffer.len()
+        );
+
+        if buffer.is_empty() && elapsed_ms >= 300 {
+            return Err(anyhow::anyhow!(
+                "录音 {} ms 但未收到麦克风数据，请检查系统麦克风权限和输入设备",
+                elapsed_ms
+            ));
         }
 
         Ok(buffer)

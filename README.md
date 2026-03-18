@@ -30,8 +30,7 @@ sudo apt install pkg-config libssl-dev libasound2-dev
 ### 2. 下载 Whisper 模型
 
 ```bash
-# 在项目目录下
-mkdir -p models
+# 模型将下载到 ~/.echopup/models
 ./scripts/download_model.sh large-v3
 ```
 
@@ -47,17 +46,28 @@ cargo build --release
 # 启动后台服务（默认行为）
 ./target/release/echopup
 
+# 显式启动后台服务
+./target/release/echopup start
+
+# 查看后台状态
+./target/release/echopup status
+
 # 打开管理 TUI
 ./target/release/echopup ui
+
+# 管理 TUI 生命周期
+./target/release/echopup ui status
+./target/release/echopup ui stop
+./target/release/echopup ui restart
 ```
 
 ## 使用方法
 
 1. 运行 `./target/release/echopup`（默认后台启动，且单实例）
 2. 如需管理配置和模型，运行 `./target/release/echopup ui`（全局单实例，重复执行会接管到当前终端）
-3. 在需要输入文本的应用中，按住 CTRL+Space（默认热键）
+3. 在需要输入文本的应用中，按住右 Ctrl（默认热键，配置值 `right_ctrl`）
 4. 对着麦克风说话
-5. 松开 CTRL+Space，识别文本将自动输入
+5. 松开右 Ctrl，识别文本将自动输入
 
 ### 配置
 
@@ -65,7 +75,7 @@ cargo build --release
 
 ```toml
 [hotkey]
-key = "CTRL+Space"
+key = "right_ctrl"
 
 [audio]
 sample_rate = 16000
@@ -74,7 +84,7 @@ channels = 1
 [whisper]
 # 可选: "accurate" / "balanced" / "fast"
 # performance_profile = "balanced"
-model_path = "models/ggml-large-v3.bin"
+model_path = "/home/<user>/.echopup/models/ggml-large-v3.bin"
 translate = false
 language = "zh"
 decoding_strategy = "beam_search"
@@ -121,6 +131,10 @@ Usage: echopup [OPTIONS] [COMMAND]
 
 Commands:
   run              运行语音输入
+  start            后台启动服务
+  stop             停止后台服务
+  status           查看后台服务状态
+  restart          重启后台服务
   ui               打开管理 TUI（仅管理，不执行语音输入）
   test             测试各模块
   config           配置管理
@@ -131,6 +145,8 @@ Options:
   -h, --help            显示帮助信息
   -V, --version         显示版本信息
 ```
+
+`ui` 子命令支持：`echopup ui start|stop|status|restart`（`echopup ui` 等价于 `echopup ui start`）。
 
 ## 项目结构
 
@@ -146,8 +162,13 @@ echo-pup-rust/
 │   └── stt/          # Whisper 转写模块
 ├── scripts/
 │   └── download_model.sh  # 下载模型脚本
-├── models/           # 模型文件目录
 └── Cargo.toml
+
+~/.echopup/
+├── config.toml
+├── echopup.lock
+├── echopup-ui.pid
+└── models/            # 模型文件目录
 ```
 
 ## 性能优化计划
@@ -160,7 +181,7 @@ echo-pup-rust/
 A: 确保在图形界面环境下运行，键盘模拟需要 X11
 
 ### Q: Whisper 模型加载失败
-A: 检查模型文件是否存在于 models/ 目录
+A: 检查模型文件是否存在于 `~/.echopup/models/` 目录，且 `model_path` 配置正确
 
 ### Q: 录音没有声音
 A: 检查麦克风权限和系统音频配置

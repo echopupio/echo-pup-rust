@@ -13,6 +13,7 @@ mod vad;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use parking_lot::Mutex;
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -33,10 +34,30 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Run,
-    Ui,
+    Start,
+    Stop,
+    Status,
+    Restart,
+    Ui {
+        #[command(subcommand)]
+        command: Option<UiCommands>,
+    },
     Test,
-    Config { show: bool, init: bool },
-    DownloadModel { size: String },
+    Config {
+        show: bool,
+        init: bool,
+    },
+    DownloadModel {
+        size: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UiCommands {
+    Start,
+    Stop,
+    Status,
+    Restart,
 }
 
 /// 处理音频数据：转写 -> LLM 整理 -> 谐音纠错 -> 键盘输入
@@ -49,6 +70,7 @@ fn process_audio(
     keyboard: &Arc<Mutex<input::Keyboard>>,
     is_vad_triggered: bool,
     e2e_start: Instant,
+    desktop_notify_enabled: bool,
 ) {
     let trigger_type = if is_vad_triggered {
         "VAD自动"
@@ -58,6 +80,7 @@ fn process_audio(
 
     if audio_data.is_empty() {
         info!("[{}] 录音数据为空", trigger_type);
+        desktop_notify(desktop_notify_enabled, "EchoPup", "未检测到语音输入");
         return;
     }
     info!("[{}] 录音完成，采样点: {}", trigger_type, audio_data.len());
@@ -82,6 +105,7 @@ fn process_audio(
                     let trimmed = text.trim();
                     if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
                         info!("转写结果为空或无效（可能没有说话或音量太小）");
+                        desktop_notify(desktop_notify_enabled, "EchoPup", "未识别到有效语音");
                         return;
                     }
                     info!("转写完成: {}", text);
@@ -99,6 +123,11 @@ fn process_audio(
     let stt_ms = stt_start.elapsed().as_millis();
 
     if !transcribe_success {
+        desktop_notify(
+            desktop_notify_enabled,
+            "EchoPup",
+            "语音识别失败，请查看日志",
+        );
         info!(
             "[{}] 性能埋点: stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
             trigger_type,
@@ -150,9 +179,15 @@ fn process_audio(
         match keyboard_guard.type_text(&final_text) {
             Ok(_) => {
                 info!("文本已输入");
+                desktop_notify(
+                    desktop_notify_enabled,
+                    "EchoPup",
+                    &format!("识别完成，已输入 {} 字", final_text.chars().count()),
+                );
             }
             Err(e) => {
                 error!("键盘输入失败: {}", e);
+                desktop_notify(desktop_notify_enabled, "EchoPup", "识别完成，但输入失败");
             }
         }
     }
@@ -169,6 +204,37 @@ fn process_audio(
     );
 }
 
+fn desktop_notify(enabled: bool, title: &str, body: &str) {
+    if !enabled {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .arg("-a")
+            .arg("EchoPup")
+            .arg("-u")
+            .arg("low")
+            .arg(title)
+            .arg(body)
+            .status();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let escaped_title = title.replace('"', "\\\"");
+        let escaped_body = body.replace('"', "\\\"");
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display notification \"{}\" with title \"{}\"",
+                escaped_body, escaped_title
+            ))
+            .status();
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -183,15 +249,11 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Run) => run_voice_input(&cli.config)?,
-        Some(Commands::Ui) => {
-            let (ui_guard, acquire_mode) = runtime::acquire_ui_guard_for_foreground()?;
-            if matches!(acquire_mode, runtime::UiAcquireMode::TookOverPrevious) {
-                println!("检测到已有 echopup ui，已切换到当前终端。");
-            }
-            let ui_result = ui::run_ui(&cli.config);
-            drop(ui_guard);
-            ui_result?;
-        }
+        Some(Commands::Start) => start_background_mode(&cli.config)?,
+        Some(Commands::Stop) => stop_background_mode()?,
+        Some(Commands::Status) => show_background_status()?,
+        Some(Commands::Restart) => restart_background_mode(&cli.config)?,
+        Some(Commands::Ui { command }) => handle_ui_command(&cli.config, command)?,
         Some(Commands::Test) => test_modules(&cli.config)?,
         Some(Commands::Config { show, init }) => {
             if init {
@@ -207,6 +269,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::DownloadModel { size }) => {
             info!("下载 Whisper {} 模型", size);
             println!("请运行: ./scripts/download_model.sh {}", size);
+            println!("模型目录: ~/.echopup/models");
         }
         None => start_background_mode(&cli.config)?,
     }
@@ -216,7 +279,11 @@ fn main() -> anyhow::Result<()> {
 
 fn start_background_mode(config_path: &str) -> Result<()> {
     if runtime::is_running()? {
-        println!("echopup 已在后台运行，不会重复创建进程。");
+        if let Some(pid) = runtime::running_instance_pid()? {
+            println!("echopup 已在后台运行 (pid: {})，不会重复创建进程。", pid);
+        } else {
+            println!("echopup 已在后台运行，不会重复创建进程。");
+        }
         println!("可使用 `echopup ui` 管理配置。");
         return Ok(());
     }
@@ -225,6 +292,69 @@ fn start_background_mode(config_path: &str) -> Result<()> {
     println!("echopup 已在后台启动 (pid: {})", pid);
     println!("可使用 `echopup ui` 管理配置。");
     Ok(())
+}
+
+fn stop_background_mode() -> Result<()> {
+    match runtime::stop_running_instance()? {
+        Some(pid) => println!("echopup 已停止 (pid: {})", pid),
+        None => println!("echopup 未在运行。"),
+    }
+    Ok(())
+}
+
+fn show_background_status() -> Result<()> {
+    match runtime::running_instance_pid()? {
+        Some(pid) => println!("echopup 正在运行 (pid: {})", pid),
+        None => println!("echopup 未运行。"),
+    }
+    Ok(())
+}
+
+fn restart_background_mode(config_path: &str) -> Result<()> {
+    if let Some(pid) = runtime::stop_running_instance()? {
+        println!("已停止旧实例 (pid: {})", pid);
+    }
+
+    let pid = runtime::spawn_background(config_path)?;
+    println!("echopup 已重启并在后台运行 (pid: {})", pid);
+    println!("可使用 `echopup ui` 管理配置。");
+    Ok(())
+}
+
+fn handle_ui_command(config_path: &str, command: Option<UiCommands>) -> Result<()> {
+    match command.unwrap_or(UiCommands::Start) {
+        UiCommands::Start => run_ui_foreground(config_path),
+        UiCommands::Stop => {
+            match runtime::stop_ui_instance()? {
+                Some(pid) => println!("echopup ui 已停止 (pid: {})", pid),
+                None => println!("echopup ui 未运行。"),
+            }
+            Ok(())
+        }
+        UiCommands::Status => {
+            match runtime::ui_running_pid()? {
+                Some(pid) => println!("echopup ui 正在运行 (pid: {})", pid),
+                None => println!("echopup ui 未运行。"),
+            }
+            Ok(())
+        }
+        UiCommands::Restart => {
+            if let Some(pid) = runtime::stop_ui_instance()? {
+                println!("已停止旧的 echopup ui (pid: {})", pid);
+            }
+            run_ui_foreground(config_path)
+        }
+    }
+}
+
+fn run_ui_foreground(config_path: &str) -> Result<()> {
+    let (ui_guard, acquire_mode) = runtime::acquire_ui_guard_for_foreground()?;
+    if matches!(acquire_mode, runtime::UiAcquireMode::TookOverPrevious) {
+        println!("检测到已有 echopup ui，已切换到当前终端。");
+    }
+    let ui_result = ui::run_ui(config_path);
+    drop(ui_guard);
+    ui_result
 }
 
 fn run_voice_input(config_path: &str) -> Result<()> {
@@ -384,6 +514,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     let keyboard = Arc::new(Mutex::new(input::Keyboard::new()?));
     info!("键盘输入已初始化");
+    let desktop_notify_enabled = !std::io::stdout().is_terminal();
 
     // ===== 状态标记 =====
     let is_recording = Arc::new(AtomicBool::new(false));
@@ -419,6 +550,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let recorder_press = recorder.clone();
     let is_recording_press = is_recording.clone();
     let recording_animation_press = recording_animation.clone();
+    let desktop_notify_on_press = desktop_notify_enabled;
     let press_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_press.load(Ordering::SeqCst) {
             // 启动动画
@@ -427,10 +559,12 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             match recorder_press.start() {
                 Ok(_) => {
                     is_recording_press.store(true, Ordering::SeqCst);
+                    desktop_notify(desktop_notify_on_press, "EchoPup", "开始录音");
                 }
                 Err(e) => {
                     error!("开始录音失败: {}", e);
                     recording_animation_press.store(false, Ordering::SeqCst);
+                    desktop_notify(desktop_notify_on_press, "EchoPup", "开始录音失败");
                 }
             }
         }
@@ -445,6 +579,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let is_recording_release = is_recording.clone();
     let vad_triggered_release = vad_triggered.clone();
     let recording_animation_release = recording_animation.clone();
+    let desktop_notify_on_release = desktop_notify_enabled;
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         // 无论 VAD 是否触发，都需要检查是否正在录音
         if is_recording_release.load(Ordering::SeqCst) {
@@ -459,6 +594,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 Ok(data) => data,
                 Err(e) => {
                     error!("停止录音失败: {}", e);
+                    desktop_notify(desktop_notify_on_release, "EchoPup", "停止录音失败");
                     return;
                 }
             };
@@ -466,6 +602,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             // 检查是否由 VAD 触发
             let is_vad = vad_triggered_release.swap(false, Ordering::SeqCst);
             let e2e_start = Instant::now();
+            desktop_notify(desktop_notify_on_release, "EchoPup", "识别中...");
 
             process_audio(
                 &audio_data,
@@ -475,6 +612,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &keyboard_release,
                 is_vad,
                 e2e_start,
+                desktop_notify_on_release,
             );
         }
     });
@@ -494,6 +632,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let vad_is_recording = is_recording.clone();
         let vad_triggered_callback = vad_triggered.clone();
         let vad_recording_animation = recording_animation.clone();
+        let desktop_notify_on_vad = desktop_notify_enabled;
 
         let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             info!("端点检测：语音结束，触发自动转写");
@@ -514,12 +653,14 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 Ok(data) => data,
                 Err(e) => {
                     error!("VAD 停止录音失败: {}", e);
+                    desktop_notify(desktop_notify_on_vad, "EchoPup", "停止录音失败");
                     return;
                 }
             };
 
             // 处理音频
             let e2e_start = Instant::now();
+            desktop_notify(desktop_notify_on_vad, "EchoPup", "识别中...");
             process_audio(
                 &audio_data,
                 &vad_whisper,
@@ -528,6 +669,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &vad_keyboard,
                 true,
                 e2e_start,
+                desktop_notify_on_vad,
             );
         });
 

@@ -9,7 +9,8 @@
 
 set -u
 
-MODEL_DIR="$(cd "$(dirname "$0")/../models" && pwd)"
+HOME_DIR="${HOME:-$(cd ~ && pwd)}"
+MODEL_DIR="${HOME_DIR}/.echopup/models"
 mkdir -p "$MODEL_DIR"
 
 INPUT_SIZE="${1:-large-v3}"

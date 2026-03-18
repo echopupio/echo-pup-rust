@@ -44,9 +44,13 @@ pub struct HotkeyConfig {
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let default_hotkey = "right_ctrl";
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let default_hotkey = "ctrl+space";
+
         Self {
-            // 使用 ctrl+space，这是最常见的语音输入热键
-            key: "ctrl+space".to_string(),
+            key: default_hotkey.to_string(),
         }
     }
 }
@@ -166,11 +170,21 @@ impl Default for WhisperDecodingStrategy {
     }
 }
 
+fn default_whisper_model_path(file_name: &str) -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".echopup")
+        .join("models")
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl Default for WhisperConfig {
     fn default() -> Self {
         Self {
             performance_profile: None,
-            model_path: "models/ggml-large-v3.bin".to_string(),
+            model_path: default_whisper_model_path("ggml-large-v3.bin"),
             translate: false,
             language: Some("zh".to_string()),
             decoding_strategy: WhisperDecodingStrategy::BeamSearch,
@@ -194,17 +208,17 @@ impl WhisperConfig {
         if let Some(profile) = self.performance_profile {
             match profile {
                 WhisperPerformanceProfile::Accurate => {
-                    effective.model_path = "models/ggml-large-v3.bin".to_string();
+                    effective.model_path = default_whisper_model_path("ggml-large-v3.bin");
                     effective.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
                     effective.beam_size = 5;
                 }
                 WhisperPerformanceProfile::Balanced => {
-                    effective.model_path = "models/ggml-large-v3-turbo.bin".to_string();
+                    effective.model_path = default_whisper_model_path("ggml-large-v3-turbo.bin");
                     effective.decoding_strategy = WhisperDecodingStrategy::Greedy;
                     effective.greedy_best_of = 2;
                 }
                 WhisperPerformanceProfile::Fast => {
-                    effective.model_path = "models/ggml-medium.bin".to_string();
+                    effective.model_path = default_whisper_model_path("ggml-medium.bin");
                     effective.decoding_strategy = WhisperDecodingStrategy::Greedy;
                     effective.greedy_best_of = 1;
                 }
@@ -341,11 +355,26 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_default_config() {
         let config = Config::default();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(config.hotkey.key, "right_ctrl");
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(config.hotkey.key, "ctrl+space");
         assert_eq!(config.audio.sample_rate, 16000);
+        assert!(
+            Path::new(&config.whisper.model_path).ends_with(".echopup/models/ggml-large-v3.bin")
+        );
+    }
+
+    #[test]
+    fn test_effective_profile_model_path() {
+        let mut whisper = WhisperConfig::default();
+        whisper.performance_profile = Some(WhisperPerformanceProfile::Fast);
+        let effective = whisper.effective();
+        assert!(Path::new(&effective.model_path).ends_with(".echopup/models/ggml-medium.bin"));
     }
 }
