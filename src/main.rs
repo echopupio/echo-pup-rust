@@ -262,10 +262,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             w.set_temperature(whisper_cfg.temperature);
             w.set_no_context(whisper_cfg.no_context);
             w.set_suppress_nst(whisper_cfg.suppress_nst);
-            w.set_n_threads(whisper_cfg.n_threads);
+            let resolved_n_threads = whisper_cfg.resolved_n_threads();
+            w.set_n_threads(resolved_n_threads);
             w.set_initial_prompt(whisper_cfg.initial_prompt.clone());
             w.set_hotwords(whisper_cfg.hotwords.clone());
 
+            info!(
+                "Whisper 线程数: {} (配置: {:?})",
+                resolved_n_threads, whisper_cfg.n_threads
+            );
             info!("Whisper 已初始化");
             Some(w)
         }

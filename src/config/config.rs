@@ -100,8 +100,8 @@ pub struct WhisperConfig {
     pub no_context: bool,
     /// 抑制非语音标记 token
     pub suppress_nst: bool,
-    /// 解码线程数
-    pub n_threads: i32,
+    /// 解码线程数，支持整数或 "auto"
+    pub n_threads: WhisperThreadSetting,
     /// 可选初始提示词（可放业务热词）
     pub initial_prompt: Option<String>,
     /// 热词列表（用于增强特定词汇的识别优先级）
@@ -125,6 +125,41 @@ pub enum WhisperPerformanceProfile {
     Fast,
 }
 
+/// Whisper 线程配置，支持固定值和自动模式
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WhisperThreadSetting {
+    Fixed(i32),
+    Mode(String),
+}
+
+impl Default for WhisperThreadSetting {
+    fn default() -> Self {
+        Self::Mode("auto".to_string())
+    }
+}
+
+impl WhisperThreadSetting {
+    /// 解析最终线程数
+    pub fn resolve(&self) -> i32 {
+        match self {
+            WhisperThreadSetting::Fixed(n) => (*n).max(1),
+            WhisperThreadSetting::Mode(mode) => {
+                if mode.eq_ignore_ascii_case("auto") {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get() as i32)
+                        .unwrap_or(4)
+                        .max(1)
+                } else if let Ok(parsed) = mode.parse::<i32>() {
+                    parsed.max(1)
+                } else {
+                    4
+                }
+            }
+        }
+    }
+}
+
 impl Default for WhisperDecodingStrategy {
     fn default() -> Self {
         Self::BeamSearch
@@ -144,7 +179,7 @@ impl Default for WhisperConfig {
             temperature: 0.0,
             no_context: true,
             suppress_nst: true,
-            n_threads: 4,
+            n_threads: WhisperThreadSetting::default(),
             initial_prompt: None,
             hotwords: Vec::new(),
         }
@@ -177,6 +212,11 @@ impl WhisperConfig {
         }
 
         effective
+    }
+
+    /// 解析生效线程数
+    pub fn resolved_n_threads(&self) -> i32 {
+        self.n_threads.resolve()
     }
 }
 

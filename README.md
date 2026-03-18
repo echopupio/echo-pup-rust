@@ -79,7 +79,7 @@ greedy_best_of = 5
 temperature = 0.0
 no_context = true
 suppress_nst = true
-n_threads = 4
+n_threads = "auto"
 # initial_prompt = "可选热词：CatEcho, OpenAI, Rust, ..."
 hotwords = ["CatEcho", "OpenAI", "Rust"]
 
