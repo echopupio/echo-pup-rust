@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "EchoPup - AI Voice Dictation Tool - 按住 F12 说话，自动输入到任意应用"
 
+[features]
+default = []
+cargo-clippy = []
+
 [[bin]]
 name = "echopup"
 path = "src/main.rs"
@@ -16,6 +20,7 @@ ratatui = "0.29"
 
 # 配置
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
 
 # 日志

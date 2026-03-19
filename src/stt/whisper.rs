@@ -1,4 +1,5 @@
 //! Whisper 语音识别实现 (whisper-rs 0.16+)
+#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use whisper_rs::{

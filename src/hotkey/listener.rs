@@ -1,4 +1,5 @@
 //! 热键监听器 - 默认使用 global-hotkey，右 Ctrl 使用低层键盘事件监听
+#![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};

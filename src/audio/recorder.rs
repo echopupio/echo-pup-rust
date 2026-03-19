@@ -1,4 +1,5 @@
 //! 音频录制器
+#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

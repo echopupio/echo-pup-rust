@@ -308,6 +308,7 @@ impl Default for LLMConfig {
 
 impl Config {
     /// 获取默认配置路径
+    #[allow(dead_code)]
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))

@@ -1,4 +1,5 @@
 //! 音频缓冲区
+#![allow(dead_code)]
 
 pub struct AudioBuffer {
     samples: Vec<f32>,

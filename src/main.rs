@@ -5,6 +5,8 @@ mod config;
 mod hotkey;
 mod input;
 mod llm;
+mod menu_core;
+mod model_download;
 mod runtime;
 mod status_indicator;
 mod stt;
@@ -581,6 +583,7 @@ fn start_background_mode(config_path: &str) -> Result<()> {
     println!("echopup 已在后台启动 (pid: {})", pid);
     println!("日志文件: {}", log_path.display());
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
+
     println!("可使用 `echopup ui` 管理配置。");
     Ok(())
 }
@@ -745,6 +748,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             hotkey::hotkey_policy_hint()
         );
     }
+    let mut menu_runtime = menu_core::MenuCore::new(config_path)?;
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
 
     let status_indicator = Arc::new(Mutex::new(status_indicator::StatusIndicatorClient::start(
@@ -758,6 +762,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     if status_indicator_enabled {
         info!("状态栏反馈已启用: macOS 菜单栏");
         set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
+        let snapshot = menu_runtime.snapshot();
+        let mut guard = status_indicator.lock();
+        guard.send_snapshot(&snapshot);
     } else if config.feedback.status_bar_enabled {
         warn!("状态栏反馈未启用（macOS 菜单栏子进程未启动）");
     } else {
@@ -1136,6 +1143,24 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     // ===== 主循环 =====
     loop {
+        {
+            let mut guard = status_indicator.lock();
+            while let Some(action) = guard.try_recv_action() {
+                let result = menu_runtime.execute(action);
+                guard.send_action_result(&result);
+                if result.quit_ui {
+                    guard.close_ui();
+                    break;
+                }
+            }
+        }
+
+        if menu_runtime.poll_download_events() {
+            let snapshot = menu_runtime.snapshot();
+            let mut guard = status_indicator.lock();
+            guard.send_snapshot(&snapshot);
+        }
+
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 info!("收到退出信号，正在优雅退出...");
