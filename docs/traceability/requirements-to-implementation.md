@@ -11,6 +11,10 @@
 | R-005 | 热键配置安全校验 | `design/system-design-v1.md` 第 5 节 | `src/hotkey/listener.rs`, `src/ui.rs` | hotkey 相关单测 | 已实现 |
 | R-006 | 多通道反馈（状态栏/通知/提示音） | `design/system-design-v1.md` 第 1/4 节 | `src/main.rs`, `src/status_indicator.rs` | macOS 手工验证 | 已实现 |
 | R-007 | 文档治理与同步机制 | `docs/README.md` | `docs/*` | 文档审计与变更日志 | 已实现 |
+| R-008 | 热键触发模式可切换（长按模式/按压切换模式）且阈值 1 秒 | `design/system-design-v1.md` 第 2/4 节 | `src/config/config.rs`, `src/menu_core.rs`, `src/main.rs`, `src/status_indicator.rs` | `menu_core` 单测 + `cargo test -q`（40 passed） | 已实现 |
+| R-009 | 录音触发在按下/释放边界上保持稳定，不因抖动误停止 | `architecture/technical-solution-v1.md` 第 2/4 节 | `src/main.rs`, `src/hotkey/listener.rs` | `cargo test -q` + 手工回归 | 已实现 |
+| R-010 | 状态栏空闲态紧凑、激活态边缘脉动反馈且支持自适应占位 | `design/system-design-v1.md` 第 4 节 | `src/status_indicator.rs`, `assets/logo.png`, `assets/mic.png` | macOS 手工验证 + `cargo test -q` | 已实现 |
+| R-011 | 下载在代理异常环境下可回退直连并清理异常临时文件 | `architecture/technical-solution-v1.md` 第 4 节 | `src/model_download.rs` | `cargo test -q` + 下载日志核对 | 已实现 |
 
 ## 说明
 

@@ -17,6 +17,7 @@
 - `architecture/status-bar-menu-sync-plan-v1.md`
 - `architecture/performance-optimization-roadmap-v1.md`
 - `adr/README.md`
+- `adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md`
 
 ## 3. 接口与运维层
 
