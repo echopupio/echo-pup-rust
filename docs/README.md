@@ -18,6 +18,7 @@
 
 - `architecture/status-bar-menu-sync-plan-v1.md` - 状态栏菜单与 TUI 功能同步实施方案。
 - `architecture/performance-optimization-roadmap-v1.md` - 性能优化路线图。
+- `adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md` - 热键双模式与状态栏自适应占位决策。
 
 ## 人类可读文档
 
