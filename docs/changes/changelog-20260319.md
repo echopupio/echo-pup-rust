@@ -104,3 +104,11 @@
   - `docs/traceability/requirements-to-implementation.md`
 - 新增：
   - `docs/adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md`
+
+## 需求池记录（待后续实现）
+
+- 新增待实现需求：录音过程中实时输出识别文本（流式转写预览）。
+  - 记录位置：
+    - `docs/human-doc/PRD.md`
+    - `docs/requirements/PRD.md`（R-012）
+    - `docs/traceability/requirements-to-implementation.md`（R-012，状态=规划中）
