@@ -1,7 +1,10 @@
 //! 终端管理界面（TUI）
 
 use crate::hotkey;
-use crate::menu_core::{EditableField, MenuAction, MenuCore, MENU_ITEMS};
+use crate::menu_core::{
+    model_size_from_file_name, whisper_model_path_from_file_name, EditableField, MenuAction,
+    MenuCore, DOWNLOAD_MODEL_SIZES, MENU_ITEMS, WHISPER_MODEL_FILES,
+};
 use crate::model_download;
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{
@@ -25,7 +28,58 @@ struct AppState {
     selected: usize,
     input_target: Option<EditableField>,
     input_buffer: String,
+    llm_form: Option<LlmFormDraft>,
     should_quit: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LlmFormDraft {
+    provider: String,
+    model: String,
+    api_base: String,
+    api_key_env: String,
+    step: usize,
+}
+
+impl LlmFormDraft {
+    fn current_field(&self) -> EditableField {
+        match self.step {
+            0 => EditableField::LlmProvider,
+            1 => EditableField::LlmModel,
+            2 => EditableField::LlmApiBase,
+            _ => EditableField::LlmApiKeyEnv,
+        }
+    }
+
+    fn current_value(&self) -> String {
+        match self.current_field() {
+            EditableField::LlmProvider => self.provider.clone(),
+            EditableField::LlmModel => self.model.clone(),
+            EditableField::LlmApiBase => self.api_base.clone(),
+            EditableField::LlmApiKeyEnv => self.api_key_env.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn set_current_value(&mut self, value: String) {
+        match self.current_field() {
+            EditableField::LlmProvider => self.provider = value,
+            EditableField::LlmModel => self.model = value,
+            EditableField::LlmApiBase => self.api_base = value,
+            EditableField::LlmApiKeyEnv => self.api_key_env = value,
+            _ => {}
+        }
+    }
+
+    fn current_label(&self) -> &'static str {
+        match self.current_field() {
+            EditableField::LlmProvider => "llm.provider",
+            EditableField::LlmModel => "llm.model",
+            EditableField::LlmApiBase => "llm.api_base",
+            EditableField::LlmApiKeyEnv => "llm.api_key_env",
+            _ => "llm",
+        }
+    }
 }
 
 impl AppState {
@@ -35,6 +89,7 @@ impl AppState {
             selected: 0,
             input_target: None,
             input_buffer: String::new(),
+            llm_form: None,
             should_quit: false,
         })
     }
@@ -260,6 +315,7 @@ fn handle_input_mode_event(app: &mut AppState, key: KeyEvent) -> Result<()> {
 fn handle_input_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => {
+            app.llm_form = None;
             app.input_target = None;
             app.input_buffer.clear();
             app.menu.set_status("已取消编辑");
@@ -420,33 +476,10 @@ fn execute_menu_action(app: &mut AppState) {
             app.menu.execute(MenuAction::ToggleVadEnabled);
         }
         3 => start_input(app, EditableField::Hotkey),
-        4 => start_input(app, EditableField::LlmProvider),
-        5 => start_input(app, EditableField::LlmModel),
-        6 => start_input(app, EditableField::LlmApiBase),
-        7 => start_input(app, EditableField::LlmApiKeyEnv),
-        8 => start_input(app, EditableField::WhisperModelPath),
-        9 => {
-            app.menu.execute(MenuAction::DownloadModel {
-                size: "large-v3".to_string(),
-            });
-        }
-        10 => {
-            app.menu.execute(MenuAction::DownloadModel {
-                size: "turbo".to_string(),
-            });
-        }
-        11 => {
-            app.menu.execute(MenuAction::DownloadModel {
-                size: "medium".to_string(),
-            });
-        }
-        12 => {
-            app.menu.execute(MenuAction::RefreshLocalModels);
-        }
-        13 => {
-            app.menu.execute(MenuAction::SaveConfig);
-        }
-        14 => {
+        4 => start_llm_form(app),
+        5 => switch_whisper_model(app),
+        6 => start_download_model(app),
+        7 => {
             let result = app.menu.execute(MenuAction::QuitUi);
             if result.quit_ui {
                 app.should_quit = true;
@@ -470,22 +503,120 @@ fn start_input(app: &mut AppState, target: EditableField) {
     }
 }
 
+fn start_llm_form(app: &mut AppState) {
+    let snapshot = app.menu.snapshot();
+    let form = LlmFormDraft {
+        provider: snapshot.llm_provider,
+        model: snapshot.llm_model,
+        api_base: snapshot.llm_api_base,
+        api_key_env: snapshot.llm_api_key_env,
+        step: 0,
+    };
+    app.llm_form = Some(form.clone());
+    app.input_target = Some(form.current_field());
+    app.input_buffer = form.current_value();
+    app.menu
+        .set_status("LLM 配置表单（1/4）：编辑 llm.provider");
+}
+
+fn switch_whisper_model(app: &mut AppState) {
+    let snapshot = app.menu.snapshot();
+    let current_file = std::path::Path::new(&snapshot.whisper_model_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let mut options = snapshot
+        .local_models
+        .into_iter()
+        .filter(|name| name.ends_with(".bin"))
+        .collect::<Vec<_>>();
+    for model in WHISPER_MODEL_FILES {
+        if !options.iter().any(|m| m == model) {
+            options.push(model.to_string());
+        }
+    }
+    options.sort();
+    options.dedup();
+    if options.is_empty() {
+        app.menu.set_status("未发现可切换的 Whisper 模型");
+        return;
+    }
+
+    let current_index = options.iter().position(|m| m == current_file).unwrap_or(0);
+    let next_file = options[(current_index + 1) % options.len()].clone();
+    match whisper_model_path_from_file_name(&next_file) {
+        Ok(model_path) => {
+            app.menu
+                .execute(MenuAction::SwitchWhisperModel { model_path });
+        }
+        Err(err) => {
+            app.menu
+                .set_status(format!("切换 Whisper 模型失败: {}", err));
+        }
+    }
+}
+
+fn start_download_model(app: &mut AppState) {
+    let snapshot = app.menu.snapshot();
+    let current_file = std::path::Path::new(&snapshot.whisper_model_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let preferred = model_size_from_file_name(current_file)
+        .unwrap_or(DOWNLOAD_MODEL_SIZES[0])
+        .to_string();
+    app.menu
+        .execute(MenuAction::DownloadModel { size: preferred });
+}
+
 fn apply_input(app: &mut AppState) -> Result<()> {
     let target = app
         .input_target
         .ok_or_else(|| anyhow!("当前不在输入模式"))?;
     let value = app.input_buffer.trim().to_string();
 
+    if let Some(form) = app.llm_form.as_mut() {
+        if value.is_empty() && target != EditableField::LlmApiKeyEnv {
+            app.menu
+                .set_status(format!("{} 不能为空", form.current_label()));
+            return Ok(());
+        }
+
+        form.set_current_value(value);
+        if form.step < 3 {
+            form.step += 1;
+            app.input_target = Some(form.current_field());
+            app.input_buffer = form.current_value();
+            app.menu.set_status(format!(
+                "LLM 配置表单（{}/4）：编辑 {}",
+                form.step + 1,
+                form.current_label()
+            ));
+            return Ok(());
+        }
+
+        let result = app.menu.execute(MenuAction::SetLlmConfig {
+            provider: form.provider.clone(),
+            model: form.model.clone(),
+            api_base: form.api_base.clone(),
+            api_key_env: form.api_key_env.clone(),
+        });
+        if result.ok {
+            app.llm_form = None;
+            app.input_target = None;
+            app.input_buffer.clear();
+        }
+        return Ok(());
+    }
+
     let result = app.menu.execute(MenuAction::SetField {
         field: target,
         value,
     });
-
     if result.ok {
         app.input_target = None;
         app.input_buffer.clear();
     }
-
     Ok(())
 }
 
@@ -504,13 +635,26 @@ fn input_target_label(target: EditableField) -> &'static str {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config_path() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("echopup-ui-test-{}.toml", nanos))
+            .display()
+            .to_string()
+    }
 
     fn make_app() -> AppState {
         AppState {
-            menu: MenuCore::new("/tmp/echopup-ui-test.toml").unwrap(),
+            menu: MenuCore::new(&temp_config_path()).unwrap(),
             selected: 0,
             input_target: None,
             input_buffer: String::new(),
+            llm_form: None,
             should_quit: false,
         }
     }
@@ -532,22 +676,31 @@ mod tests {
     #[test]
     fn test_apply_input_to_llm_model() {
         let mut app = make_app();
+        app.llm_form = Some(LlmFormDraft {
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            step: 1,
+        });
         app.input_target = Some(EditableField::LlmModel);
         app.input_buffer = "  gpt-test-model  ".to_string();
 
         apply_input(&mut app).unwrap();
-
-        assert_eq!(
-            app.menu.current_value(EditableField::LlmModel),
-            "gpt-test-model"
-        );
-        assert!(app.input_target.is_none());
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_target, Some(EditableField::LlmApiBase));
+        assert_eq!(app.input_buffer, "https://api.openai.com/v1");
     }
 
     #[test]
     fn test_apply_input_rejects_empty_value() {
         let mut app = make_app();
+        app.llm_form = Some(LlmFormDraft {
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            step: 0,
+        });
         app.input_target = Some(EditableField::LlmProvider);
         app.input_buffer = "   ".to_string();
 
@@ -560,18 +713,22 @@ mod tests {
     #[test]
     fn test_execute_menu_toggle_switches() {
         let mut app = make_app();
+        let before = app.menu.snapshot();
 
         app.selected = 0;
         execute_menu_action(&mut app);
-        assert!(app.menu.snapshot().llm_enabled);
+        let s1 = app.menu.snapshot();
+        assert_ne!(s1.llm_enabled, before.llm_enabled);
 
         app.selected = 1;
         execute_menu_action(&mut app);
-        assert!(!app.menu.snapshot().text_correction_enabled);
+        let s2 = app.menu.snapshot();
+        assert_ne!(s2.text_correction_enabled, s1.text_correction_enabled);
 
         app.selected = 2;
         execute_menu_action(&mut app);
-        assert!(app.menu.snapshot().vad_enabled);
+        let s3 = app.menu.snapshot();
+        assert_ne!(s3.vad_enabled, s2.vad_enabled);
     }
 
     #[test]

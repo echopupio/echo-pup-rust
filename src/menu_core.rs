@@ -5,27 +5,29 @@ use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::config::Config;
+use crate::config::HotkeyTriggerMode;
 use crate::hotkey;
 use crate::model_download::{
     self, DownloadEvent, DownloadStart, DownloadState, DOWNLOAD_LOG_MAX_LINES,
 };
+use crate::runtime;
 
-pub const MENU_ITEMS: [&str; 15] = [
+pub const MENU_ITEMS: [&str; 8] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
     "切换 VAD 开关",
-    "编辑热键",
-    "编辑 LLM provider",
-    "编辑 LLM model",
-    "编辑 LLM api_base",
-    "编辑 LLM api_key_env",
-    "编辑 Whisper model_path",
-    "下载模型 large-v3",
-    "下载模型 turbo",
-    "下载模型 medium",
-    "刷新本地模型列表",
-    "保存配置",
-    "退出 UI",
+    "编辑热键（按键捕获）",
+    "编辑 LLM 配置",
+    "切换 Whisper 模型",
+    "下载模型",
+    "退出",
+];
+
+pub const DOWNLOAD_MODEL_SIZES: [&str; 3] = ["large-v3", "turbo", "medium"];
+pub const WHISPER_MODEL_FILES: [&str; 3] = [
+    "ggml-large-v3.bin",
+    "ggml-large-v3-turbo.bin",
+    "ggml-medium.bin",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,10 +47,26 @@ pub enum MenuAction {
     ToggleLlmEnabled,
     ToggleTextCorrectionEnabled,
     ToggleVadEnabled,
-    SetField { field: EditableField, value: String },
-    DownloadModel { size: String },
-    RefreshLocalModels,
-    SaveConfig,
+    SetField {
+        field: EditableField,
+        value: String,
+    },
+    SetLlmConfig {
+        provider: String,
+        model: String,
+        api_base: String,
+        api_key_env: String,
+    },
+    SetHotkeyTriggerMode {
+        mode: HotkeyTriggerMode,
+    },
+    SwitchWhisperModel {
+        model_path: String,
+    },
+    DownloadModel {
+        size: String,
+    },
+    ReloadConfig,
     QuitUi,
 }
 
@@ -60,6 +78,7 @@ pub struct MenuSnapshot {
     pub should_quit_ui: bool,
 
     pub hotkey: String,
+    pub hotkey_trigger_mode: HotkeyTriggerMode,
     pub llm_enabled: bool,
     pub text_correction_enabled: bool,
     pub vad_enabled: bool,
@@ -118,6 +137,7 @@ impl MenuCore {
             should_quit_ui: self.should_quit_ui,
 
             hotkey: self.config.hotkey.key.clone(),
+            hotkey_trigger_mode: self.config.hotkey.trigger_mode,
             llm_enabled: self.config.llm.enabled,
             text_correction_enabled: self.config.text_correction.enabled,
             vad_enabled: self.config.audio.vad_enabled,
@@ -177,20 +197,26 @@ impl MenuCore {
         match action {
             MenuAction::ToggleLlmEnabled => {
                 self.config.llm.enabled = !self.config.llm.enabled;
-                self.dirty = true;
-                self.status = format!("LLM 开关 => {}", self.config.llm.enabled);
+                self.persist_config()?;
+                self.status = format!("LLM 开关 => {}（已自动保存）", self.config.llm.enabled);
                 Ok(self.status.clone())
             }
             MenuAction::ToggleTextCorrectionEnabled => {
                 self.config.text_correction.enabled = !self.config.text_correction.enabled;
-                self.dirty = true;
-                self.status = format!("文本纠错开关 => {}", self.config.text_correction.enabled);
+                self.persist_config()?;
+                self.status = format!(
+                    "文本纠错开关 => {}（已自动保存）",
+                    self.config.text_correction.enabled
+                );
                 Ok(self.status.clone())
             }
             MenuAction::ToggleVadEnabled => {
                 self.config.audio.vad_enabled = !self.config.audio.vad_enabled;
-                self.dirty = true;
-                self.status = format!("VAD 开关 => {}", self.config.audio.vad_enabled);
+                self.persist_config()?;
+                self.status = format!(
+                    "VAD 开关 => {}（已自动保存）",
+                    self.config.audio.vad_enabled
+                );
                 Ok(self.status.clone())
             }
             MenuAction::SetField { field, value } => {
@@ -211,11 +237,55 @@ impl MenuCore {
                     EditableField::LlmModel => self.config.llm.model = trimmed,
                     EditableField::LlmApiBase => self.config.llm.api_base = trimmed,
                     EditableField::LlmApiKeyEnv => self.config.llm.api_key_env = trimmed,
-                    EditableField::WhisperModelPath => self.config.whisper.model_path = trimmed,
+                    EditableField::WhisperModelPath => {
+                        self.config.whisper.model_path = trimmed;
+                        self.config.whisper.performance_profile = None;
+                    }
                 }
 
-                self.dirty = true;
-                self.status = "编辑已应用（记得保存配置）".to_string();
+                self.persist_config()?;
+                self.status = "编辑已应用（已自动保存）".to_string();
+                Ok(self.status.clone())
+            }
+            MenuAction::SetLlmConfig {
+                provider,
+                model,
+                api_base,
+                api_key_env,
+            } => {
+                let provider = provider.trim().to_string();
+                let model = model.trim().to_string();
+                let api_base = api_base.trim().to_string();
+                let api_key_env = api_key_env.trim().to_string();
+
+                if provider.is_empty() || model.is_empty() || api_base.is_empty() {
+                    return Err(anyhow!("LLM 配置中 provider/model/api_base 不能为空"));
+                }
+
+                self.config.llm.provider = provider;
+                self.config.llm.model = model;
+                self.config.llm.api_base = api_base;
+                self.config.llm.api_key_env = api_key_env;
+
+                self.persist_config()?;
+                self.status = "LLM 配置已更新（已自动保存）".to_string();
+                Ok(self.status.clone())
+            }
+            MenuAction::SetHotkeyTriggerMode { mode } => {
+                self.config.hotkey.trigger_mode = mode;
+                self.persist_config()?;
+                self.status = format!("热键触发模式已切换为 {}（已自动保存）", mode.label());
+                Ok(self.status.clone())
+            }
+            MenuAction::SwitchWhisperModel { model_path } => {
+                let model_path = model_path.trim().to_string();
+                if model_path.is_empty() {
+                    return Err(anyhow!("Whisper 模型路径不能为空"));
+                }
+                self.config.whisper.model_path = model_path.clone();
+                self.config.whisper.performance_profile = None;
+                self.persist_config()?;
+                self.status = format!("Whisper 模型已切换到 {}（已自动保存）", model_path);
                 Ok(self.status.clone())
             }
             MenuAction::DownloadModel { size } => {
@@ -242,20 +312,15 @@ impl MenuCore {
                 self.status = format!("正在下载模型 {} ...", size);
                 Ok(self.status.clone())
             }
-            MenuAction::RefreshLocalModels => {
+            MenuAction::ReloadConfig => {
+                self.config = Config::load(&self.config_path)?;
                 self.local_models = model_download::list_local_models();
-                self.status = "已刷新本地模型列表".to_string();
-                Ok(self.status.clone())
-            }
-            MenuAction::SaveConfig => {
-                self.config.save(&self.config_path)?;
-                self.dirty = false;
-                self.status = format!("配置已保存: {}", self.config_path);
+                self.status = "配置文件已重载".to_string();
                 Ok(self.status.clone())
             }
             MenuAction::QuitUi => {
                 self.should_quit_ui = true;
-                self.status = "已退出 UI".to_string();
+                self.status = "收到退出指令".to_string();
                 Ok(self.status.clone())
             }
         }
@@ -360,6 +425,28 @@ impl MenuCore {
             self.download_logs.drain(0..drain_len);
         }
     }
+
+    fn persist_config(&mut self) -> Result<()> {
+        self.config.save(&self.config_path)?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+pub fn whisper_model_path_from_file_name(model_file_name: &str) -> Result<String> {
+    Ok(runtime::model_dir()?
+        .join(model_file_name)
+        .to_string_lossy()
+        .into_owned())
+}
+
+pub fn model_size_from_file_name(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        "ggml-large-v3.bin" => Some("large-v3"),
+        "ggml-large-v3-turbo.bin" => Some("turbo"),
+        "ggml-medium.bin" => Some("medium"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -379,18 +466,22 @@ mod tests {
     #[test]
     fn test_menu_toggle_switches() {
         let mut core = MenuCore::new("/tmp/echopup-menu-core-toggle.toml").unwrap();
+        let before = core.snapshot();
 
         let r1 = core.execute(MenuAction::ToggleLlmEnabled);
         assert!(r1.ok);
-        assert!(r1.snapshot.llm_enabled);
+        assert_ne!(r1.snapshot.llm_enabled, before.llm_enabled);
 
         let r2 = core.execute(MenuAction::ToggleTextCorrectionEnabled);
         assert!(r2.ok);
-        assert!(!r2.snapshot.text_correction_enabled);
+        assert_ne!(
+            r2.snapshot.text_correction_enabled,
+            r1.snapshot.text_correction_enabled
+        );
 
         let r3 = core.execute(MenuAction::ToggleVadEnabled);
         assert!(r3.ok);
-        assert!(r3.snapshot.vad_enabled);
+        assert_ne!(r3.snapshot.vad_enabled, r2.snapshot.vad_enabled);
     }
 
     #[test]
@@ -415,14 +506,14 @@ mod tests {
 
     #[test]
     fn test_phase_e_menu_contract_order() {
-        assert_eq!(MENU_ITEMS.len(), 15);
+        assert_eq!(MENU_ITEMS.len(), 8);
         assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
-        assert_eq!(MENU_ITEMS[8], "编辑 Whisper model_path");
-        assert_eq!(MENU_ITEMS[14], "退出 UI");
+        assert_eq!(MENU_ITEMS[5], "切换 Whisper 模型");
+        assert_eq!(MENU_ITEMS[7], "退出");
     }
 
     #[test]
-    fn test_phase_e_save_roundtrip() {
+    fn test_phase_e_auto_save_roundtrip() {
         let config_path = temp_config_path("phase-e-save");
         let mut core = MenuCore::new(&config_path).unwrap();
 
@@ -433,12 +524,55 @@ mod tests {
             value: "ollama".to_string(),
         });
         assert!(r2.ok);
-        let r3 = core.execute(MenuAction::SaveConfig);
-        assert!(r3.ok);
 
         let reloaded = Config::load(&config_path).unwrap();
         assert!(reloaded.llm.enabled);
         assert_eq!(reloaded.llm.provider, "ollama");
+
+        let _ = std::fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn test_set_llm_form_auto_save() {
+        let config_path = temp_config_path("phase-e-llm-form");
+        let mut core = MenuCore::new(&config_path).unwrap();
+
+        let r = core.execute(MenuAction::SetLlmConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+        });
+        assert!(r.ok);
+
+        let reloaded = Config::load(&config_path).unwrap();
+        assert_eq!(reloaded.llm.provider, "openai");
+        assert_eq!(reloaded.llm.model, "gpt-4.1-mini");
+        assert_eq!(reloaded.llm.api_base, "https://api.openai.com/v1");
+        assert_eq!(reloaded.llm.api_key_env, "OPENAI_API_KEY");
+
+        let _ = std::fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn test_set_hotkey_trigger_mode_auto_save() {
+        let config_path = temp_config_path("phase-e-hotkey-mode");
+        let mut core = MenuCore::new(&config_path).unwrap();
+
+        let result = core.execute(MenuAction::SetHotkeyTriggerMode {
+            mode: HotkeyTriggerMode::HoldToRecord,
+        });
+        assert!(result.ok);
+        assert_eq!(
+            result.snapshot.hotkey_trigger_mode,
+            HotkeyTriggerMode::HoldToRecord
+        );
+
+        let reloaded = Config::load(&config_path).unwrap();
+        assert_eq!(
+            reloaded.hotkey.trigger_mode,
+            HotkeyTriggerMode::HoldToRecord
+        );
 
         let _ = std::fs::remove_file(&config_path);
     }

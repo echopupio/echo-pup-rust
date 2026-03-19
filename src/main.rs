@@ -674,6 +674,131 @@ fn run_ui_foreground(config_path: &str) -> Result<()> {
     ui_result
 }
 
+fn build_whisper_stt(whisper_cfg: &config::config::WhisperConfig) -> Result<stt::WhisperSTT> {
+    let mut w = stt::WhisperSTT::with_options(
+        &whisper_cfg.model_path,
+        whisper_cfg.language.clone(),
+        whisper_cfg.translate,
+    )?;
+
+    let strategy = match whisper_cfg.decoding_strategy.clone() {
+        config::WhisperDecodingStrategy::Greedy => stt::DecodingStrategy::Greedy {
+            best_of: whisper_cfg.greedy_best_of,
+        },
+        config::WhisperDecodingStrategy::BeamSearch => stt::DecodingStrategy::BeamSearch {
+            beam_size: whisper_cfg.beam_size,
+        },
+    };
+    w.set_decoding_strategy(strategy);
+    w.set_temperature(whisper_cfg.temperature);
+    w.set_no_context(whisper_cfg.no_context);
+    w.set_suppress_nst(whisper_cfg.suppress_nst);
+    w.set_n_threads(whisper_cfg.resolved_n_threads());
+    w.set_initial_prompt(whisper_cfg.initial_prompt.clone());
+    w.set_hotwords(whisper_cfg.hotwords.clone());
+    Ok(w)
+}
+
+fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewrite> {
+    if !llm_cfg.enabled {
+        return None;
+    }
+    match llm::LLMRewrite::new(
+        &llm_cfg.provider,
+        &llm_cfg.api_base,
+        &llm_cfg.api_key_env,
+        &llm_cfg.model,
+    ) {
+        Ok(l) => Some(l),
+        Err(err) => {
+            warn!("LLM 热更新失败: {}", err);
+            None
+        }
+    }
+}
+
+fn apply_runtime_menu_action(
+    action: &menu_core::MenuAction,
+    snapshot: &menu_core::MenuSnapshot,
+    hotkey_listener: &mut hotkey::HotkeyListener,
+    hotkey_trigger_mode_runtime: &Arc<Mutex<config::HotkeyTriggerMode>>,
+    whisper_runtime: &Arc<Mutex<Option<stt::WhisperSTT>>>,
+    llm_runtime: &Arc<Mutex<Option<llm::LLMRewrite>>>,
+) -> Result<()> {
+    match action {
+        menu_core::MenuAction::SetField {
+            field: menu_core::EditableField::Hotkey,
+            ..
+        } => {
+            hotkey_listener.set_hotkey(&snapshot.hotkey)?;
+            hotkey_listener.start()?;
+            info!("热键已热更新为 {}", snapshot.hotkey);
+        }
+        menu_core::MenuAction::SetField {
+            field: menu_core::EditableField::WhisperModelPath,
+            ..
+        }
+        | menu_core::MenuAction::SwitchWhisperModel { .. } => {
+            let cfg = config::Config::load(&snapshot.config_path)?;
+            let whisper_cfg = cfg.whisper.effective();
+            match build_whisper_stt(&whisper_cfg) {
+                Ok(new_whisper) => {
+                    let mut guard = whisper_runtime.lock();
+                    *guard = Some(new_whisper);
+                    info!("Whisper 模型已热更新: {}", whisper_cfg.model_path);
+                }
+                Err(err) => {
+                    warn!("Whisper 热更新失败: {}", err);
+                }
+            }
+        }
+        menu_core::MenuAction::SetHotkeyTriggerMode { mode } => {
+            *hotkey_trigger_mode_runtime.lock() = *mode;
+            info!("热键触发模式已热更新为 {}", mode.label());
+        }
+        menu_core::MenuAction::SetField {
+            field:
+                menu_core::EditableField::LlmProvider
+                | menu_core::EditableField::LlmModel
+                | menu_core::EditableField::LlmApiBase
+                | menu_core::EditableField::LlmApiKeyEnv,
+            ..
+        }
+        | menu_core::MenuAction::SetLlmConfig { .. }
+        | menu_core::MenuAction::ToggleLlmEnabled => {
+            let cfg = config::Config::load(&snapshot.config_path)?;
+            let mut guard = llm_runtime.lock();
+            *guard = build_llm_runtime(&cfg.llm);
+            info!("LLM 运行时配置已热更新");
+        }
+        menu_core::MenuAction::ReloadConfig => {
+            let cfg = config::Config::load(&snapshot.config_path)?;
+
+            hotkey_listener.set_hotkey(&cfg.hotkey.key)?;
+            hotkey_listener.start()?;
+            *hotkey_trigger_mode_runtime.lock() = cfg.hotkey.trigger_mode;
+
+            let whisper_cfg = cfg.whisper.effective();
+            match build_whisper_stt(&whisper_cfg) {
+                Ok(new_whisper) => {
+                    let mut guard = whisper_runtime.lock();
+                    *guard = Some(new_whisper);
+                    info!("Whisper 配置已重载: {}", whisper_cfg.model_path);
+                }
+                Err(err) => {
+                    warn!("Whisper 重载失败: {}", err);
+                }
+            }
+
+            let mut llm_guard = llm_runtime.lock();
+            *llm_guard = build_llm_runtime(&cfg.llm);
+            info!("配置文件重载并已应用到运行时");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn run_voice_input(config_path: &str) -> Result<()> {
     let _instance_guard = match runtime::InstanceGuard::try_acquire()? {
         Some(guard) => guard,
@@ -796,33 +921,12 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         );
     }
 
-    let whisper = match stt::WhisperSTT::with_options(
-        &whisper_cfg.model_path,
-        whisper_cfg.language.clone(),
-        whisper_cfg.translate,
-    ) {
-        Ok(mut w) => {
-            // 从配置注入解码参数
-            let strategy = match whisper_cfg.decoding_strategy.clone() {
-                config::WhisperDecodingStrategy::Greedy => stt::DecodingStrategy::Greedy {
-                    best_of: whisper_cfg.greedy_best_of,
-                },
-                config::WhisperDecodingStrategy::BeamSearch => stt::DecodingStrategy::BeamSearch {
-                    beam_size: whisper_cfg.beam_size,
-                },
-            };
-            w.set_decoding_strategy(strategy);
-            w.set_temperature(whisper_cfg.temperature);
-            w.set_no_context(whisper_cfg.no_context);
-            w.set_suppress_nst(whisper_cfg.suppress_nst);
-            let resolved_n_threads = whisper_cfg.resolved_n_threads();
-            w.set_n_threads(resolved_n_threads);
-            w.set_initial_prompt(whisper_cfg.initial_prompt.clone());
-            w.set_hotwords(whisper_cfg.hotwords.clone());
-
+    let whisper = match build_whisper_stt(&whisper_cfg) {
+        Ok(w) => {
             info!(
                 "Whisper 线程数: {} (配置: {:?})",
-                resolved_n_threads, whisper_cfg.n_threads
+                whisper_cfg.resolved_n_threads(),
+                whisper_cfg.n_threads
             );
             info!("Whisper 已初始化");
             Some(w)
@@ -836,18 +940,13 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let whisper = Arc::new(Mutex::new(whisper));
 
     let llm = if config.llm.enabled {
-        match llm::LLMRewrite::new(
-            &config.llm.provider,
-            &config.llm.api_base,
-            &config.llm.api_key_env,
-            &config.llm.model,
-        ) {
-            Ok(l) => {
+        match build_llm_runtime(&config.llm) {
+            Some(l) => {
                 info!("LLM 整理已初始化");
                 Some(l)
             }
-            Err(e) => {
-                warn!("LLM 初始化失败: {}，文本整理功能不可用", e);
+            None => {
+                warn!("LLM 初始化失败，文本整理功能不可用");
                 None
             }
         }
@@ -920,113 +1019,200 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     });
 
     // ===== 设置热键回调 =====
-    // 按下热键时开始录音
-    let recorder_press = recorder.clone();
-    let is_recording_press = is_recording.clone();
-    let recording_animation_press = recording_animation.clone();
-    let desktop_notify_on_press = desktop_notify_enabled;
-    let sound_feedback_on_press = sound_feedback_enabled;
-    let status_indicator_on_press = status_indicator.clone();
-    let press_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        if !is_recording_press.load(Ordering::SeqCst) {
+    #[derive(Default)]
+    struct HotkeyPressState {
+        pressed: bool,
+        sequence: u64,
+        started_by_hold_on_current_press: bool,
+    }
+    let hold_to_record_duration = Duration::from_secs(1);
+    let stop_press_debounce_window = Duration::from_millis(500);
+    let hotkey_press_state = Arc::new(Mutex::new(HotkeyPressState::default()));
+    let stop_debounce_until = Arc::new(Mutex::new(None::<Instant>));
+    let hotkey_trigger_mode = Arc::new(Mutex::new(config.hotkey.trigger_mode));
+
+    let recorder_start = recorder.clone();
+    let is_recording_start = is_recording.clone();
+    let recording_animation_start = recording_animation.clone();
+    let desktop_notify_on_start = desktop_notify_enabled;
+    let sound_feedback_on_start = sound_feedback_enabled;
+    let status_indicator_on_start = status_indicator.clone();
+    let stop_debounce_on_start = stop_debounce_until.clone();
+    let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
-            // 启动动画
-            recording_animation_press.store(true, Ordering::SeqCst);
+            recording_animation_start.store(true, Ordering::SeqCst);
             info!("开始录音...");
             set_status_indicator_state(
-                &status_indicator_on_press,
+                &status_indicator_on_start,
                 status_indicator::IndicatorState::RecordingStart,
             );
-            match recorder_press.start() {
+            match recorder_start.start() {
                 Ok(_) => {
-                    is_recording_press.store(true, Ordering::SeqCst);
+                    is_recording_start.store(true, Ordering::SeqCst);
+                    *stop_debounce_on_start.lock() =
+                        Some(Instant::now() + stop_press_debounce_window);
                     set_status_indicator_state(
-                        &status_indicator_on_press,
+                        &status_indicator_on_start,
                         status_indicator::IndicatorState::Recording,
                     );
                     play_feedback_sound(
-                        sound_feedback_on_press,
+                        sound_feedback_on_start,
                         FeedbackSoundEvent::RecordingStart,
                     );
-                    desktop_notify(desktop_notify_on_press, "EchoPup", "开始录音");
+                    desktop_notify(desktop_notify_on_start, "EchoPup", "开始录音");
                 }
                 Err(e) => {
                     error!("开始录音失败: {}", e);
-                    recording_animation_press.store(false, Ordering::SeqCst);
+                    recording_animation_start.store(false, Ordering::SeqCst);
                     set_status_indicator_state(
-                        &status_indicator_on_press,
+                        &status_indicator_on_start,
                         status_indicator::IndicatorState::Failed,
                     );
-                    desktop_notify(desktop_notify_on_press, "EchoPup", "开始录音失败");
+                    desktop_notify(desktop_notify_on_start, "EchoPup", "开始录音失败");
                 }
             }
         }
     });
 
-    // 松开热键时停止录音并处理（转写 -> LLM整理 -> 键盘输入）
-    let recorder_release = recorder.clone();
-    let whisper_release = whisper.clone();
-    let llm_release = llm.clone();
-    let post_processor_release = post_processor.clone();
-    let keyboard_release = keyboard.clone();
-    let is_recording_release = is_recording.clone();
-    let vad_triggered_release = vad_triggered.clone();
-    let recording_animation_release = recording_animation.clone();
-    let desktop_notify_on_release = desktop_notify_enabled;
-    let sound_feedback_on_release = sound_feedback_enabled;
-    let status_indicator_on_release = status_indicator.clone();
-    let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        // 无论 VAD 是否触发，都需要检查是否正在录音
-        if is_recording_release.load(Ordering::SeqCst) {
-            // 先标记为非录音状态
-            is_recording_release.store(false, Ordering::SeqCst);
-            // 停止动画
-            recording_animation_release.store(false, Ordering::SeqCst);
-            print!("\r"); // 清除动画行
+    let recorder_stop = recorder.clone();
+    let whisper_stop = whisper.clone();
+    let llm_stop = llm.clone();
+    let post_processor_stop = post_processor.clone();
+    let keyboard_stop = keyboard.clone();
+    let is_recording_stop = is_recording.clone();
+    let vad_triggered_stop = vad_triggered.clone();
+    let recording_animation_stop = recording_animation.clone();
+    let desktop_notify_on_stop = desktop_notify_enabled;
+    let sound_feedback_on_stop = sound_feedback_enabled;
+    let status_indicator_on_stop = status_indicator.clone();
+    let stop_debounce_on_stop = stop_debounce_until.clone();
+    let stop_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if is_recording_stop.load(Ordering::SeqCst) {
+            *stop_debounce_on_stop.lock() = None;
+            is_recording_stop.store(false, Ordering::SeqCst);
+            recording_animation_stop.store(false, Ordering::SeqCst);
+            print!("\r");
             clear_terminal_artifacts_if_tty();
 
-            // 获取音频数据
-            let audio_data = match recorder_release.stop() {
+            let audio_data = match recorder_stop.stop() {
                 Ok(data) => data,
                 Err(e) => {
                     error!("停止录音失败: {}", e);
                     set_status_indicator_state(
-                        &status_indicator_on_release,
+                        &status_indicator_on_stop,
                         status_indicator::IndicatorState::Failed,
                     );
-                    desktop_notify(desktop_notify_on_release, "EchoPup", "停止录音失败");
+                    desktop_notify(desktop_notify_on_stop, "EchoPup", "停止录音失败");
                     return;
                 }
             };
-            play_feedback_sound(sound_feedback_on_release, FeedbackSoundEvent::RecordingEnd);
+            play_feedback_sound(sound_feedback_on_stop, FeedbackSoundEvent::RecordingEnd);
 
-            // 检查是否由 VAD 触发
-            let is_vad = vad_triggered_release.swap(false, Ordering::SeqCst);
+            let is_vad = vad_triggered_stop.swap(false, Ordering::SeqCst);
             let e2e_start = Instant::now();
             set_status_indicator_state(
-                &status_indicator_on_release,
+                &status_indicator_on_stop,
                 status_indicator::IndicatorState::Transcribing,
             );
-            desktop_notify(desktop_notify_on_release, "EchoPup", "识别中...");
+            desktop_notify(desktop_notify_on_stop, "EchoPup", "识别中...");
 
             let ok = process_audio(
                 &audio_data,
-                &whisper_release,
-                &llm_release,
-                &post_processor_release,
-                &keyboard_release,
+                &whisper_stop,
+                &llm_stop,
+                &post_processor_stop,
+                &keyboard_stop,
                 is_vad,
                 e2e_start,
-                desktop_notify_on_release,
+                desktop_notify_on_stop,
             );
             set_status_indicator_state(
-                &status_indicator_on_release,
+                &status_indicator_on_stop,
                 if ok {
                     status_indicator::IndicatorState::Completed
                 } else {
                     status_indicator::IndicatorState::Failed
                 },
             );
+        }
+    });
+
+    let press_state_on_press = hotkey_press_state.clone();
+    let start_action_on_press = start_recording_action.clone();
+    let stop_action_on_press = stop_recording_action.clone();
+    let is_recording_on_press = is_recording.clone();
+    let stop_debounce_on_press = stop_debounce_until.clone();
+    let mode_on_press = hotkey_trigger_mode.clone();
+    let press_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let trigger_mode = *mode_on_press.lock();
+        let seq = {
+            let mut state = press_state_on_press.lock();
+            if state.pressed {
+                return;
+            }
+            state.pressed = true;
+            state.sequence = state.sequence.wrapping_add(1);
+            state.started_by_hold_on_current_press = false;
+            state.sequence
+        };
+
+        if is_recording_on_press.load(Ordering::SeqCst) {
+            if trigger_mode != config::HotkeyTriggerMode::PressToToggle {
+                return;
+            }
+            if let Some(deadline) = *stop_debounce_on_press.lock() {
+                if Instant::now() < deadline {
+                    return;
+                }
+            }
+            stop_action_on_press();
+            return;
+        }
+
+        let press_state_timer = press_state_on_press.clone();
+        let start_action_timer = start_action_on_press.clone();
+        let is_recording_timer = is_recording_on_press.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(hold_to_record_duration);
+            let should_start = {
+                let mut state = press_state_timer.lock();
+                if !(state.pressed && state.sequence == seq) {
+                    false
+                } else {
+                    state.started_by_hold_on_current_press = true;
+                    true
+                }
+            };
+            if !should_start || is_recording_timer.load(Ordering::SeqCst) {
+                return;
+            }
+            start_action_timer();
+        });
+    });
+
+    let press_state_on_release = hotkey_press_state.clone();
+    let is_recording_on_release = is_recording.clone();
+    let stop_action_on_release = stop_recording_action.clone();
+    let mode_on_release = hotkey_trigger_mode.clone();
+    let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let started_by_hold = {
+            let mut state = press_state_on_release.lock();
+            if !state.pressed {
+                return;
+            }
+            state.pressed = false;
+            state.sequence = state.sequence.wrapping_add(1);
+            let started = state.started_by_hold_on_current_press;
+            state.started_by_hold_on_current_press = false;
+            started
+        };
+
+        if *mode_on_release.lock() == config::HotkeyTriggerMode::HoldToRecord
+            && started_by_hold
+            && is_recording_on_release.load(Ordering::SeqCst)
+        {
+            stop_action_on_release();
         }
     });
 
@@ -1137,22 +1323,54 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     info!("===========================================");
     info!("🎤 EchoPup 语音输入已启动");
-    info!("   按住 {} 说话，松开后自动输入", config.hotkey.key);
+    info!("   热键: {}", config.hotkey.key);
+    info!("   模式: {}", config.hotkey.trigger_mode.label());
+    info!("   长按 1 秒开始录音");
+    match config.hotkey.trigger_mode {
+        config::HotkeyTriggerMode::HoldToRecord => {
+            info!("   松开热键后停止录音并开始转写");
+        }
+        config::HotkeyTriggerMode::PressToToggle => {
+            info!("   松开后继续录音，下一次按下热键结束并转写");
+        }
+    }
     info!("   按 Ctrl+C 退出");
     info!("===========================================");
 
     // ===== 主循环 =====
+    let mut shutdown_requested = false;
     loop {
         {
             let mut guard = status_indicator.lock();
             while let Some(action) = guard.try_recv_action() {
-                let result = menu_runtime.execute(action);
+                let action_for_runtime = action.clone();
+                let mut result = menu_runtime.execute(action);
+                if result.ok {
+                    if let Err(err) = apply_runtime_menu_action(
+                        &action_for_runtime,
+                        &result.snapshot,
+                        &mut hotkey,
+                        &hotkey_trigger_mode,
+                        &whisper,
+                        &llm,
+                    ) {
+                        warn!("菜单动作热更新失败: {}", err);
+                        menu_runtime.set_status(format!("已保存配置，但热更新失败: {}", err));
+                        result.snapshot = menu_runtime.snapshot();
+                    }
+                }
                 guard.send_action_result(&result);
                 if result.quit_ui {
                     guard.close_ui();
+                    shutdown_requested = true;
                     break;
                 }
             }
+        }
+
+        if shutdown_requested {
+            info!("收到菜单退出指令，准备退出主进程");
+            break;
         }
 
         if menu_runtime.poll_download_events() {

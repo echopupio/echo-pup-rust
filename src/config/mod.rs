@@ -2,4 +2,4 @@
 
 pub mod config;
 
-pub use config::{Config, TextCorrectionConfig, WhisperDecodingStrategy};
+pub use config::{Config, HotkeyTriggerMode, TextCorrectionConfig, WhisperDecodingStrategy};

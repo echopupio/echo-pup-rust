@@ -223,6 +223,7 @@ impl HotkeyListener {
         info!("热键监听模式: right_ctrl (rdev)");
 
         let is_pressed = self.is_pressed.clone();
+        let pressed_count = Arc::new(Mutex::new(0u8));
         let event_callback = self.callback.clone();
         let press_callback = self.press_callback.clone();
         let release_callback = self.release_callback.clone();
@@ -241,6 +242,7 @@ impl HotkeyListener {
         }
 
         thread::spawn(move || {
+            let pressed_count = pressed_count.clone();
             let result = rdev::listen(move |event| {
                 if should_stop.load(Ordering::SeqCst) {
                     return;
@@ -248,8 +250,13 @@ impl HotkeyListener {
 
                 match event.event_type {
                     EventType::KeyPress(key) if is_right_ctrl_event_key(key) => {
-                        let mut pressed = is_pressed.lock();
-                        if !*pressed {
+                        let mut count = pressed_count.lock();
+                        let was_zero = *count == 0;
+                        *count = count.saturating_add(1);
+                        drop(count);
+
+                        if was_zero {
+                            let mut pressed = is_pressed.lock();
                             *pressed = true;
                             drop(pressed);
                             if let Some(ref cb) = event_callback {
@@ -261,8 +268,15 @@ impl HotkeyListener {
                         }
                     }
                     EventType::KeyRelease(key) if is_right_ctrl_event_key(key) => {
-                        let mut pressed = is_pressed.lock();
-                        if *pressed {
+                        let mut count = pressed_count.lock();
+                        if *count > 0 {
+                            *count -= 1;
+                        }
+                        let became_zero = *count == 0;
+                        drop(count);
+
+                        if became_zero {
+                            let mut pressed = is_pressed.lock();
                             *pressed = false;
                             drop(pressed);
                             if let Some(ref cb) = event_callback {
@@ -397,7 +411,7 @@ impl HotkeyListener {
 }
 
 pub fn hotkey_policy_hint() -> &'static str {
-    "建议使用 right_ctrl、单独 F1-F24，或至少包含 ctrl/alt/super 的组合键（最多3键，不支持仅 Shift 组合）"
+    "建议使用 ctrl/right_ctrl、单独 F1-F24，或至少包含 ctrl/alt/super 的组合键（最多3键，不支持仅 Shift 组合）"
 }
 
 pub fn validate_hotkey_config(key: &str) -> Result<()> {
@@ -574,7 +588,17 @@ fn normalize_key_name(key: &str) -> String {
 fn is_right_ctrl_alias(key: &str) -> bool {
     matches!(
         normalize_key_name(key).as_str(),
-        "rightctrl" | "rctrl" | "ctrlright" | "controlright" | "rightcontrol"
+        "ctrl"
+            | "control"
+            | "leftctrl"
+            | "lctrl"
+            | "ctrlleft"
+            | "leftcontrol"
+            | "rightctrl"
+            | "rctrl"
+            | "ctrlright"
+            | "controlright"
+            | "rightcontrol"
     )
 }
 
@@ -614,6 +638,8 @@ mod tests {
 
     #[test]
     fn test_right_ctrl_aliases() {
+        assert!(is_right_ctrl_alias("ctrl"));
+        assert!(is_right_ctrl_alias("control"));
         assert!(is_right_ctrl_alias("right_ctrl"));
         assert!(is_right_ctrl_alias("right-ctrl"));
         assert!(is_right_ctrl_alias("RightCtrl"));

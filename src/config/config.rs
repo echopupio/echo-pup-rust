@@ -38,11 +38,38 @@ impl Default for Config {
 }
 
 /// 热键配置
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyTriggerMode {
+    /// 长按达到阈值后开始录音，松开结束
+    HoldToRecord,
+    /// 长按达到阈值后开始录音，再次按下结束
+    PressToToggle,
+}
+
+impl Default for HotkeyTriggerMode {
+    fn default() -> Self {
+        Self::PressToToggle
+    }
+}
+
+impl HotkeyTriggerMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HoldToRecord => "长按模式",
+            Self::PressToToggle => "按压切换模式",
+        }
+    }
+}
+
+/// 热键配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
     /// 按键名称，如 "F12"
     pub key: String,
+    /// 触发模式
+    pub trigger_mode: HotkeyTriggerMode,
 }
 
 impl Default for HotkeyConfig {
@@ -54,6 +81,7 @@ impl Default for HotkeyConfig {
 
         Self {
             key: default_hotkey.to_string(),
+            trigger_mode: HotkeyTriggerMode::default(),
         }
     }
 }
@@ -390,6 +418,7 @@ mod tests {
         assert_eq!(config.hotkey.key, "right_ctrl");
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(config.hotkey.key, "ctrl+space");
+        assert_eq!(config.hotkey.trigger_mode, HotkeyTriggerMode::PressToToggle);
         assert_eq!(config.audio.sample_rate, 16000);
         assert!(config.feedback.status_bar_enabled);
         assert!(config.feedback.sound_enabled);

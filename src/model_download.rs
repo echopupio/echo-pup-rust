@@ -13,7 +13,7 @@ use crate::runtime;
 
 pub const DOWNLOAD_LOG_MAX_LINES: usize = 120;
 pub const DOWNLOAD_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
-pub const DOWNLOAD_NO_PROGRESS_TIMEOUT_SECS: u64 = 45;
+pub const DOWNLOAD_NO_PROGRESS_TIMEOUT_SECS: u64 = 300;
 pub const DOWNLOAD_MAX_RETRIES: usize = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +46,43 @@ pub struct DownloadStart {
     pub state: DownloadState,
     pub rx: Receiver<DownloadEvent>,
     pub initial_logs: Vec<String>,
+}
+
+fn build_http_client(ignore_env_proxy: bool) -> Result<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(None);
+    if ignore_env_proxy {
+        builder = builder.no_proxy();
+    }
+    builder.build().context("初始化 HTTP 客户端失败")
+}
+
+fn is_likely_proxy_error(err: &reqwest::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("proxy")
+        || msg.contains("tunnel")
+        || msg.contains("127.0.0.1:7892")
+        || msg.contains("127.0.0.1")
+}
+
+fn cleanup_empty_tmp_file_after_failure(model_file_name: &str, tx: &mpsc::Sender<DownloadEvent>) {
+    let Ok(model_dir) = runtime::model_dir() else {
+        return;
+    };
+    let tmp_file = model_dir.join(format!("{}.part", model_file_name));
+    let Ok(meta) = fs::metadata(&tmp_file) else {
+        return;
+    };
+    if meta.len() > 0 {
+        return;
+    }
+    if fs::remove_file(&tmp_file).is_ok() {
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[clean] 下载失败后已删除空临时文件: {}",
+            tmp_file.display()
+        )));
+    }
 }
 
 pub fn list_local_models() -> Vec<String> {
@@ -101,11 +138,13 @@ pub fn start_model_download(model_size: &str) -> Result<DownloadStart> {
     };
 
     std::thread::spawn(move || {
+        let cleanup_name = model_file_name_for_thread.clone();
         if let Err(err) = download_model_with_progress(
             model_size_owned.clone(),
             model_file_name_for_thread,
             tx.clone(),
         ) {
+            cleanup_empty_tmp_file_after_failure(&cleanup_name, &tx);
             let _ = tx.send(DownloadEvent::Failed(err.to_string()));
         }
     });
@@ -153,6 +192,13 @@ fn download_model_with_progress(
     }
 
     let resume_size = fs::metadata(&tmp_file).map(|m| m.len()).unwrap_or(0);
+    if resume_size == 0 && tmp_file.exists() {
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[clean] 发现空临时文件，已删除: {}",
+            tmp_file.display()
+        )));
+        let _ = fs::remove_file(&tmp_file);
+    }
     if resume_size > 0 {
         let _ = tx.send(DownloadEvent::Log(format!(
             "[resume] 发现临时文件: {} ({})",
@@ -175,11 +221,8 @@ fn download_model_with_progress(
         model_url
     )));
 
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(None)
-        .build()
-        .context("初始化 HTTP 客户端失败")?;
+    let mut client = build_http_client(false)?;
+    let mut using_direct_client = false;
 
     let mut total_size = None;
     match client.head(&model_url).send() {
@@ -200,7 +243,38 @@ fn download_model_with_progress(
             )));
         }
         Err(err) => {
-            let _ = tx.send(DownloadEvent::Log(format!("[head] 请求失败: {}", err)));
+            if is_likely_proxy_error(&err) {
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[proxy] HEAD 走代理失败，尝试直连重试: {}",
+                    err
+                )));
+                client = build_http_client(true)?;
+                using_direct_client = true;
+                match client.head(&model_url).send() {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let content_length = if status.is_success() {
+                            resp.content_length()
+                        } else {
+                            None
+                        };
+                        total_size = content_length;
+                        let _ = tx.send(DownloadEvent::Log(format!(
+                            "[head] (direct) status={} content-length={}",
+                            status,
+                            content_length
+                                .map(format_bytes)
+                                .unwrap_or_else(|| "未知".to_string())
+                        )));
+                    }
+                    Err(err2) => {
+                        let _ =
+                            tx.send(DownloadEvent::Log(format!("[head] 直连重试失败: {}", err2)));
+                    }
+                }
+            } else {
+                let _ = tx.send(DownloadEvent::Log(format!("[head] 请求失败: {}", err)));
+            }
         }
     }
 
@@ -252,8 +326,9 @@ fn download_model_with_progress(
             .unwrap_or(chunk_end);
         let range_text = format!("bytes={}-{}", downloaded, range_end);
 
+        let chunk_target_len = range_end.saturating_sub(downloaded).saturating_add(1);
         let mut attempt = 0usize;
-        let chunk_written: u64 = loop {
+        let chunk_written: u64 = 'attempt: loop {
             attempt += 1;
             let _ = tx.send(DownloadEvent::Log(format!(
                 "[get] range={} attempt={}/{} timeout={}s",
@@ -263,11 +338,19 @@ fn download_model_with_progress(
             let mut response = match client
                 .get(&model_url)
                 .header(RANGE, range_text.clone())
-                .timeout(Duration::from_secs(DOWNLOAD_NO_PROGRESS_TIMEOUT_SECS))
                 .send()
             {
                 Ok(resp) => resp,
                 Err(err) => {
+                    if !using_direct_client && is_likely_proxy_error(&err) {
+                        let _ = tx.send(DownloadEvent::Log(format!(
+                            "[proxy] GET 走代理失败，切换直连重试: {}",
+                            err
+                        )));
+                        client = build_http_client(true)?;
+                        using_direct_client = true;
+                        continue;
+                    }
                     if attempt >= DOWNLOAD_MAX_RETRIES {
                         return Err(anyhow!(
                             "下载失败（{} 次重试后仍失败）: {}",
@@ -351,17 +434,45 @@ fn download_model_with_progress(
 
             let mut written = 0u64;
             loop {
-                let n = response
-                    .read(&mut buf)
-                    .context("读取下载流失败（网络可能中断，可重新下载自动续传）")?;
+                let n = match response.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(err) => {
+                        if written > 0 {
+                            let _ = tx.send(DownloadEvent::Log(format!(
+                                "[warn] 本段已写入 {}，读取中断，继续下一段: {}",
+                                format_bytes(written),
+                                err
+                            )));
+                            break;
+                        }
+                        if attempt >= DOWNLOAD_MAX_RETRIES {
+                            return Err(anyhow!(
+                                "下载失败（{} 次重试后读取仍失败）: {}",
+                                DOWNLOAD_MAX_RETRIES,
+                                err
+                            ));
+                        }
+                        let _ = tx.send(DownloadEvent::Log(format!(
+                            "[retry] 读取失败，{} 秒后重试: {}",
+                            attempt, err
+                        )));
+                        std::thread::sleep(Duration::from_secs(attempt as u64));
+                        continue 'attempt;
+                    }
+                };
                 if n == 0 {
                     break;
                 }
+                let remain = chunk_target_len.saturating_sub(written) as usize;
+                let to_write = n.min(remain);
+                if to_write == 0 {
+                    break;
+                }
                 writer
-                    .write_all(&buf[..n])
+                    .write_all(&buf[..to_write])
                     .context("写入模型临时文件失败")?;
-                downloaded += n as u64;
-                written += n as u64;
+                downloaded += to_write as u64;
+                written += to_write as u64;
 
                 if last_emit.elapsed() >= Duration::from_millis(120) {
                     let _ = tx.send(DownloadEvent::Progress {
@@ -369,6 +480,10 @@ fn download_model_with_progress(
                         total: total_size,
                     });
                     last_emit = Instant::now();
+                }
+
+                if written >= chunk_target_len {
+                    break;
                 }
             }
             writer.flush().context("刷新模型临时文件失败")?;
