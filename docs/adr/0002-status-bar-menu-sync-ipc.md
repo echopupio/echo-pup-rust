@@ -1,7 +1,7 @@
 # ADR 0002 - 状态栏菜单与 TUI 功能同步采用“共享业务内核 + 双向 IPC”
 
 日期：2026-03-19
-状态：拟议
+状态：已采纳
 
 ## 背景
 
@@ -43,9 +43,24 @@
   - 需要引入 IPC 协议与状态同步逻辑
   - 初期重构工作量较高
 
-- 后续动作：
-  - 完成 `docs/architecture/status-bar-menu-sync-plan-v1.md` 中 Phase A-E
-  - 在回归中加入“菜单动作逐项对照清单”
+## 落地情况（2026-03-19）
+
+- 共享业务内核已落地：
+  - `src/menu_core.rs`
+  - `src/model_download.rs`
+- 状态栏双向 IPC 已落地：
+  - `src/status_indicator.rs`（动作请求与结果回传）
+  - `src/main.rs`（菜单动作执行与快照下发）
+- TUI 已切换为共享内核：
+  - `src/ui.rs`
+- 回归入口：
+  - `./scripts/run_acceptance.sh`
+
+## 后续约束
+
+1. 新增菜单项时，先扩展 `MenuAction` 与 `MenuSnapshot`，再分别接入 TUI 与状态栏。
+2. 状态栏只保留展示/交互职责，不直接承载业务规则。
+3. 每次菜单相关改动需执行 `./scripts/run_acceptance.sh` 并同步 `docs/changes/` 与 `docs/traceability/`。
 
 ## 关联文档
 

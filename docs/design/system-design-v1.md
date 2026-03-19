@@ -21,8 +21,10 @@
 | 组件 | 职责 | 对外接口 |
 | --- | --- | --- |
 | `src/main.rs` | 进程入口、命令路由、主流程编排 | `echopup run/start/stop/status/restart/ui` |
-| `src/ui.rs` | TUI 菜单、输入编辑、下载进度显示 | `run_ui(config_path)` |
-| `src/status_indicator.rs` | macOS 菜单栏状态展示与交互承载 | `StatusIndicatorClient` / `status-indicator` |
+| `src/ui.rs` | TUI 菜单渲染与输入捕获（业务动作委托共享内核） | `run_ui(config_path)` |
+| `src/status_indicator.rs` | macOS 菜单栏状态展示、菜单交互桥接、IPC 收发 | `StatusIndicatorClient` / `status-indicator` |
+| `src/menu_core.rs` | 共享菜单业务内核：动作执行、配置内存态、快照与下载事件聚合 | `MenuCore` / `MenuAction` / `MenuSnapshot` |
+| `src/model_download.rs` | 共享模型下载能力：断点续传、重试、进度与日志事件 | `start_model_download` / `DownloadEvent` |
 | `src/config/config.rs` | 配置加载、默认值、保存落盘 | `Config::load/save/default` |
 | `src/hotkey/listener.rs` | 热键监听与安全策略校验 | `HotkeyListener` / `validate_hotkey_config` |
 | `src/audio/*` | 录音采集与缓冲 | `AudioRecorder` |
@@ -44,6 +46,12 @@
 1. UI / 状态栏读取配置快照。
 2. 用户执行编辑或开关动作更新内存态。
 3. 用户触发“保存配置”后统一写入 `~/.echopup/config.toml`。
+
+菜单同步链路（状态栏 <-> 主进程）：
+1. 主进程启动时初始化 `MenuCore`，并向状态栏下发初始 `MenuSnapshot`。
+2. 状态栏菜单操作后，通过 IPC 回传 `ActionRequest`。
+3. 主进程执行动作并回传 `ActionResult` 与最新快照。
+4. 下载过程通过事件轮询驱动进度和日志刷新，状态栏与 TUI 共享同一状态源。
 
 ## 5. 异常与边界处理
 
@@ -69,9 +77,11 @@
 
 - 单元测试：
   - 热键解析与校验
-  - 菜单行为与下载事件处理
+  - `menu_core` 动作契约与下载事件处理
+  - `status_indicator` 菜单 tag 到动作映射
 - 集成测试：
   - `run/start/stop/status/restart` 与 `ui *` 生命周期
+  - `./scripts/run_acceptance.sh`（Phase E 契约测试 + 全量单测冒烟）
 - 端到端测试：
   - macOS 后台运行下热键录音与跨应用文本输入
   - 状态栏反馈与下载流程可视化校验

@@ -36,9 +36,15 @@
 - `human-doc/USER-GUIDE.md`
 - `human-doc/CHANGE-LOG.md`
 
+## 6. 验收与基线工具
+
+- `scripts/run_acceptance.sh`
+- `scripts/perf_baseline.py`
+
 ## 维护约束
 
 1. 当文档路径或命名变化时，必须立即更新本入口。
 2. 当设计或架构版本升级时，更新本入口中的版本号。
 3. 每次代码迭代后，同步维护 `changes/` 与 `traceability/`。
 4. 变更日志文件必须使用 `changelog-YYYYMMDD.md`。
+5. 架构计划从“实施中”转为“已完成”时，需同步更新 `design/`、`architecture/`、`adr/` 与 `changes/` 的状态描述。

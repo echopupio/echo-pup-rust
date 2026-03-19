@@ -6,7 +6,7 @@
 
 ## 功能变化
 
-- 状态栏菜单与 TUI 功能同步需求进入实施阶段（见 `docs/architecture/status-bar-menu-sync-plan-v1.md`）。
+- 状态栏菜单与 TUI 15 项能力已完成对齐（见 `docs/architecture/status-bar-menu-sync-plan-v1.md`）。
 - 保持后台运行场景下的可感知反馈能力（状态栏、通知、提示音）作为持续目标。
 
 ## 技术变化
@@ -39,6 +39,11 @@
   - `docs/README.md`
   - `docs/SPEC.md`
   - `README.md`
+- 完成“计划态 -> 实现态”文档收敛：
+  - `docs/design/system-design-v1.md`
+  - `docs/architecture/technical-solution-v1.md`
+  - `docs/adr/0002-status-bar-menu-sync-ipc.md`
+  - `docs/adr/README.md`
 
 ## 规范化清理
 
