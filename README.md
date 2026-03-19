@@ -8,24 +8,30 @@ AI 语音输入工具 - 按住热键说话，自动识别并输入文本
 - 🔄 **语音识别** - 使用本地 Whisper 模型进行语音转文字
 - ✨ **智能整理** - 可选 LLM 自动润色转写文本
 - ⌨️ **自动输入** - 自动模拟键盘输入到当前应用
-- ⚙️ **热键自定义** - 支持自定义触发热键
+- ⚙️ **热键自定义** - 支持自定义触发热键（含安全校验）
+- 🟠 **多通道反馈** - 状态栏、系统通知、提示音
 
 ## 环境要求
 
-- Linux (需要 X11)
+- macOS 或 Linux（需图形会话）
 - Rust 1.70+
-- 系统依赖:
+- Linux 常用依赖：
   - `pkg-config`
   - `libssl-dev`
   - `libasound2-dev`
-  - `libnotify-bin`（用于桌面通知）
+  - `libnotify-bin`（桌面通知）
+  - `pulseaudio-utils` 或 `alsa-utils`（提示音）
+- macOS 需授予：
+  - 麦克风权限
+  - 辅助功能权限（用于模拟键盘输入）
+  - 通知权限（通知来源通常显示为“脚本编辑器”）
 
 ## 快速开始
 
-### 1. 安装系统依赖
+### 1. 安装依赖（Linux 示例）
 
 ```bash
-sudo apt install pkg-config libssl-dev libasound2-dev
+sudo apt install pkg-config libssl-dev libasound2-dev libnotify-bin pulseaudio-utils
 ```
 
 ### 2. 下载 Whisper 模型
@@ -64,15 +70,14 @@ cargo build --release
 
 ## 使用方法
 
-1. 运行 `./target/release/echopup`（默认后台启动，且单实例）
-2. 如需管理配置和模型，运行 `./target/release/echopup ui`（全局单实例，重复执行会接管到当前终端）
-3. 在需要输入文本的应用中，按住右 Ctrl（默认热键，配置值 `right_ctrl`）
-4. 对着麦克风说话
-5. 松开右 Ctrl，识别文本将自动输入
+1. 运行 `./target/release/echopup`（默认后台启动，单实例）
+2. 需要管理配置和模型时，运行 `./target/release/echopup ui`（UI 也是单实例）
+3. 在需要输入文本的应用中按住热键（默认 `right_ctrl`）
+4. 说话后松开热键，文本会自动输入到当前焦点应用
 
 ### 配置
 
-默认配置文件: `~/.echopup/config.toml`
+默认配置文件：`~/.echopup/config.toml`
 
 ```toml
 [hotkey]
@@ -81,11 +86,14 @@ key = "right_ctrl"
 [audio]
 sample_rate = 16000
 channels = 1
+vad_enabled = false
+vad_silence_threshold_ms = 1500
 
 [whisper]
 # 可选: "accurate" / "balanced" / "fast"
 # performance_profile = "balanced"
-model_path = "/home/<user>/.echopup/models/ggml-large-v3.bin"
+# 请使用绝对路径；默认在 ~/.echopup/models 下
+model_path = "/Users/<user>/.echopup/models/ggml-large-v3.bin"
 translate = false
 language = "zh"
 decoding_strategy = "beam_search"
@@ -95,8 +103,8 @@ temperature = 0.0
 no_context = true
 suppress_nst = true
 n_threads = "auto"
-# initial_prompt = "可选热词：EchoPup, OpenAI, Rust, ..."
-hotwords = ["EchoPup", "OpenAI", "Rust"]
+# initial_prompt = "可选热词：EchoPup, OpenAI, Rust"
+hotwords = []
 
 [llm]
 enabled = false
@@ -110,7 +118,7 @@ enabled = true
 homophone_map = { "公做" = "工作", "行好" = "型号" }
 
 [feedback]
-# macOS 状态栏反馈（录音/识别状态）
+# macOS 状态栏反馈（在 Linux 上可保留该配置但当前不生效）
 status_bar_enabled = true
 # 录音开始/结束提示音（默认开启）
 sound_enabled = true
@@ -121,17 +129,17 @@ notify_tip_on_start = true
 热键建议与限制：
 - 推荐：`right_ctrl`（默认）
 - 允许：单独 `F1-F24`，或至少包含 `ctrl/alt/super` 的组合键
-- macOS 额外说明：`F1-F12` 可能被系统/键盘映射为媒体键，若触发不稳定建议改用 `F13-F24` 或 `ctrl+F*` 组合
-- 限制：最多 3 键；不支持仅 `shift+字母`；不建议也不允许将普通输入键（如 `z`、`space`）单独设为热键，避免影响正常打字
+- macOS 说明：`F1-F12` 可能被系统映射为媒体键，触发不稳定时建议改用 `F13-F24` 或 `ctrl+F*`
+- 限制：最多 3 键；不支持仅 `shift+字母`；不允许普通输入键（如 `z`、`space`）单独作为热键
 
 ### 启用 LLM 整理
 
-1. 设置环境变量:
+1. 设置环境变量：
    ```bash
    export OPENAI_API_KEY="your-api-key"
    ```
 
-2. 修改配置启用 LLM:
+2. 修改配置启用 LLM：
    ```toml
    [llm]
    enabled = true
@@ -157,58 +165,64 @@ Commands:
 
 Options:
   -c, --config <CONFIG>  配置文件路径 [default: ~/.echopup/config.toml]
-  -h, --help            显示帮助信息
-  -V, --version         显示版本信息
+  -h, --help             显示帮助信息
+  -V, --version          显示版本信息
 ```
 
 `ui` 子命令支持：`echopup ui start|stop|status|restart`（`echopup ui` 等价于 `echopup ui start`）。
 
 ## 项目结构
 
-```
+```text
 echo-pup-rust/
 ├── src/
-│   ├── main.rs        # 主程序入口
-│   ├── audio/         # 音频录制模块
-│   ├── config/        # 配置管理模块
-│   ├── hotkey/       # 热键监听模块
-│   ├── input/        # 键盘输入模块
-│   ├── llm/          # LLM 整理模块
-│   └── stt/          # Whisper 转写模块
+│   ├── main.rs         # 主程序入口
+│   ├── audio/          # 音频录制模块
+│   ├── config/         # 配置管理模块
+│   ├── hotkey/         # 热键监听模块
+│   ├── input/          # 键盘输入模块
+│   ├── llm/            # LLM 整理模块
+│   ├── stt/            # Whisper 转写模块
+│   ├── ui.rs           # 终端管理 UI
+│   └── status_indicator.rs # macOS 状态栏指示器
 ├── scripts/
-│   └── download_model.sh  # 下载模型脚本
+│   └── download_model.sh
+├── docs/
 └── Cargo.toml
 
 ~/.echopup/
 ├── config.toml
 ├── echopup.lock
 ├── echopup-ui.pid
-└── models/            # 模型文件目录
+├── echopup.log
+└── models/
 ```
 
-## 性能优化计划
+## 文档
 
-速度优化路线图文档：`docs/PERFORMANCE_OPTIMIZATION_ROADMAP.md`
+- 文档索引：`docs/README.md`
+- 性能路线图：`docs/architecture/performance-optimization-roadmap-v1.md`
+- 状态栏菜单同步方案：`docs/architecture/status-bar-menu-sync-plan-v1.md`
 
 ## 常见问题
 
 ### Q: 键盘输入失败
-A: 确保在图形界面环境下运行，键盘模拟需要 X11
+A: Linux 请确认在图形会话中运行并具备输入模拟能力；macOS 请在“系统设置 -> 隐私与安全性 -> 辅助功能”中授权 EchoPup。
 
 ### Q: Whisper 模型加载失败
-A: 检查模型文件是否存在于 `~/.echopup/models/` 目录，且 `model_path` 配置正确
+A: 检查模型文件是否存在于 `~/.echopup/models/`，并确认 `whisper.model_path` 指向有效绝对路径。
 
 ### Q: 录音没有声音
-A: 检查麦克风权限和系统音频配置
+A: 检查麦克风权限、输入设备和系统音量；在 macOS 上确认应用麦克风授权已开启。
 
 ### Q: 后台运行时没有通知提示
-A: macOS 需要系统通知权限；Linux 需要安装 `notify-send`（`libnotify-bin`）并在图形会话中运行（存在 `DISPLAY` 或 `WAYLAND_DISPLAY`）
+A: macOS 需要通知权限；Linux 需要 `notify-send` 且在图形会话中（有 `DISPLAY` 或 `WAYLAND_DISPLAY`）。
 
 ### Q: 为什么 macOS 通知来源显示为“脚本编辑器”？
-A: 当前使用 `osascript` 发送系统通知，这是 macOS 常见行为。请在“系统设置 -> 通知 -> 脚本编辑器”里开启通知并选择“横幅/提醒”；全屏下若看不到横幅，通知仍会进入通知中心。
+A: 当前通过 `osascript` 发送通知，这是系统行为。请在“系统设置 -> 通知 -> 脚本编辑器”中开启通知并选择“横幅”或“提醒”。
 
 ### Q: 菜单栏状态怎么理解？
-A: `⚪️ EchoPup` 表示待机，`🔴` 表示录音阶段，`🟡` 表示识别中，`🟢/🟠` 表示本次识别完成/失败；完成或失败后会自动回到待机。
+A: 默认状态显示 logo（无闪烁背景）；录音中显示 mic + 橘红脉动背景；识别中显示 mic + 橘黄脉动背景；识别完成显示 mic + 绿色背景约 5 秒后自动恢复默认状态。
 
 ## License
 
