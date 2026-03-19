@@ -41,6 +41,19 @@ sudo apt install pkg-config libssl-dev libasound2-dev libnotify-bin pulseaudio-u
 ./scripts/download_model.sh large-v3
 ```
 
+### 2.5 验收与性能基线（可选）
+
+```bash
+# 状态栏菜单与 TUI 对齐验收（自动化）
+./scripts/run_acceptance.sh
+
+# 聚合最近 200 条性能埋点（P50/P95）
+./scripts/perf_baseline.py --limit 200
+
+# 导出基线到 CSV（机型 × 档位）
+./scripts/perf_baseline.py --profile balanced --export-csv ./artifacts/perf-baseline.csv
+```
+
 ### 3. 编译运行
 
 ```bash
@@ -186,7 +199,9 @@ echo-pup-rust/
 │   ├── ui.rs           # 终端管理 UI
 │   └── status_indicator.rs # macOS 状态栏指示器
 ├── scripts/
-│   └── download_model.sh
+│   ├── download_model.sh
+│   ├── run_acceptance.sh
+│   └── perf_baseline.py
 ├── docs/
 └── Cargo.toml
 
