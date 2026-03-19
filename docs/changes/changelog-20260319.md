@@ -17,6 +17,13 @@
 - 专项技术文档归并至 `docs/architecture/`：
   - `status-bar-menu-sync-plan-v1.md`
   - `performance-optimization-roadmap-v1.md`
+- 菜单能力同步优化（1-6）完成：
+  - 共享业务内核：`src/menu_core.rs`、`src/model_download.rs`
+  - 状态栏双向 IPC：`src/status_indicator.rs` + `src/main.rs` 主循环动作回传
+  - 状态栏菜单与下载进度展示：动作映射、快照回推、下载日志显示
+  - 自动化验收脚本：`scripts/run_acceptance.sh`
+  - 性能 P0 聚合脚本：`scripts/perf_baseline.py`
+  - 告警治理：`cargo test` 噪音告警收敛（含 `cargo-clippy` cfg 与 dead code 噪音）
 
 ## 文档变化
 

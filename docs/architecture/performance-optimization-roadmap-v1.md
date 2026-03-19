@@ -37,6 +37,9 @@
 
 - 增加日志聚合脚本，自动汇总 P50/P95
 - 建立“机型 × 档位 × 延迟”基线表
+- 当前实现：`scripts/perf_baseline.py`
+  - 近 N 次统计：`./scripts/perf_baseline.py --limit 200`
+  - 基线导出：`./scripts/perf_baseline.py --profile balanced --export-csv ./artifacts/perf-baseline.csv`
 
 验收：
 - 一条命令可导出近 N 次识别延迟统计
