@@ -6,7 +6,7 @@
 
 - 业务约束：后台运行时必须保证用户能感知录音/识别状态。
 - 技术约束：核心链路本地优先，Whisper 模型位于 `~/.echopup/models`。
-- 平台约束：当前状态栏能力优先支持 macOS，Linux 菜单栏不在本轮范围。
+- 平台约束：状态栏能力支持 macOS 与 Linux (GNOME/X11)。
 - 工程约束：TUI 与状态栏不能维护两套独立业务逻辑。
 
 ## 2. 架构总览
@@ -33,9 +33,16 @@
 | STT | `whisper-rs` | 本地推理、离线可用 | 远程 STT API |
 | HTTP 下载 | `reqwest` blocking | 简化下载与重试逻辑 | 外部脚本调用 |
 | TUI | `ratatui + crossterm` | 终端 UI 生态成熟 | 自绘终端控件 |
-| 状态栏 | Cocoa / ObjC FFI | 原生 macOS 菜单栏能力 | 第三方跨平台托盘库 |
+| 状态栏 | Cocoa / ObjC FFI (macOS) / tray-icon + muda + gtk (Linux) | 原生 macOS 菜单栏能力 / Linux GNOME 托盘 | - |
 
-## 4. 数据与接口契约
+## 4. Linux 托盘实现 (R-013)
+
+
+
+> 注：Linux 状态栏实现使用 tray-icon + muda 库，支持 GNOME/X11 环境的系统托盘。需要系统依赖：libx11-dev, libgtk-3-dev, libayatana-appindicator3-dev, libglib2.0-dev。
+
+
+## 5. 数据与接口契约
 
 关键契约：
 - 配置契约：`src/config/config.rs`（`Config` 及子结构）。

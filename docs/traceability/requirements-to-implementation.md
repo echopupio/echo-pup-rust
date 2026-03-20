@@ -16,7 +16,7 @@
 | R-010 | 状态栏空闲态紧凑、激活态边缘脉动反馈且支持自适应占位 | `design/system-design-v1.md` 第 4 节 | `src/status_indicator.rs`, `assets/logo.png`, `assets/mic.png` | macOS 手工验证 + `cargo test -q` | 已实现 |
 | R-011 | 下载在代理异常环境下可回退直连并清理异常临时文件 | `architecture/technical-solution-v1.md` 第 4 节 | `src/model_download.rs` | `cargo test -q` + 下载日志核对 | 已实现 |
 | R-012 | 录音过程中实时输出识别文本（流式转写预览） | `design/system-design-v1.md`（待补充章节） | `src/main.rs`, `src/stt/*`, `src/status_indicator.rs`（规划） | 待补充 | 规划中 |
-| R-013 | Linux 状态栏菜单（GNOME/X11） | `design/system-design-v1.md`（待补充章节） | 待补充 | 待补充 | 规划中 |
+| R-013 | Linux 状态栏菜单（GNOME/X11） | `design/system-design-v1.md` 第 5 节 | `src/status_indicator.rs` | `cargo build` | 已实现 |
 
 ## 说明
 
