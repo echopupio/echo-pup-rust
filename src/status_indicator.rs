@@ -36,8 +36,23 @@ impl IndicatorState {
     }
 
     fn menu_title(self) -> &'static str {
-        let _ = self;
-        ""
+        #[cfg(target_os = "linux")]
+        {
+            match self {
+                Self::Idle => "空闲",
+                Self::RecordingStart => "准备录音",
+                Self::Recording => "录音中",
+                Self::Transcribing => "识别中",
+                Self::Completed => "完成",
+                Self::Failed => "失败",
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            ""
+        }
     }
 }
 
@@ -125,17 +140,17 @@ impl IndicatorState {
 pub struct StatusIndicatorClient {
     enabled: bool,
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     child: Option<std::process::Child>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     stdin: Option<std::process::ChildStdin>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     action_rx: Option<std::sync::mpsc::Receiver<MenuAction>>,
 }
 
 impl StatusIndicatorClient {
     pub fn start(enabled: bool, config_path: &str) -> Self {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             if !enabled {
                 return Self {
@@ -233,7 +248,7 @@ impl StatusIndicatorClient {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (enabled, config_path);
             Self { enabled: false }
@@ -274,7 +289,7 @@ impl StatusIndicatorClient {
             return None;
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let Some(rx) = self.action_rx.as_ref() else {
                 return None;
@@ -282,7 +297,7 @@ impl StatusIndicatorClient {
             return rx.try_recv().ok();
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             None
         }
@@ -295,7 +310,7 @@ impl StatusIndicatorClient {
 
         let _ = self.send_message(&ParentMessage::Exit);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             self.stdin.take();
             if let Some(mut child) = self.child.take() {
@@ -313,7 +328,7 @@ impl StatusIndicatorClient {
             return Ok(());
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let Some(stdin) = self.stdin.as_mut() else {
                 self.enabled = false;
@@ -383,7 +398,7 @@ fn spawn_stdin_reader() -> std::sync::mpsc::Receiver<IndicatorCommand> {
     rx
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn send_child_message(message: &ChildMessage) {
     let serialized = match serde_json::to_string(message) {
         Ok(v) => v,
@@ -1694,7 +1709,7 @@ mod menu_bridge {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn empty_snapshot() -> MenuSnapshot {
     MenuSnapshot {
         config_path: String::new(),
@@ -2357,9 +2372,334 @@ pub fn run_status_indicator_process() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+enum LinuxIndicatorCommand {
+    Message(ParentMessage),
+    Exit,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_indicator_command(line: &str) -> Option<LinuxIndicatorCommand> {
+    if let Ok(msg) = serde_json::from_str::<ParentMessage>(line) {
+        return Some(LinuxIndicatorCommand::Message(msg));
+    }
+
+    let trimmed = line.trim();
+    if trimmed.eq_ignore_ascii_case("exit") {
+        return Some(LinuxIndicatorCommand::Exit);
+    }
+    IndicatorState::from_wire(trimmed)
+        .map(|state| LinuxIndicatorCommand::Message(ParentMessage::SetState { state }))
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_linux_stdin_reader() -> std::sync::mpsc::Receiver<LinuxIndicatorCommand> {
+    use std::io::{BufRead, BufReader};
+
+    let (tx, rx) = std::sync::mpsc::channel::<LinuxIndicatorCommand>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let reader = BufReader::new(stdin.lock());
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if let Some(cmd) = parse_linux_indicator_command(&line) {
+                        let _ = tx.send(cmd);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(LinuxIndicatorCommand::Exit);
+    });
+    rx
+}
+
+#[cfg(target_os = "linux")]
+fn build_linux_icon(state: IndicatorState) -> Result<tray_icon::Icon> {
+    let (r, g, b) = match state {
+        IndicatorState::Idle => (88u8, 96u8, 110u8),
+        IndicatorState::RecordingStart | IndicatorState::Recording => (224u8, 74u8, 52u8),
+        IndicatorState::Transcribing => (238u8, 173u8, 57u8),
+        IndicatorState::Completed => (61u8, 168u8, 101u8),
+        IndicatorState::Failed => (210u8, 75u8, 75u8),
+    };
+
+    let width = 24u32;
+    let height = 24u32;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+            let border = x <= 1 || y <= 1 || x >= width - 2 || y >= height - 2;
+            let (pr, pg, pb) = if border { (26, 29, 33) } else { (r, g, b) };
+            rgba[idx] = pr;
+            rgba[idx + 1] = pg;
+            rgba[idx + 2] = pb;
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, width, height)
+        .map_err(|err| anyhow::anyhow!("创建 Linux 托盘图标失败: {}", err))
+}
+
+#[cfg(target_os = "linux")]
+const MENU_ID_TOGGLE_LLM: &str = "toggle_llm";
+#[cfg(target_os = "linux")]
+const MENU_ID_TOGGLE_CORRECTION: &str = "toggle_correction";
+#[cfg(target_os = "linux")]
+const MENU_ID_TOGGLE_VAD: &str = "toggle_vad";
+#[cfg(target_os = "linux")]
+const MENU_ID_MODE_HOLD: &str = "mode_hold";
+#[cfg(target_os = "linux")]
+const MENU_ID_MODE_TOGGLE: &str = "mode_toggle";
+#[cfg(target_os = "linux")]
+const MENU_ID_RELOAD_CONFIG: &str = "reload_config";
+#[cfg(target_os = "linux")]
+const MENU_ID_QUIT_UI: &str = "quit_ui";
+#[cfg(target_os = "linux")]
+const MENU_ID_SWITCH_MODEL_PREFIX: &str = "switch_model:";
+#[cfg(target_os = "linux")]
+const MENU_ID_DOWNLOAD_PREFIX: &str = "download:";
+
+#[cfg(target_os = "linux")]
+struct LinuxMenuHandles {
+    status_line: muda::MenuItem,
+    hotkey_line: muda::MenuItem,
+    llm_enabled: muda::CheckMenuItem,
+    correction_enabled: muda::CheckMenuItem,
+    vad_enabled: muda::CheckMenuItem,
+    mode_hold: muda::CheckMenuItem,
+    mode_toggle: muda::CheckMenuItem,
+    switch_model: Vec<(String, muda::CheckMenuItem)>,
+    download_items: Vec<(String, muda::MenuItem)>,
+}
+
+#[cfg(target_os = "linux")]
+fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
+    let menu = muda::Menu::new();
+
+    let status_line = muda::MenuItem::new("状态: 就绪", false, None);
+    let hotkey_line = muda::MenuItem::new("热键: -", false, None);
+    let llm_enabled = muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM", true, false, None);
+    let correction_enabled =
+        muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
+    let vad_enabled = muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_VAD, "启用 VAD", true, false, None);
+
+    menu.append(&status_line)?;
+    menu.append(&hotkey_line)?;
+    menu.append(&muda::PredefinedMenuItem::separator())?;
+    menu.append(&llm_enabled)?;
+    menu.append(&correction_enabled)?;
+    menu.append(&vad_enabled)?;
+    menu.append(&muda::PredefinedMenuItem::separator())?;
+
+    let mode_hold = muda::CheckMenuItem::with_id(MENU_ID_MODE_HOLD, "长按模式", true, false, None);
+    let mode_toggle =
+        muda::CheckMenuItem::with_id(MENU_ID_MODE_TOGGLE, "按压切换模式", true, false, None);
+    let mode_submenu = muda::Submenu::new("热键触发模式", true);
+    mode_submenu.append(&mode_hold)?;
+    mode_submenu.append(&mode_toggle)?;
+    menu.append(&mode_submenu)?;
+
+    let switch_submenu = muda::Submenu::new("切换 Whisper 模型", true);
+    let mut switch_model = Vec::new();
+    for file in WHISPER_MODEL_FILES {
+        let id = format!("{MENU_ID_SWITCH_MODEL_PREFIX}{file}");
+        let item = muda::CheckMenuItem::with_id(id, file, true, false, None);
+        switch_submenu.append(&item)?;
+        switch_model.push((file.to_string(), item));
+    }
+    menu.append(&switch_submenu)?;
+
+    let download_submenu = muda::Submenu::new("下载模型", true);
+    let mut download_items = Vec::new();
+    for size in DOWNLOAD_MODEL_SIZES {
+        let id = format!("{MENU_ID_DOWNLOAD_PREFIX}{size}");
+        let item = muda::MenuItem::with_id(id, format!("下载 {size}"), true, None);
+        download_submenu.append(&item)?;
+        download_items.push((size.to_string(), item));
+    }
+    menu.append(&download_submenu)?;
+    menu.append(&muda::PredefinedMenuItem::separator())?;
+    menu.append(&muda::MenuItem::with_id(MENU_ID_RELOAD_CONFIG, "重载配置", true, None))?;
+    menu.append(&muda::MenuItem::with_id(MENU_ID_QUIT_UI, "退出", true, None))?;
+
+    Ok((
+        menu,
+        LinuxMenuHandles {
+            status_line,
+            hotkey_line,
+            llm_enabled,
+            correction_enabled,
+            vad_enabled,
+            mode_hold,
+            mode_toggle,
+            switch_model,
+            download_items,
+        },
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state: IndicatorState) {
+    let mut status_text = snapshot.status.trim().to_string();
+    if status_text.is_empty() {
+        status_text = state.menu_title().to_string();
+    }
+    if status_text.chars().count() > 56 {
+        status_text = format!("{}...", status_text.chars().take(56).collect::<String>());
+    }
+
+    handles
+        .status_line
+        .set_text(format!("状态: {}", status_text.replace('\n', " ")));
+    handles.hotkey_line.set_text(format!("热键: {}", snapshot.hotkey));
+    handles.llm_enabled.set_checked(snapshot.llm_enabled);
+    handles
+        .correction_enabled
+        .set_checked(snapshot.text_correction_enabled);
+    handles.vad_enabled.set_checked(snapshot.vad_enabled);
+    handles
+        .mode_hold
+        .set_checked(snapshot.hotkey_trigger_mode == HotkeyTriggerMode::HoldToRecord);
+    handles
+        .mode_toggle
+        .set_checked(snapshot.hotkey_trigger_mode == HotkeyTriggerMode::PressToToggle);
+
+    let current_model = std::path::Path::new(&snapshot.whisper_model_path)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default();
+    for (model_file, item) in &handles.switch_model {
+        item.set_checked(model_file == current_model);
+    }
+
+    let active_download = snapshot
+        .download
+        .as_ref()
+        .filter(|download| download.in_progress)
+        .map(|download| download.model_size.as_str());
+    for (size, item) in &handles.download_items {
+        let text = if Some(size.as_str()) == active_download {
+            format!("下载 {}（进行中）", size)
+        } else {
+            format!("下载 {}", size)
+        };
+        item.set_text(text);
+        item.set_enabled(active_download.is_none());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
+    match id {
+        MENU_ID_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
+        MENU_ID_TOGGLE_CORRECTION => Some(MenuAction::ToggleTextCorrectionEnabled),
+        MENU_ID_TOGGLE_VAD => Some(MenuAction::ToggleVadEnabled),
+        MENU_ID_MODE_HOLD => Some(MenuAction::SetHotkeyTriggerMode {
+            mode: HotkeyTriggerMode::HoldToRecord,
+        }),
+        MENU_ID_MODE_TOGGLE => Some(MenuAction::SetHotkeyTriggerMode {
+            mode: HotkeyTriggerMode::PressToToggle,
+        }),
+        MENU_ID_RELOAD_CONFIG => Some(MenuAction::ReloadConfig),
+        MENU_ID_QUIT_UI => Some(MenuAction::QuitUi),
+        _ => {
+            if let Some(model_file) = id.strip_prefix(MENU_ID_SWITCH_MODEL_PREFIX) {
+                if let Ok(model_path) = whisper_model_path_from_file_name(model_file) {
+                    return Some(MenuAction::SwitchWhisperModel { model_path });
+                }
+                return None;
+            }
+            id.strip_prefix(MENU_ID_DOWNLOAD_PREFIX)
+                .map(|size| MenuAction::DownloadModel {
+                    size: size.to_string(),
+                })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn run_status_indicator_process() -> Result<()> {
-    anyhow::bail!("status-indicator 仅在 macOS 可用");
+    use tray_icon::TrayIconBuilder;
+
+    gtk::init().map_err(|err| anyhow::anyhow!("初始化 GTK 失败: {}", err))?;
+
+    let rx = spawn_linux_stdin_reader();
+    let (menu, handles) = build_linux_menu()?;
+
+    let mut state = IndicatorState::Idle;
+    let mut snapshot = empty_snapshot();
+    update_linux_menu(&handles, &snapshot, state);
+
+    let tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_icon(build_linux_icon(state)?)
+        .with_tooltip("EchoPup 状态栏")
+        .with_title(state.menu_title())
+        .build()?;
+
+    let mut should_exit = false;
+    info!("Linux 托盘状态指示器已启动");
+
+    while !should_exit {
+        while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+            if let Some(action) = map_linux_menu_id_to_action(event.id.as_ref()) {
+                send_child_message(&ChildMessage::ActionRequest { action });
+            }
+        }
+
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                LinuxIndicatorCommand::Message(message) => match message {
+                    ParentMessage::SetState { state: next_state } => {
+                        state = next_state;
+                        tray_icon.set_title(Some(state.menu_title()));
+                        if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state)?)) {
+                            warn!("更新 Linux 托盘图标失败: {}", err);
+                        }
+                        update_linux_menu(&handles, &snapshot, state);
+                    }
+                    ParentMessage::SetSnapshot {
+                        snapshot: next_snapshot,
+                    } => {
+                        snapshot = next_snapshot;
+                        update_linux_menu(&handles, &snapshot, state);
+                    }
+                    ParentMessage::SetActionResult { result } => {
+                        if !result.ok {
+                            warn!("状态栏动作执行失败: {}", result.message);
+                        }
+                        snapshot = result.snapshot;
+                        update_linux_menu(&handles, &snapshot, state);
+                    }
+                    ParentMessage::Exit => {
+                        should_exit = true;
+                        break;
+                    }
+                },
+                LinuxIndicatorCommand::Exit => {
+                    should_exit = true;
+                    break;
+                }
+            }
+        }
+
+        while gtk::events_pending() {
+            let _ = gtk::main_iteration_do(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+
+    drop(tray_icon);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn run_status_indicator_process() -> Result<()> {
+    anyhow::bail!("status-indicator 仅在 macOS/Linux 可用");
 }
 
 #[cfg(test)]
