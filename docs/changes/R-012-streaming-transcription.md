@@ -32,76 +32,81 @@
 
 ---
 
-## 实现方案
+## 技术方案
 
-### 方案 A: 后台线程增量转写（推荐）
+### 融合方案（推荐）
 
-在录音过程中，启动后台线程周期性获取 `audio_buffer` 快照并进行增量转写：
+结合方案 A 与方案 B 的优势：
 
 ```
-录音线程 → audio_buffer (共享)
-              ↓ 周期性快照
-         后台转写线程 → WhisperSTT::transcribe()
-              ↓ 增量文本
-         StatusIndicatorClient::send_snapshot()
-              ↓
-         状态栏显示部分文本
+录音开始
+    │
+    ├─→ 启动 Whisper 回调模式 (方案 B)
+    │       └─→ on_new_segment → 增量文本 → 状态栏
+    │
+    └─→ 启动后台轮询线程 (方案 A) 作为补充/兜底
+            └─→ 定期快照 + 转写 → 增量文本 → 状态栏
 ```
 
-**优点**: 不影响主录音流程，实现相对简单
-**缺点**: 会有重复计算（已识别部分可能被重复处理）
+### 方案对比
 
-### 方案 B: Whisper 回调模式
+| 维度 | 方案 A: 后台线程增量转写 | 方案 B: Whisper 回调模式 |
+|------|--------------------------|--------------------------|
+| 实现复杂度 | ⭐⭐ 中等 | ⭐⭐⭐ 较高 |
+| 代码改动 | 较小，只在主流程加线程 | 需修改 WhisperSTT 内部 |
+| 首字延迟 | 取决于快照频率 | 取决于 Whisper 产生 segment 速度 |
+| 计算效率 | ⚠️ 有重复计算 | ✅ 无重复 |
+| 控制灵活度 | ✅ 可控快照间隔 | ⚠️ 依赖 Whisper 内部逻辑 |
 
-使用 whisper-rs 的 `set_new_segment_callback` 回调：
+### 融合优势
 
-```rust
-// 设置单段模式
-params.set_single_segment(true);
-
-// 设置新段回调
-params.set_new_segment_callback(|segment| {
-    // 每次产生新段时调用
-    let text = segment.text;
-    // 发送到状态栏
-});
-```
-
-**优点**: Whisper 原生支持，效率更高
-**缺点**: 需要修改 WhisperSTT 内部实现
+| 优势 | 说明 |
+|------|------|
+| **更快首字** | 回调模式通常更快触发 |
+| **更稳兜底** | 轮询作为保底，不依赖回调是否触发 |
+| **自动选择** | 优先用回调，回调失败时用轮询 |
+| **结果校验** | 可对比两种方式的结果一致性 |
 
 ---
 
 ## 实现步骤
 
-### 阶段 1: WhisperSTT 流式能力
+### 阶段 1: 基础能力 - 方案 A 后台轮询
 
-- [ ] 1.1 在 `src/stt/whisper.rs` 添加 `transcribe_streaming()` 方法
-- [ ] 1.2 使用 `set_single_segment(true)` 启用单段模式
-- [ ] 1.3 实现或封装 `set_new_segment_callback` 回调
-- [ ] 1.4 确保线程安全（考虑 Arc + Mutex 或专属转写线程）
+- [ ] 1.1 在 `src/audio/recorder.rs` 添加获取快照方法 `get_snapshot()`
+- [ ] 1.2 在 `src/stt/whisper.rs` 添加增量转写方法（可复用现有 `transcribe`）
+- [ ] 1.3 在 `src/main.rs` 录音开始时启动后台转写线程
+- [ ] 1.4 后台线程周期性（如每 500ms）获取 audio_buffer 快照
+- [ ] 1.5 调用转写，收集增量文本
+- [ ] 1.6 通过 `send_snapshot()` 更新状态栏
 
-### 阶段 2: 录音流程改造
+### 阶段 2: 增强能力 - 方案 B 回调模式
 
-- [ ] 2.1 在 `src/audio/recorder.rs` 添加获取快照方法 `get_snapshot()`
-- [ ] 2.2 在 `src/main.rs` 录音开始时启动后台转写线程
-- [ ] 2.3 后台线程周期性（如每 500ms）获取 audio_buffer 快照
-- [ ] 2.4 调用流式转写，收集增量文本
-- [ ] 2.5 录音结束时停止后台线程，合并最终结果
+- [ ] 2.1 在 `src/stt/whisper.rs` 添加 `transcribe_with_callback()` 方法
+- [ ] 2.2 使用 `set_single_segment(true)` 启用单段模式
+- [ ] 2.3 实现 `set_new_segment_callback` 回调
+- [ ] 2.4 回调触发时发送增量文本到状态栏
 
-### 阶段 3: 状态栏显示
+### 阶段 3: 融合逻辑
 
-- [ ] 3.1 扩展 `IndicatorState` 添加 `TranscribingPartial { text: String }` 状态
-- [ ] 3.2 修改 `send_snapshot()` 支持增量文本更新
-- [ ] 3.3 在 macOS 状态栏显示部分文本
-- [ ] 3.4 在 Linux 菜单状态行显示部分文本
+- [ ] 3.1 录音开始时同时启动回调模式 + 后台轮询
+- [ ] 3.2 回调模式产生结果时：更新状态栏，标记"已收到回调结果"
+- [ ] 3.3 后台轮询产生结果时：对比回调结果，优先使用回调
+- [ ] 3.4 录音结束时停止两个线程，合并最终结果
 
-### 阶段 4: 优化与测试
+### 阶段 4: 状态栏显示
 
-- [ ] 4.1 首字延迟优化（调整触发阈值）
-- [ ] 4.2 增量文本与最终结果一致性验证
-- [ ] 4.3 性能测试（CPU/内存）
-- [ ] 4.4 手工验收测试
+- [ ] 4.1 扩展 `IndicatorState` 添加 `TranscribingPartial { text: String }` 状态
+- [ ] 4.2 修改 `send_snapshot()` 支持增量文本更新
+- [ ] 4.3 在 macOS 状态栏显示部分文本
+- [ ] 4.4 在 Linux 菜单状态行显示部分文本
+
+### 阶段 5: 优化与测试
+
+- [ ] 5.1 首字延迟优化（调整触发阈值）
+- [ ] 5.2 增量文本与最终结果一致性验证
+- [ ] 5.3 性能测试（CPU/内存）
+- [ ] 5.4 手工验收测试
 
 ---
 
@@ -109,10 +114,10 @@ params.set_new_segment_callback(|segment| {
 
 | 文件 | 改动说明 |
 |------|----------|
-| `src/stt/whisper.rs` | 添加流式转写方法 |
+| `src/stt/whisper.rs` | 添加 `transcribe_with_callback()` 流式转写方法 |
 | `src/stt/mod.rs` | 导出新方法 |
 | `src/audio/recorder.rs` | 添加 `get_snapshot()` |
-| `src/main.rs` | 启动后台转写线程 |
+| `src/main.rs` | 启动后台转写线程 + 融合逻辑 |
 | `src/status_indicator.rs` | 支持增量文本显示 |
 
 ---
@@ -127,7 +132,7 @@ params.set_new_segment_callback(|segment| {
 ## 风险与注意事项
 
 1. **首字延迟**: Whisper 需要积累一定音频才能识别，首字可能延迟 1-3 秒
-2. **重复计算**: 每次快照都包含已识别部分，需优化避免重复
+2. **重复计算**: 两种方案同时运行可能有重复，需合并去重
 3. **状态栏更新频率**: 建议限制更新频率（如最多每秒 2 次）
 4. **用户体验**: 增量文本可能与最终结果不同，需向用户说明
 
