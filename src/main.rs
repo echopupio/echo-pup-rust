@@ -176,6 +176,12 @@ fn format_partial_status(text: &str) -> String {
     }
 }
 
+fn join_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) {
+    if let Some(join_handle) = handle.lock().take() {
+        let _ = join_handle.join();
+    }
+}
+
 /// 处理音频数据：转写 -> LLM 整理 -> 谐音纠错 -> 键盘输入
 /// is_vad_triggered: 是否由 VAD 自动触发（用于日志区分）
 fn process_audio(
@@ -749,6 +755,7 @@ fn apply_runtime_menu_action(
     hotkey_listener: &mut hotkey::HotkeyListener,
     hotkey_trigger_mode_runtime: &Arc<Mutex<config::HotkeyTriggerMode>>,
     whisper_runtime: &Arc<Mutex<Option<stt::WhisperSTT>>>,
+    whisper_callback_runtime: &Arc<Mutex<Option<stt::WhisperSTT>>>,
     llm_runtime: &Arc<Mutex<Option<llm::LLMRewrite>>>,
 ) -> Result<()> {
     match action {
@@ -771,6 +778,9 @@ fn apply_runtime_menu_action(
                 Ok(new_whisper) => {
                     let mut guard = whisper_runtime.lock();
                     *guard = Some(new_whisper);
+                    drop(guard);
+                    let mut callback_guard = whisper_callback_runtime.lock();
+                    *callback_guard = build_whisper_stt(&whisper_cfg).ok();
                     info!("Whisper 模型已热更新: {}", whisper_cfg.model_path);
                 }
                 Err(err) => {
@@ -809,6 +819,9 @@ fn apply_runtime_menu_action(
                 Ok(new_whisper) => {
                     let mut guard = whisper_runtime.lock();
                     *guard = Some(new_whisper);
+                    drop(guard);
+                    let mut callback_guard = whisper_callback_runtime.lock();
+                    *callback_guard = build_whisper_stt(&whisper_cfg).ok();
                     info!("Whisper 配置已重载: {}", whisper_cfg.model_path);
                 }
                 Err(err) => {
@@ -965,6 +978,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     };
     // 使用 Mutex 包装，以便在回调中共享（transcribe 需要 &mut self）
     let whisper = Arc::new(Mutex::new(whisper));
+    let whisper_callback = Arc::new(Mutex::new(build_whisper_stt(&whisper_cfg).ok()));
 
     let llm = if config.llm.enabled {
         match build_llm_runtime(&config.llm) {
@@ -1064,6 +1078,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     let recorder_start = recorder.clone();
     let whisper_for_partial_start = whisper.clone();
+    let whisper_for_callback_start = whisper_callback.clone();
     let is_recording_start = is_recording.clone();
     let recording_animation_start = recording_animation.clone();
     let desktop_notify_on_start = desktop_notify_enabled;
@@ -1100,9 +1115,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     desktop_notify(desktop_notify_on_start, "EchoPup", "开始录音");
 
                     partial_stt_stop_on_start.store(false, Ordering::SeqCst);
-                    if let Some(old_handle) = partial_stt_handle_on_start.lock().take() {
-                        let _ = old_handle.join();
-                    }
+                    partial_callback_latest_text_on_start.lock().clear();
+                    join_thread_handle(&partial_stt_handle_on_start);
+                    join_thread_handle(&partial_stt_callback_handle_on_start);
 
                     let recorder_partial = recorder_start.clone();
                     let whisper_partial = whisper_for_partial_start.clone();
@@ -1110,13 +1125,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     let menu_snapshot_partial = menu_snapshot_on_start.clone();
                     let is_recording_partial = is_recording_start.clone();
                     let partial_stt_stop = partial_stt_stop_on_start.clone();
+                    let partial_callback_latest_text_for_poll =
+                        partial_callback_latest_text_on_start.clone();
                     let handle = std::thread::spawn(move || {
                         let poll_interval = Duration::from_millis(500);
                         let min_samples = (recorder_partial.target_sample_rate() as usize)
                             .saturating_mul(800)
                             / 1000;
                         let mut last_snapshot_len = 0usize;
-                        let mut last_text = String::new();
+                        let mut last_sent_text = String::new();
 
                         while is_recording_partial.load(Ordering::SeqCst)
                             && !partial_stt_stop.load(Ordering::SeqCst)
@@ -1134,6 +1151,21 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             }
                             last_snapshot_len = snapshot.len();
 
+                            let callback_text = partial_callback_latest_text_for_poll.lock().clone();
+                            let callback_trimmed = callback_text.trim();
+                            if !callback_trimmed.is_empty()
+                                && callback_trimmed != "[BLANK_AUDIO]"
+                                && callback_trimmed != last_sent_text
+                            {
+                                last_sent_text = callback_trimmed.to_string();
+                                send_status_snapshot(
+                                    &status_indicator_partial,
+                                    &menu_snapshot_partial,
+                                    format_partial_status(callback_trimmed),
+                                );
+                                continue;
+                            }
+
                             let partial_text = {
                                 let mut whisper_guard = whisper_partial.lock();
                                 if let Some(ref mut whisper) = *whisper_guard {
@@ -1150,11 +1182,11 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
                                 continue;
                             }
-                            if trimmed == last_text {
+                            if trimmed == last_sent_text {
                                 continue;
                             }
 
-                            last_text = trimmed.to_string();
+                            last_sent_text = trimmed.to_string();
                             send_status_snapshot(
                                 &status_indicator_partial,
                                 &menu_snapshot_partial,
@@ -1163,6 +1195,88 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         }
                     });
                     *partial_stt_handle_on_start.lock() = Some(handle);
+
+                    let recorder_callback = recorder_start.clone();
+                    let whisper_callback_runtime = whisper_for_callback_start.clone();
+                    let status_indicator_callback = status_indicator_on_start.clone();
+                    let menu_snapshot_callback = menu_snapshot_on_start.clone();
+                    let is_recording_callback = is_recording_start.clone();
+                    let partial_stt_stop_callback = partial_stt_stop_on_start.clone();
+                    let partial_callback_latest_text_for_callback =
+                        partial_callback_latest_text_on_start.clone();
+                    let callback_handle = std::thread::spawn(move || {
+                        let poll_interval = Duration::from_millis(500);
+                        let min_samples = (recorder_callback.target_sample_rate() as usize)
+                            .saturating_mul(800)
+                            / 1000;
+                        let mut last_snapshot_len = 0usize;
+
+                        while is_recording_callback.load(Ordering::SeqCst)
+                            && !partial_stt_stop_callback.load(Ordering::SeqCst)
+                        {
+                            std::thread::sleep(poll_interval);
+                            if !is_recording_callback.load(Ordering::SeqCst)
+                                || partial_stt_stop_callback.load(Ordering::SeqCst)
+                            {
+                                break;
+                            }
+
+                            let snapshot = recorder_callback.get_snapshot();
+                            if snapshot.len() < min_samples || snapshot.len() <= last_snapshot_len {
+                                continue;
+                            }
+                            last_snapshot_len = snapshot.len();
+
+                            let callback_text_shared =
+                                partial_callback_latest_text_for_callback.clone();
+                            let status_indicator_callback_inner = status_indicator_callback.clone();
+                            let menu_snapshot_callback_inner = menu_snapshot_callback.clone();
+                            let callback_result = {
+                                let mut whisper_guard = whisper_callback_runtime.lock();
+                                if let Some(ref mut whisper) = *whisper_guard {
+                                    whisper.transcribe_with_callback(&snapshot, move |segment| {
+                                        let trimmed = segment.trim();
+                                        if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
+                                            return;
+                                        }
+
+                                        let mut latest = callback_text_shared.lock();
+                                        if latest.as_str() == trimmed {
+                                            return;
+                                        }
+                                        *latest = trimmed.to_string();
+                                        drop(latest);
+
+                                        send_status_snapshot(
+                                            &status_indicator_callback_inner,
+                                            &menu_snapshot_callback_inner,
+                                            format_partial_status(trimmed),
+                                        );
+                                    }).ok()
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let Some(callback_result) = callback_result {
+                                let trimmed = callback_result.trim();
+                                if !trimmed.is_empty() && trimmed != "[BLANK_AUDIO]" {
+                                    let mut latest = partial_callback_latest_text_for_callback.lock();
+                                    if latest.as_str() != trimmed {
+                                        *latest = trimmed.to_string();
+                                        drop(latest);
+
+                                        send_status_snapshot(
+                                            &status_indicator_callback,
+                                            &menu_snapshot_callback,
+                                            format_partial_status(trimmed),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    *partial_stt_callback_handle_on_start.lock() = Some(callback_handle);
                 }
                 Err(e) => {
                     error!("开始录音失败: {}", e);
@@ -1189,6 +1303,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let sound_feedback_on_stop = sound_feedback_enabled;
     let status_indicator_on_stop = status_indicator.clone();
     let stop_debounce_on_stop = stop_debounce_until.clone();
+    let partial_stt_stop_on_stop = partial_stt_should_stop.clone();
+    let partial_stt_handle_on_stop = partial_stt_handle.clone();
+    let partial_stt_callback_handle_on_stop = partial_stt_callback_handle.clone();
+    let partial_callback_latest_text_on_stop = partial_callback_latest_text.clone();
     let stop_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if is_recording_stop.load(Ordering::SeqCst) {
             *stop_debounce_on_stop.lock() = None;
@@ -1196,6 +1314,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             recording_animation_stop.store(false, Ordering::SeqCst);
             print!("\r");
             clear_terminal_artifacts_if_tty();
+            partial_stt_stop_on_stop.store(true, Ordering::SeqCst);
+            join_thread_handle(&partial_stt_handle_on_stop);
+            join_thread_handle(&partial_stt_callback_handle_on_stop);
+            partial_callback_latest_text_on_stop.lock().clear();
 
             let audio_data = match recorder_stop.stop() {
                 Ok(data) => data,
@@ -1336,6 +1458,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let desktop_notify_on_vad = desktop_notify_enabled;
         let sound_feedback_on_vad = sound_feedback_enabled;
         let status_indicator_on_vad = status_indicator.clone();
+        let partial_stt_stop_on_vad = partial_stt_should_stop.clone();
+        let partial_stt_handle_on_vad = partial_stt_handle.clone();
+        let partial_stt_callback_handle_on_vad = partial_stt_callback_handle.clone();
+        let partial_callback_latest_text_on_vad = partial_callback_latest_text.clone();
 
         let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             info!("端点检测：语音结束，触发自动转写");
@@ -1350,6 +1476,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 vad_recording_animation.store(false, Ordering::SeqCst);
                 print!("\r"); // 清除动画行
             }
+            partial_stt_stop_on_vad.store(true, Ordering::SeqCst);
+            join_thread_handle(&partial_stt_handle_on_vad);
+            join_thread_handle(&partial_stt_callback_handle_on_vad);
+            partial_callback_latest_text_on_vad.lock().clear();
 
             // 获取音频数据并处理
             let audio_data = match vad_recorder.stop() {
@@ -1454,6 +1584,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         &mut hotkey,
                         &hotkey_trigger_mode,
                         &whisper,
+                        &whisper_callback,
                         &llm,
                     ) {
                         warn!("菜单动作热更新失败: {}", err);
@@ -1493,6 +1624,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     }
 
     // 停止动画线程
+    partial_stt_should_stop.store(true, Ordering::SeqCst);
+    join_thread_handle(&partial_stt_handle);
+    join_thread_handle(&partial_stt_callback_handle);
     animation_should_stop.store(true, Ordering::SeqCst);
     recording_animation.store(false, Ordering::SeqCst);
     let _ = animation_handle.join();
