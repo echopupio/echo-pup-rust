@@ -426,7 +426,7 @@ fn play_feedback_sound(enabled: bool, event: FeedbackSoundEvent) {
     }
 }
 
-fn send_feedback_sound(event: FeedbackSoundEvent) -> Result<()> {
+fn send_feedback_sound(_event: FeedbackSoundEvent) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let sound_path = match event {

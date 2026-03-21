@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::config::HotkeyTriggerMode;
 use crate::menu_core::{
-    whisper_model_path_from_file_name, EditableField, MenuAction, MenuActionResult, MenuSnapshot,
+    whisper_model_path_from_file_name, MenuAction, MenuActionResult, MenuSnapshot,
     DOWNLOAD_MODEL_SIZES, WHISPER_MODEL_FILES,
 };
 
