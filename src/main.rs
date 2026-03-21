@@ -150,6 +150,32 @@ fn set_status_indicator_state(
     guard.send(state);
 }
 
+fn send_status_snapshot(
+    indicator: &Arc<Mutex<status_indicator::StatusIndicatorClient>>,
+    snapshot_state: &Arc<Mutex<menu_core::MenuSnapshot>>,
+    status: impl Into<String>,
+) {
+    let snapshot = {
+        let mut snapshot = snapshot_state.lock();
+        snapshot.status = status.into();
+        snapshot.clone()
+    };
+    let mut guard = indicator.lock();
+    guard.send_snapshot(&snapshot);
+}
+
+fn format_partial_status(text: &str) -> String {
+    const MAX_CHARS: usize = 48;
+    let clean = text.replace('\n', " ").trim().to_string();
+    let mut chars = clean.chars();
+    let clipped: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("识别中: {}…", clipped)
+    } else {
+        format!("识别中: {}", clipped)
+    }
+}
+
 /// 处理音频数据：转写 -> LLM 整理 -> 谐音纠错 -> 键盘输入
 /// is_vad_triggered: 是否由 VAD 自动触发（用于日志区分）
 fn process_audio(
@@ -880,6 +906,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         config.feedback.status_bar_enabled,
         config_path,
     )));
+    let menu_snapshot_state = Arc::new(Mutex::new(menu_runtime.snapshot()));
     let status_indicator_enabled = {
         let guard = status_indicator.lock();
         guard.is_enabled()
@@ -887,7 +914,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     if status_indicator_enabled {
         info!("状态栏反馈已启用: macOS 菜单栏");
         set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
-        let snapshot = menu_runtime.snapshot();
+        let snapshot = menu_snapshot_state.lock().clone();
         let mut guard = status_indicator.lock();
         guard.send_snapshot(&snapshot);
     } else if config.feedback.status_bar_enabled {
@@ -992,6 +1019,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     // ===== 状态标记 =====
     let is_recording = Arc::new(AtomicBool::new(false));
     let vad_triggered = Arc::new(AtomicBool::new(false)); // VAD 触发标记
+    let partial_stt_should_stop = Arc::new(AtomicBool::new(false));
+    let partial_stt_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
 
     // 录音动画控制
     let recording_animation = Arc::new(AtomicBool::new(false));
@@ -1032,12 +1061,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let hotkey_trigger_mode = Arc::new(Mutex::new(config.hotkey.trigger_mode));
 
     let recorder_start = recorder.clone();
+    let whisper_for_partial_start = whisper.clone();
     let is_recording_start = is_recording.clone();
     let recording_animation_start = recording_animation.clone();
     let desktop_notify_on_start = desktop_notify_enabled;
     let sound_feedback_on_start = sound_feedback_enabled;
     let status_indicator_on_start = status_indicator.clone();
+    let menu_snapshot_on_start = menu_snapshot_state.clone();
     let stop_debounce_on_start = stop_debounce_until.clone();
+    let partial_stt_stop_on_start = partial_stt_should_stop.clone();
+    let partial_stt_handle_on_start = partial_stt_handle.clone();
     let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
@@ -1061,6 +1094,71 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         FeedbackSoundEvent::RecordingStart,
                     );
                     desktop_notify(desktop_notify_on_start, "EchoPup", "开始录音");
+
+                    partial_stt_stop_on_start.store(false, Ordering::SeqCst);
+                    if let Some(old_handle) = partial_stt_handle_on_start.lock().take() {
+                        let _ = old_handle.join();
+                    }
+
+                    let recorder_partial = recorder_start.clone();
+                    let whisper_partial = whisper_for_partial_start.clone();
+                    let status_indicator_partial = status_indicator_on_start.clone();
+                    let menu_snapshot_partial = menu_snapshot_on_start.clone();
+                    let is_recording_partial = is_recording_start.clone();
+                    let partial_stt_stop = partial_stt_stop_on_start.clone();
+                    let handle = std::thread::spawn(move || {
+                        let poll_interval = Duration::from_millis(500);
+                        let min_samples = (recorder_partial.target_sample_rate() as usize)
+                            .saturating_mul(800)
+                            / 1000;
+                        let mut last_snapshot_len = 0usize;
+                        let mut last_text = String::new();
+
+                        while is_recording_partial.load(Ordering::SeqCst)
+                            && !partial_stt_stop.load(Ordering::SeqCst)
+                        {
+                            std::thread::sleep(poll_interval);
+                            if !is_recording_partial.load(Ordering::SeqCst)
+                                || partial_stt_stop.load(Ordering::SeqCst)
+                            {
+                                break;
+                            }
+
+                            let snapshot = recorder_partial.get_snapshot();
+                            if snapshot.len() < min_samples || snapshot.len() <= last_snapshot_len {
+                                continue;
+                            }
+                            last_snapshot_len = snapshot.len();
+
+                            let partial_text = {
+                                let mut whisper_guard = whisper_partial.lock();
+                                if let Some(ref mut whisper) = *whisper_guard {
+                                    whisper.transcribe_incremental(&snapshot).ok()
+                                } else {
+                                    None
+                                }
+                            };
+
+                            let Some(partial_text) = partial_text else {
+                                continue;
+                            };
+                            let trimmed = partial_text.trim();
+                            if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
+                                continue;
+                            }
+                            if trimmed == last_text {
+                                continue;
+                            }
+
+                            last_text = trimmed.to_string();
+                            send_status_snapshot(
+                                &status_indicator_partial,
+                                &menu_snapshot_partial,
+                                format_partial_status(trimmed),
+                            );
+                        }
+                    });
+                    *partial_stt_handle_on_start.lock() = Some(handle);
                 }
                 Err(e) => {
                     error!("开始录音失败: {}", e);

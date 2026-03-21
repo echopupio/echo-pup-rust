@@ -604,9 +604,24 @@ impl AudioRecorder {
         Ok(buffer)
     }
 
+    /// 获取当前录音快照（已重采样到目标采样率）
+    pub fn get_snapshot(&self) -> Vec<f32> {
+        let mut buffer = self.audio_buffer.lock().clone();
+        let device_rate = *self.device_sample_rate.lock();
+        if device_rate != 0 && device_rate != self.sample_rate {
+            buffer = resample_audio(&buffer, device_rate, self.sample_rate);
+        }
+        buffer
+    }
+
+    /// 获取目标采样率
+    pub fn target_sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     /// 获取音频缓冲区的副本（用于实时分析）
     pub fn get_audio_buffer(&self) -> Vec<f32> {
-        self.audio_buffer.lock().clone()
+        self.get_snapshot()
     }
 
     /// 检查是否正在录音

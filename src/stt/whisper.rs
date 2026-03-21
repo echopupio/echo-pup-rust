@@ -220,6 +220,11 @@ impl WhisperSTT {
         Ok(result)
     }
 
+    /// 用于实时预览场景的可复用转写入口
+    pub fn transcribe_incremental(&mut self, audio: &[f32]) -> Result<String> {
+        self.transcribe(audio)
+    }
+
     /// 修复标点符号（中文场景下 Whisper 往往不带标点）
     /// 在句尾添加适当的标点（句号、问号等）
     fn fix_punctuation(text: &str) -> String {
