@@ -225,6 +225,86 @@ impl WhisperSTT {
         self.transcribe(audio)
     }
 
+    /// 回调模式转写：开启 single_segment，并在每个新分段时触发回调。
+    pub fn transcribe_with_callback<C>(&mut self, audio: &[f32], on_segment: C) -> Result<String>
+    where
+        C: FnMut(String) + Send + 'static,
+    {
+        if audio.is_empty() {
+            return Ok(String::new());
+        }
+
+        let initial_prompt = self.build_initial_prompt();
+        let state = self.state.as_mut().context("Whisper state 未创建")?;
+
+        let strategy = match self.decoding_strategy {
+            DecodingStrategy::Greedy { best_of } => SamplingStrategy::Greedy {
+                best_of: best_of.max(1),
+            },
+            DecodingStrategy::BeamSearch { beam_size } => SamplingStrategy::BeamSearch {
+                beam_size: beam_size.max(1),
+                patience: -1.0,
+            },
+        };
+        let mut params = FullParams::new(strategy);
+        params.set_n_threads(self.n_threads.max(1));
+        params.set_print_progress(false);
+        params.set_print_timestamps(false);
+        params.set_print_special(false);
+        params.set_no_timestamps(true);
+        params.set_no_context(self.no_context);
+        params.set_suppress_nst(self.suppress_nst);
+        params.set_suppress_blank(true);
+        params.set_temperature(self.temperature);
+        params.set_single_segment(true);
+
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(&prompt);
+        }
+
+        if let Some(ref lang) = self.language {
+            if lang != "auto" {
+                params.set_language(Some(lang.as_str()));
+            } else {
+                params.set_detect_language(true);
+            }
+        }
+        params.set_translate(self.translate);
+
+        let callback = std::sync::Arc::new(std::sync::Mutex::new(on_segment));
+        let callback_clone = callback.clone();
+        let segment_callback: Box<dyn FnMut(whisper_rs::SegmentCallbackData)> =
+            Box::new(move |segment: whisper_rs::SegmentCallbackData| {
+                let text = segment.text.trim();
+                if text.is_empty() || text == "[BLANK_AUDIO]" {
+                    return;
+                }
+                if let Ok(mut cb) = callback_clone.lock() {
+                    cb(text.to_string());
+                }
+            });
+        params.set_segment_callback_safe::<
+            Option<Box<dyn FnMut(whisper_rs::SegmentCallbackData)>>,
+            Box<dyn FnMut(whisper_rs::SegmentCallbackData)>,
+        >(Some(segment_callback));
+
+        state
+            .full(params, audio)
+            .map_err(|e| anyhow::anyhow!("Whisper 回调转写失败: {:?}", e))?;
+
+        let num_segments = state.full_n_segments();
+        let mut result = String::new();
+        for i in 0..num_segments {
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(text) = segment.to_str() {
+                    result.push_str(text);
+                }
+            }
+        }
+
+        Ok(Self::fix_punctuation(&result))
+    }
+
     /// 修复标点符号（中文场景下 Whisper 往往不带标点）
     /// 在句尾添加适当的标点（句号、问号等）
     fn fix_punctuation(text: &str) -> String {

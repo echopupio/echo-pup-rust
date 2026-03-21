@@ -1021,6 +1021,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let vad_triggered = Arc::new(AtomicBool::new(false)); // VAD 触发标记
     let partial_stt_should_stop = Arc::new(AtomicBool::new(false));
     let partial_stt_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
+    let partial_stt_callback_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
+    let partial_callback_latest_text = Arc::new(Mutex::new(String::new()));
 
     // 录音动画控制
     let recording_animation = Arc::new(AtomicBool::new(false));
@@ -1071,6 +1073,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let stop_debounce_on_start = stop_debounce_until.clone();
     let partial_stt_stop_on_start = partial_stt_should_stop.clone();
     let partial_stt_handle_on_start = partial_stt_handle.clone();
+    let partial_stt_callback_handle_on_start = partial_stt_callback_handle.clone();
+    let partial_callback_latest_text_on_start = partial_callback_latest_text.clone();
     let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
