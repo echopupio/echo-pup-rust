@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::config::HotkeyTriggerMode;
 use crate::menu_core::{
-    whisper_model_path_from_file_name, MenuAction, MenuActionResult, MenuSnapshot,
+    whisper_model_path_from_file_name, EditableField, MenuAction, MenuActionResult, MenuSnapshot,
     DOWNLOAD_MODEL_SIZES, WHISPER_MODEL_FILES,
 };
 
@@ -2457,6 +2457,8 @@ const MENU_ID_MODE_TOGGLE: &str = "mode_toggle";
 #[cfg(target_os = "linux")]
 const MENU_ID_RELOAD_CONFIG: &str = "reload_config";
 #[cfg(target_os = "linux")]
+const MENU_ID_EDIT_HOTKEY_LINUX: &str = "edit_hotkey_linux";
+#[cfg(target_os = "linux")]
 const MENU_ID_OPEN_CONFIG_FOLDER: &str = "open_config_folder";
 #[cfg(target_os = "linux")]
 const MENU_ID_OPEN_MODEL_FOLDER: &str = "open_model_folder";
@@ -2481,6 +2483,81 @@ struct LinuxMenuHandles {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct HotkeyPopupLinux {
+    current_hotkey: String,
+    is_editing: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn open_hotkey_popup_linux(
+    snapshot: &MenuSnapshot,
+    popup: &mut HotkeyPopupLinux,
+) -> Option<String> {
+    use gtk::prelude::*;
+
+    popup.current_hotkey = snapshot.hotkey.clone();
+    popup.is_editing = false;
+
+    let summary_dialog = gtk::MessageDialog::new(
+        None::<&gtk::Window>,
+        gtk::DialogFlags::MODAL,
+        gtk::MessageType::Info,
+        gtk::ButtonsType::None,
+        "当前热键设置",
+    );
+    summary_dialog.set_secondary_text(Some(&format!(
+        "当前热键: {}\n点击“编辑”输入新热键。",
+        popup.current_hotkey
+    )));
+    summary_dialog.add_button("取消", gtk::ResponseType::Cancel);
+    summary_dialog.add_button("编辑", gtk::ResponseType::Accept);
+    summary_dialog.show_all();
+    let summary_response = summary_dialog.run();
+    summary_dialog.close();
+    if summary_response != gtk::ResponseType::Accept {
+        return None;
+    }
+
+    popup.is_editing = true;
+    let dialog = gtk::Dialog::with_buttons(
+        Some("编辑热键"),
+        None::<&gtk::Window>,
+        gtk::DialogFlags::MODAL,
+        &[
+            ("取消", gtk::ResponseType::Cancel),
+            ("确认", gtk::ResponseType::Ok),
+        ],
+    );
+    let content = dialog.content_area();
+
+    let hint = gtk::Label::new(Some("请输入新热键（例如 right_ctrl）"));
+    hint.set_xalign(0.0);
+    content.pack_start(&hint, false, false, 6);
+
+    let entry = gtk::Entry::new();
+    entry.set_text(&popup.current_hotkey);
+    entry.set_activates_default(true);
+    content.pack_start(&entry, false, false, 6);
+
+    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
+        widget.grab_default();
+    }
+
+    dialog.show_all();
+    let response = dialog.run();
+    let value = entry.text().trim().to_string();
+    dialog.close();
+    popup.is_editing = false;
+
+    if response != gtk::ResponseType::Ok || value.is_empty() {
+        return None;
+    }
+    popup.current_hotkey = value.clone();
+    Some(value)
+}
+
+#[cfg(target_os = "linux")]
 fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     let menu = muda::Menu::new();
 
@@ -2493,6 +2570,12 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
 
     menu.append(&status_line)?;
     menu.append(&hotkey_line)?;
+    menu.append(&muda::MenuItem::with_id(
+        MENU_ID_EDIT_HOTKEY_LINUX,
+        "编辑热键",
+        true,
+        None,
+    ))?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
     menu.append(&llm_enabled)?;
     menu.append(&correction_enabled)?;
@@ -2692,6 +2775,7 @@ pub fn run_status_indicator_process() -> Result<()> {
 
     let mut state = IndicatorState::Idle;
     let mut snapshot = empty_snapshot();
+    let mut hotkey_popup = HotkeyPopupLinux::default();
     update_linux_menu(&handles, &snapshot, state);
 
     let tray_icon = TrayIconBuilder::new()
@@ -2706,6 +2790,20 @@ pub fn run_status_indicator_process() -> Result<()> {
 
     while !should_exit {
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+            if event.id.as_ref() == MENU_ID_EDIT_HOTKEY_LINUX {
+                if let Some(new_hotkey) = open_hotkey_popup_linux(&snapshot, &mut hotkey_popup) {
+                    if new_hotkey != snapshot.hotkey {
+                        send_child_message(&ChildMessage::ActionRequest {
+                            action: MenuAction::SetField {
+                                field: EditableField::Hotkey,
+                                value: new_hotkey,
+                            },
+                        });
+                    }
+                }
+                continue;
+            }
+
             if let Some(action) = map_linux_menu_id_to_action(event.id.as_ref()) {
                 send_child_message(&ChildMessage::ActionRequest { action });
             }
@@ -2726,6 +2824,9 @@ pub fn run_status_indicator_process() -> Result<()> {
                         snapshot: next_snapshot,
                     } => {
                         snapshot = next_snapshot;
+                        if !hotkey_popup.is_editing {
+                            hotkey_popup.current_hotkey = snapshot.hotkey.clone();
+                        }
                         update_linux_menu(&handles, &snapshot, state);
                     }
                     ParentMessage::SetActionResult { result } => {
@@ -2733,6 +2834,9 @@ pub fn run_status_indicator_process() -> Result<()> {
                             warn!("状态栏动作执行失败: {}", result.message);
                         }
                         snapshot = result.snapshot;
+                        if !hotkey_popup.is_editing {
+                            hotkey_popup.current_hotkey = snapshot.hotkey.clone();
+                        }
                         update_linux_menu(&handles, &snapshot, state);
                     }
                     ParentMessage::Exit => {
