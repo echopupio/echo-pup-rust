@@ -2459,6 +2459,8 @@ const MENU_ID_RELOAD_CONFIG: &str = "reload_config";
 #[cfg(target_os = "linux")]
 const MENU_ID_EDIT_HOTKEY_LINUX: &str = "edit_hotkey_linux";
 #[cfg(target_os = "linux")]
+const MENU_ID_EDIT_LLM_FORM_LINUX: &str = "edit_llm_form_linux";
+#[cfg(target_os = "linux")]
 const MENU_ID_OPEN_CONFIG_FOLDER: &str = "open_config_folder";
 #[cfg(target_os = "linux")]
 const MENU_ID_OPEN_MODEL_FOLDER: &str = "open_model_folder";
@@ -2473,6 +2475,7 @@ const MENU_ID_DOWNLOAD_PREFIX: &str = "download:";
 struct LinuxMenuHandles {
     status_line: muda::MenuItem,
     hotkey_line: muda::MenuItem,
+    edit_llm_form: muda::MenuItem,
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
     vad_enabled: muda::CheckMenuItem,
@@ -2486,6 +2489,12 @@ struct LinuxMenuHandles {
 #[derive(Debug, Default)]
 struct HotkeyPopupLinux {
     current_hotkey: String,
+    is_editing: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct LlmFormPopupLinux {
     is_editing: bool,
 }
 
@@ -2558,6 +2567,100 @@ fn open_hotkey_popup_linux(
 }
 
 #[cfg(target_os = "linux")]
+fn open_llm_form_popup_linux(
+    snapshot: &MenuSnapshot,
+    popup: &mut LlmFormPopupLinux,
+) -> Option<(String, String, String, String)> {
+    use gtk::prelude::*;
+
+    popup.is_editing = true;
+    let dialog = gtk::Dialog::with_buttons(
+        Some("编辑 LLM 配置"),
+        None::<&gtk::Window>,
+        gtk::DialogFlags::MODAL,
+        &[
+            ("取消", gtk::ResponseType::Cancel),
+            ("确认", gtk::ResponseType::Ok),
+        ],
+    );
+
+    let content = dialog.content_area();
+    content.set_spacing(8);
+
+    let grid = gtk::Grid::new();
+    grid.set_row_spacing(8);
+    grid.set_column_spacing(10);
+    grid.set_margin_top(10);
+    grid.set_margin_bottom(6);
+    grid.set_margin_start(10);
+    grid.set_margin_end(10);
+    content.pack_start(&grid, true, true, 0);
+
+    let provider_label = gtk::Label::new(Some("Provider"));
+    provider_label.set_xalign(0.0);
+    let provider_combo = gtk::ComboBoxText::new();
+    provider_combo.append(Some("openai"), "OpenAI");
+    provider_combo.append(Some("anthropic"), "Anthropic");
+    provider_combo.append(Some("azure_openai"), "Azure OpenAI");
+    provider_combo.append(Some("ollama"), "Ollama");
+    provider_combo.append(Some("custom"), "自定义");
+    let provider_id = match snapshot.llm_provider.as_str() {
+        "openai" => "openai",
+        "anthropic" => "anthropic",
+        "azure_openai" | "azure" => "azure_openai",
+        "ollama" => "ollama",
+        "custom" => "custom",
+        _ => "custom",
+    };
+    provider_combo.set_active_id(Some(provider_id));
+
+    let model_label = gtk::Label::new(Some("Model"));
+    model_label.set_xalign(0.0);
+    let model_entry = gtk::Entry::new();
+    model_entry.set_text(&snapshot.llm_model);
+
+    let api_base_label = gtk::Label::new(Some("API Base URL"));
+    api_base_label.set_xalign(0.0);
+    let api_base_entry = gtk::Entry::new();
+    api_base_entry.set_text(&snapshot.llm_api_base);
+
+    let api_key_env_label = gtk::Label::new(Some("API Key 环境变量名"));
+    api_key_env_label.set_xalign(0.0);
+    let api_key_env_entry = gtk::Entry::new();
+    api_key_env_entry.set_text(&snapshot.llm_api_key_env);
+
+    grid.attach(&provider_label, 0, 0, 1, 1);
+    grid.attach(&provider_combo, 1, 0, 1, 1);
+    grid.attach(&model_label, 0, 1, 1, 1);
+    grid.attach(&model_entry, 1, 1, 1, 1);
+    grid.attach(&api_base_label, 0, 2, 1, 1);
+    grid.attach(&api_base_entry, 1, 2, 1, 1);
+    grid.attach(&api_key_env_label, 0, 3, 1, 1);
+    grid.attach(&api_key_env_entry, 1, 3, 1, 1);
+
+    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
+        widget.grab_default();
+    }
+
+    dialog.show_all();
+    let response = dialog.run();
+    let provider = provider_combo
+        .active_id()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| snapshot.llm_provider.clone());
+    let model = model_entry.text().trim().to_string();
+    let api_base = api_base_entry.text().trim().to_string();
+    let api_key_env = api_key_env_entry.text().trim().to_string();
+    dialog.close();
+    popup.is_editing = false;
+
+    if response != gtk::ResponseType::Ok {
+        return None;
+    }
+    Some((provider, model, api_base, api_key_env))
+}
+
+#[cfg(target_os = "linux")]
 fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     let menu = muda::Menu::new();
 
@@ -2576,6 +2679,9 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         true,
         None,
     ))?;
+    let edit_llm_form =
+        muda::MenuItem::with_id(MENU_ID_EDIT_LLM_FORM_LINUX, "编辑 LLM 配置", true, None);
+    menu.append(&edit_llm_form)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
     menu.append(&llm_enabled)?;
     menu.append(&correction_enabled)?;
@@ -2630,6 +2736,7 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         LinuxMenuHandles {
             status_line,
             hotkey_line,
+            edit_llm_form,
             llm_enabled,
             correction_enabled,
             vad_enabled,
@@ -2655,6 +2762,10 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         .status_line
         .set_text(format!("状态: {}", status_text.replace('\n', " ")));
     handles.hotkey_line.set_text(format!("热键: {}", snapshot.hotkey));
+    handles.edit_llm_form.set_text(format!(
+        "编辑 LLM 配置 ({}/{})",
+        snapshot.llm_provider, snapshot.llm_model
+    ));
     handles.llm_enabled.set_checked(snapshot.llm_enabled);
     handles
         .correction_enabled
@@ -2776,6 +2887,7 @@ pub fn run_status_indicator_process() -> Result<()> {
     let mut state = IndicatorState::Idle;
     let mut snapshot = empty_snapshot();
     let mut hotkey_popup = HotkeyPopupLinux::default();
+    let mut llm_form_popup = LlmFormPopupLinux::default();
     update_linux_menu(&handles, &snapshot, state);
 
     let tray_icon = TrayIconBuilder::new()
@@ -2800,6 +2912,21 @@ pub fn run_status_indicator_process() -> Result<()> {
                             },
                         });
                     }
+                }
+                continue;
+            }
+            if event.id.as_ref() == MENU_ID_EDIT_LLM_FORM_LINUX {
+                if let Some((provider, model, api_base, api_key_env)) =
+                    open_llm_form_popup_linux(&snapshot, &mut llm_form_popup)
+                {
+                    send_child_message(&ChildMessage::ActionRequest {
+                        action: MenuAction::SetLlmConfig {
+                            provider,
+                            model,
+                            api_base,
+                            api_key_env,
+                        },
+                    });
                 }
                 continue;
             }
