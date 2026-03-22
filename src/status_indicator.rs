@@ -2469,20 +2469,20 @@ const MENU_ID_QUIT_UI: &str = "quit_ui";
 #[cfg(target_os = "linux")]
 const MENU_ID_SWITCH_MODEL_PREFIX: &str = "switch_model:";
 #[cfg(target_os = "linux")]
-const MENU_ID_DOWNLOAD_PREFIX: &str = "download:";
+const MENU_ID_DOWNLOAD_MODEL_LINUX: &str = "download_model_linux";
 
 #[cfg(target_os = "linux")]
 struct LinuxMenuHandles {
     status_line: muda::MenuItem,
     hotkey_line: muda::MenuItem,
     edit_llm_form: muda::MenuItem,
+    download_model: muda::MenuItem,
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
     vad_enabled: muda::CheckMenuItem,
     mode_hold: muda::CheckMenuItem,
     mode_toggle: muda::CheckMenuItem,
     switch_model: Vec<(String, muda::CheckMenuItem)>,
-    download_items: Vec<(String, muda::MenuItem)>,
 }
 
 #[cfg(target_os = "linux")]
@@ -2496,6 +2496,388 @@ struct HotkeyPopupLinux {
 #[derive(Debug, Default)]
 struct LlmFormPopupLinux {
     is_editing: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DownloadDialogPhaseLinux {
+    #[default]
+    Selecting,
+    Starting,
+    Downloading,
+    Finished,
+    Failed,
+}
+
+#[cfg(target_os = "linux")]
+struct DownloadPopupLinux {
+    dialog: Option<gtk::Dialog>,
+    model_combo: Option<gtk::ComboBoxText>,
+    status_label: Option<gtk::Label>,
+    progress_bar: Option<gtk::ProgressBar>,
+    ratio_label: Option<gtk::Label>,
+    log_buffer: Option<gtk::TextBuffer>,
+    response: std::rc::Rc<std::cell::RefCell<Option<gtk::ResponseType>>>,
+    phase: DownloadDialogPhaseLinux,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for DownloadPopupLinux {
+    fn default() -> Self {
+        Self {
+            dialog: None,
+            model_combo: None,
+            status_label: None,
+            progress_bar: None,
+            ratio_label: None,
+            log_buffer: None,
+            response: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            phase: DownloadDialogPhaseLinux::Selecting,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn preferred_download_size_linux(snapshot: &MenuSnapshot) -> &'static str {
+    let model_name = std::path::Path::new(&snapshot.whisper_model_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if model_name.contains("turbo") {
+        "turbo"
+    } else if model_name.contains("medium") {
+        "medium"
+    } else {
+        "large-v3"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn update_download_popup_view_linux(
+    popup: &mut DownloadPopupLinux,
+    status: &str,
+    progress_percent: Option<f64>,
+    ratio_text: &str,
+    logs: &[String],
+    can_select_model: bool,
+    can_cancel: bool,
+    finished_or_failed: bool,
+) {
+    use gtk::prelude::*;
+
+    let Some(dialog) = popup.dialog.as_ref() else {
+        return;
+    };
+    if let Some(label) = popup.status_label.as_ref() {
+        label.set_text(status);
+    }
+    if let Some(combo) = popup.model_combo.as_ref() {
+        combo.set_sensitive(can_select_model);
+    }
+    if let Some(progress_bar) = popup.progress_bar.as_ref() {
+        let fraction = progress_percent
+            .map(|value| (value / 100.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        progress_bar.set_fraction(fraction);
+        if progress_percent.is_none() {
+            progress_bar.pulse();
+        }
+    }
+    if let Some(label) = popup.ratio_label.as_ref() {
+        label.set_text(ratio_text);
+    }
+    if let Some(buffer) = popup.log_buffer.as_ref() {
+        let text = if logs.is_empty() {
+            "暂无日志".to_string()
+        } else {
+            logs.join("\n")
+        };
+        buffer.set_text(&text);
+    }
+
+    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Cancel) {
+        widget.set_sensitive(can_cancel);
+        widget.set_visible(can_cancel || matches!(popup.phase, DownloadDialogPhaseLinux::Selecting));
+    }
+    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
+        let label = if finished_or_failed {
+            "关闭"
+        } else if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) {
+            "下载"
+        } else {
+            "下载中"
+        };
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            button.set_label(label);
+        }
+        widget.set_sensitive(
+            matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) || finished_or_failed,
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_download_popup_linux(snapshot: &MenuSnapshot, popup: &mut DownloadPopupLinux) {
+    if popup.dialog.is_none() {
+        return;
+    }
+
+    if let Some(download) = snapshot.download.as_ref() {
+        let (ratio, ratio_label) = crate::model_download::download_ratio_label(download);
+        if download.in_progress {
+            popup.phase = DownloadDialogPhaseLinux::Downloading;
+            let progress = if download.total.is_some() {
+                Some(ratio * 100.0)
+            } else {
+                None
+            };
+            update_download_popup_view_linux(
+                popup,
+                &format!("正在下载模型 {}", download.model_size),
+                progress,
+                &ratio_label,
+                &snapshot.download_logs,
+                false,
+                false,
+                false,
+            );
+            return;
+        }
+
+        if snapshot.status.contains("下载失败")
+            && matches!(
+                popup.phase,
+                DownloadDialogPhaseLinux::Starting | DownloadDialogPhaseLinux::Downloading
+            )
+        {
+            popup.phase = DownloadDialogPhaseLinux::Failed;
+            update_download_popup_view_linux(
+                popup,
+                &snapshot.status,
+                download.total.map(|_| ratio * 100.0),
+                &ratio_label,
+                &snapshot.download_logs,
+                false,
+                false,
+                true,
+            );
+            return;
+        }
+
+        if matches!(
+            popup.phase,
+            DownloadDialogPhaseLinux::Starting | DownloadDialogPhaseLinux::Downloading
+        ) {
+            popup.phase = DownloadDialogPhaseLinux::Finished;
+            update_download_popup_view_linux(
+                popup,
+                &format!("模型 {} 下载完成", download.model_size),
+                Some((ratio * 100.0).clamp(0.0, 100.0)),
+                &ratio_label,
+                &snapshot.download_logs,
+                false,
+                false,
+                true,
+            );
+            return;
+        }
+    }
+
+    if snapshot.status.contains("下载失败")
+        && matches!(
+            popup.phase,
+            DownloadDialogPhaseLinux::Starting | DownloadDialogPhaseLinux::Downloading
+        )
+    {
+        popup.phase = DownloadDialogPhaseLinux::Failed;
+        update_download_popup_view_linux(
+            popup,
+            &snapshot.status,
+            Some(0.0),
+            "下载失败",
+            &snapshot.download_logs,
+            false,
+            false,
+            true,
+        );
+        return;
+    }
+
+    if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) {
+        update_download_popup_view_linux(
+            popup,
+            "请选择模型并点击下载",
+            Some(0.0),
+            "尚未开始",
+            &snapshot.download_logs,
+            true,
+            true,
+            false,
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn download_model_popup_linux(snapshot: &MenuSnapshot, popup: &mut DownloadPopupLinux) {
+    use gtk::prelude::*;
+
+    if popup.dialog.is_none() {
+        let dialog = gtk::Dialog::with_buttons(
+            Some("下载 Whisper 模型"),
+            None::<&gtk::Window>,
+            gtk::DialogFlags::MODAL,
+            &[
+                ("取消", gtk::ResponseType::Cancel),
+                ("确认", gtk::ResponseType::Ok),
+            ],
+        );
+        dialog.set_default_size(620, 440);
+
+        let content = dialog.content_area();
+        content.set_spacing(8);
+        content.set_margin_top(10);
+        content.set_margin_bottom(10);
+        content.set_margin_start(10);
+        content.set_margin_end(10);
+
+        let model_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let model_label = gtk::Label::new(Some("模型大小"));
+        model_label.set_xalign(0.0);
+        let model_combo = gtk::ComboBoxText::new();
+        for size in DOWNLOAD_MODEL_SIZES {
+            model_combo.append(Some(size), size);
+        }
+        model_combo.set_active_id(Some(preferred_download_size_linux(snapshot)));
+        model_row.pack_start(&model_label, false, false, 0);
+        model_row.pack_start(&model_combo, true, true, 0);
+
+        let status_label = gtk::Label::new(Some("请选择模型并点击下载"));
+        status_label.set_xalign(0.0);
+
+        let progress_bar = gtk::ProgressBar::new();
+        progress_bar.set_show_text(false);
+        progress_bar.set_fraction(0.0);
+
+        let ratio_label = gtk::Label::new(Some("尚未开始"));
+        ratio_label.set_xalign(0.0);
+
+        let log_label = gtk::Label::new(Some("下载日志"));
+        log_label.set_xalign(0.0);
+
+        let log_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+        let log_view = gtk::TextView::with_buffer(&log_buffer);
+        log_view.set_editable(false);
+        log_view.set_cursor_visible(false);
+        log_view.set_monospace(true);
+        log_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        let scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroll.set_min_content_height(220);
+        scroll.add(&log_view);
+
+        content.pack_start(&model_row, false, false, 0);
+        content.pack_start(&status_label, false, false, 0);
+        content.pack_start(&progress_bar, false, false, 0);
+        content.pack_start(&ratio_label, false, false, 0);
+        content.pack_start(&log_label, false, false, 0);
+        content.pack_start(&scroll, true, true, 0);
+
+        let response_cell = popup.response.clone();
+        dialog.connect_response(move |_, response| {
+            *response_cell.borrow_mut() = Some(response);
+        });
+
+        popup.dialog = Some(dialog);
+        popup.model_combo = Some(model_combo);
+        popup.status_label = Some(status_label);
+        popup.progress_bar = Some(progress_bar);
+        popup.ratio_label = Some(ratio_label);
+        popup.log_buffer = Some(log_buffer);
+    }
+
+    popup.phase = if snapshot
+        .download
+        .as_ref()
+        .map(|d| d.in_progress)
+        .unwrap_or(false)
+    {
+        DownloadDialogPhaseLinux::Downloading
+    } else {
+        DownloadDialogPhaseLinux::Selecting
+    };
+    if let Some(combo) = popup.model_combo.as_ref() {
+        combo.set_active_id(Some(preferred_download_size_linux(snapshot)));
+    }
+    if let Some(dialog) = popup.dialog.as_ref() {
+        dialog.show_all();
+        dialog.present();
+    }
+    sync_download_popup_linux(snapshot, popup);
+}
+
+#[cfg(target_os = "linux")]
+fn close_download_popup_linux(popup: &mut DownloadPopupLinux) {
+    use gtk::prelude::*;
+
+    if let Some(dialog) = popup.dialog.take() {
+        dialog.close();
+    }
+    popup.model_combo = None;
+    popup.status_label = None;
+    popup.progress_bar = None;
+    popup.ratio_label = None;
+    popup.log_buffer = None;
+    *popup.response.borrow_mut() = None;
+    popup.phase = DownloadDialogPhaseLinux::Selecting;
+}
+
+#[cfg(target_os = "linux")]
+fn handle_download_popup_response_linux(
+    snapshot: &MenuSnapshot,
+    popup: &mut DownloadPopupLinux,
+) -> Option<MenuAction> {
+    use gtk::prelude::*;
+
+    let response = popup.response.borrow_mut().take();
+    match response {
+        Some(gtk::ResponseType::Ok) if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) => {
+            let size = popup
+                .model_combo
+                .as_ref()
+                .and_then(|combo| combo.active_id())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| preferred_download_size_linux(snapshot).to_string());
+            popup.phase = DownloadDialogPhaseLinux::Starting;
+            let logs = vec![format!("[start] 已请求下载 {}", size)];
+            update_download_popup_view_linux(
+                popup,
+                "正在创建下载任务...",
+                None,
+                "等待下载线程启动...",
+                &logs,
+                false,
+                false,
+                false,
+            );
+            Some(MenuAction::DownloadModel { size })
+        }
+        Some(gtk::ResponseType::Cancel)
+            if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) =>
+        {
+            close_download_popup_linux(popup);
+            None
+        }
+        Some(gtk::ResponseType::Ok) | Some(gtk::ResponseType::Cancel) | Some(gtk::ResponseType::DeleteEvent)
+            if matches!(
+                popup.phase,
+                DownloadDialogPhaseLinux::Finished | DownloadDialogPhaseLinux::Failed
+            ) =>
+        {
+            close_download_popup_linux(popup);
+            None
+        }
+        Some(_) | None => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2706,15 +3088,9 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     }
     menu.append(&switch_submenu)?;
 
-    let download_submenu = muda::Submenu::new("下载模型", true);
-    let mut download_items = Vec::new();
-    for size in DOWNLOAD_MODEL_SIZES {
-        let id = format!("{MENU_ID_DOWNLOAD_PREFIX}{size}");
-        let item = muda::MenuItem::with_id(id, format!("下载 {size}"), true, None);
-        download_submenu.append(&item)?;
-        download_items.push((size.to_string(), item));
-    }
-    menu.append(&download_submenu)?;
+    let download_model =
+        muda::MenuItem::with_id(MENU_ID_DOWNLOAD_MODEL_LINUX, "下载模型...", true, None);
+    menu.append(&download_model)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
     menu.append(&muda::MenuItem::with_id(
         MENU_ID_OPEN_CONFIG_FOLDER,
@@ -2737,13 +3113,13 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
             status_line,
             hotkey_line,
             edit_llm_form,
+            download_model,
             llm_enabled,
             correction_enabled,
             vad_enabled,
             mode_hold,
             mode_toggle,
             switch_model,
-            download_items,
         },
     ))
 }
@@ -2791,15 +3167,12 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         .as_ref()
         .filter(|download| download.in_progress)
         .map(|download| download.model_size.as_str());
-    for (size, item) in &handles.download_items {
-        let text = if Some(size.as_str()) == active_download {
-            format!("下载 {}（进行中）", size)
-        } else {
-            format!("下载 {}", size)
-        };
-        item.set_text(text);
-        item.set_enabled(active_download.is_none());
-    }
+    let download_title = if let Some(size) = active_download {
+        format!("下载模型...（{} 进行中）", size)
+    } else {
+        "下载模型...".to_string()
+    };
+    handles.download_model.set_text(download_title);
 }
 
 #[cfg(target_os = "linux")]
@@ -2825,10 +3198,7 @@ fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
                 }
                 return None;
             }
-            id.strip_prefix(MENU_ID_DOWNLOAD_PREFIX)
-                .map(|size| MenuAction::DownloadModel {
-                    size: size.to_string(),
-                })
+            None
         }
     }
 }
@@ -2888,6 +3258,7 @@ pub fn run_status_indicator_process() -> Result<()> {
     let mut snapshot = empty_snapshot();
     let mut hotkey_popup = HotkeyPopupLinux::default();
     let mut llm_form_popup = LlmFormPopupLinux::default();
+    let mut download_popup = DownloadPopupLinux::default();
     update_linux_menu(&handles, &snapshot, state);
 
     let tray_icon = TrayIconBuilder::new()
@@ -2930,6 +3301,10 @@ pub fn run_status_indicator_process() -> Result<()> {
                 }
                 continue;
             }
+            if event.id.as_ref() == MENU_ID_DOWNLOAD_MODEL_LINUX {
+                download_model_popup_linux(&snapshot, &mut download_popup);
+                continue;
+            }
 
             if let Some(action) = map_linux_menu_id_to_action(event.id.as_ref()) {
                 send_child_message(&ChildMessage::ActionRequest { action });
@@ -2955,6 +3330,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                             hotkey_popup.current_hotkey = snapshot.hotkey.clone();
                         }
                         update_linux_menu(&handles, &snapshot, state);
+                        sync_download_popup_linux(&snapshot, &mut download_popup);
                     }
                     ParentMessage::SetActionResult { result } => {
                         if !result.ok {
@@ -2964,7 +3340,30 @@ pub fn run_status_indicator_process() -> Result<()> {
                         if !hotkey_popup.is_editing {
                             hotkey_popup.current_hotkey = snapshot.hotkey.clone();
                         }
+                        if !result.ok
+                            && matches!(download_popup.phase, DownloadDialogPhaseLinux::Starting)
+                            && (result.message.contains("下载")
+                                || snapshot.status.contains("下载"))
+                        {
+                            download_popup.phase = DownloadDialogPhaseLinux::Failed;
+                            let logs = if snapshot.download_logs.is_empty() {
+                                vec![format!("[error] {}", result.message)]
+                            } else {
+                                snapshot.download_logs.clone()
+                            };
+                            update_download_popup_view_linux(
+                                &mut download_popup,
+                                &format!("下载失败: {}", result.message),
+                                Some(0.0),
+                                "下载失败",
+                                &logs,
+                                false,
+                                false,
+                                true,
+                            );
+                        }
                         update_linux_menu(&handles, &snapshot, state);
+                        sync_download_popup_linux(&snapshot, &mut download_popup);
                     }
                     ParentMessage::Exit => {
                         should_exit = true;
@@ -2981,9 +3380,13 @@ pub fn run_status_indicator_process() -> Result<()> {
         while gtk::events_pending() {
             let _ = gtk::main_iteration_do(false);
         }
+        if let Some(action) = handle_download_popup_response_linux(&snapshot, &mut download_popup) {
+            send_child_message(&ChildMessage::ActionRequest { action });
+        }
         std::thread::sleep(std::time::Duration::from_millis(40));
     }
 
+    close_download_popup_linux(&mut download_popup);
     drop(tray_icon);
     Ok(())
 }
