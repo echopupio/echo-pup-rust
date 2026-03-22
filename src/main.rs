@@ -792,6 +792,20 @@ fn apply_runtime_menu_action(
             *hotkey_trigger_mode_runtime.lock() = *mode;
             info!("热键触发模式已热更新为 {}", mode.label());
         }
+        menu_core::MenuAction::OpenConfigFolder => {
+            #[cfg(target_os = "linux")]
+            {
+                status_indicator::open_config_folder_linux(&snapshot.config_path)?;
+                info!("已打开配置文件夹: {}", snapshot.config_path);
+            }
+        }
+        menu_core::MenuAction::OpenModelFolder => {
+            #[cfg(target_os = "linux")]
+            {
+                status_indicator::open_model_folder_linux()?;
+                info!("已打开模型文件夹");
+            }
+        }
         menu_core::MenuAction::SetField {
             field:
                 menu_core::EditableField::LlmProvider

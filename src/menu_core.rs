@@ -47,6 +47,8 @@ pub enum MenuAction {
     ToggleLlmEnabled,
     ToggleTextCorrectionEnabled,
     ToggleVadEnabled,
+    OpenConfigFolder,
+    OpenModelFolder,
     SetField {
         field: EditableField,
         value: String,
@@ -217,6 +219,14 @@ impl MenuCore {
                     "VAD 开关 => {}（已自动保存）",
                     self.config.audio.vad_enabled
                 );
+                Ok(self.status.clone())
+            }
+            MenuAction::OpenConfigFolder => {
+                self.status = "正在打开配置文件夹...".to_string();
+                Ok(self.status.clone())
+            }
+            MenuAction::OpenModelFolder => {
+                self.status = "正在打开模型文件夹...".to_string();
                 Ok(self.status.clone())
             }
             MenuAction::SetField { field, value } => {

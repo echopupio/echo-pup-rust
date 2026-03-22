@@ -2457,6 +2457,10 @@ const MENU_ID_MODE_TOGGLE: &str = "mode_toggle";
 #[cfg(target_os = "linux")]
 const MENU_ID_RELOAD_CONFIG: &str = "reload_config";
 #[cfg(target_os = "linux")]
+const MENU_ID_OPEN_CONFIG_FOLDER: &str = "open_config_folder";
+#[cfg(target_os = "linux")]
+const MENU_ID_OPEN_MODEL_FOLDER: &str = "open_model_folder";
+#[cfg(target_os = "linux")]
 const MENU_ID_QUIT_UI: &str = "quit_ui";
 #[cfg(target_os = "linux")]
 const MENU_ID_SWITCH_MODEL_PREFIX: &str = "switch_model:";
@@ -2523,6 +2527,18 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     }
     menu.append(&download_submenu)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
+    menu.append(&muda::MenuItem::with_id(
+        MENU_ID_OPEN_CONFIG_FOLDER,
+        "打开配置文件夹",
+        true,
+        None,
+    ))?;
+    menu.append(&muda::MenuItem::with_id(
+        MENU_ID_OPEN_MODEL_FOLDER,
+        "查看模型文件",
+        true,
+        None,
+    ))?;
     menu.append(&muda::MenuItem::with_id(MENU_ID_RELOAD_CONFIG, "重载配置", true, None))?;
     menu.append(&muda::MenuItem::with_id(MENU_ID_QUIT_UI, "退出", true, None))?;
 
@@ -2598,6 +2614,8 @@ fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
         MENU_ID_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
         MENU_ID_TOGGLE_CORRECTION => Some(MenuAction::ToggleTextCorrectionEnabled),
         MENU_ID_TOGGLE_VAD => Some(MenuAction::ToggleVadEnabled),
+        MENU_ID_OPEN_CONFIG_FOLDER => Some(MenuAction::OpenConfigFolder),
+        MENU_ID_OPEN_MODEL_FOLDER => Some(MenuAction::OpenModelFolder),
         MENU_ID_MODE_HOLD => Some(MenuAction::SetHotkeyTriggerMode {
             mode: HotkeyTriggerMode::HoldToRecord,
         }),
@@ -2619,6 +2637,48 @@ fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
                 })
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn expand_tilde_path_linux(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn open_config_folder_linux(config_path: &str) -> Result<()> {
+    let path = expand_tilde_path_linux(config_path);
+    let dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path.as_path()).to_path_buf()
+    };
+
+    let status = std::process::Command::new("xdg-open").arg(&dir).status()?;
+    if !status.success() {
+        anyhow::bail!("无法打开目录: {}", dir.display());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn open_model_folder_linux() -> Result<()> {
+    let dir = crate::runtime::model_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let status = std::process::Command::new("xdg-open").arg(&dir).status()?;
+    if !status.success() {
+        anyhow::bail!("无法打开目录: {}", dir.display());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
