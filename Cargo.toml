@@ -70,3 +70,4 @@ objc = "0.2"
 tray-icon = { version = "0.21.3", default-features = false }
 muda = { version = "0.17.1", default-features = false, features = ["gtk"] }
 gtk = "0.18.2"
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -71,7 +71,7 @@ enum ChildMessage {
     ActionRequest { action: MenuAction },
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const STATUS_LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
 #[cfg(target_os = "macos")]
 const STATUS_MICROPHONE_PNG: &[u8] = include_bytes!("../assets/mic.png");
@@ -2416,45 +2416,13 @@ fn spawn_linux_stdin_reader() -> std::sync::mpsc::Receiver<LinuxIndicatorCommand
 }
 
 #[cfg(target_os = "linux")]
-fn build_linux_icon(state: IndicatorState) -> Result<tray_icon::Icon> {
-    let (r, g, b) = match state {
-        IndicatorState::Idle => (88u8, 96u8, 110u8),
-        IndicatorState::RecordingStart | IndicatorState::Recording => (224u8, 74u8, 52u8),
-        IndicatorState::Transcribing => (238u8, 173u8, 57u8),
-        IndicatorState::Completed => (61u8, 168u8, 101u8),
-        IndicatorState::Failed => (210u8, 75u8, 75u8),
-    };
+fn build_linux_icon(_state: IndicatorState) -> Result<tray_icon::Icon> {
+    let image = image::load_from_memory_with_format(STATUS_LOGO_PNG, image::ImageFormat::Png)
+        .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
 
-    let width = 24u32;
-    let height = 24u32;
-    let mut rgba = vec![0u8; (width * height * 4) as usize];
-    let cx = (width as f32 - 1.0) / 2.0;
-    let cy = (height as f32 - 1.0) / 2.0;
-    let outer_radius = (width.min(height) as f32 / 2.0) - 1.0;
-    let inner_radius = outer_radius - 1.6;
-    for y in 0..height {
-        for x in 0..width {
-            let idx = ((y * width + x) * 4) as usize;
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist2 = dx * dx + dy * dy;
-            let outer2 = outer_radius * outer_radius;
-            let inner2 = inner_radius * inner_radius;
-            let (pr, pg, pb, pa) = if dist2 <= outer2 && dist2 > inner2 {
-                (26u8, 29u8, 33u8, 255u8)
-            } else if dist2 <= inner2 {
-                (r, g, b, 255u8)
-            } else {
-                (0u8, 0u8, 0u8, 0u8)
-            };
-            rgba[idx] = pr;
-            rgba[idx + 1] = pg;
-            rgba[idx + 2] = pb;
-            rgba[idx + 3] = pa;
-        }
-    }
-
-    tray_icon::Icon::from_rgba(rgba, width, height)
+    tray_icon::Icon::from_rgba(image.into_raw(), width, height)
         .map_err(|err| anyhow::anyhow!("创建 Linux 托盘图标失败: {}", err))
 }
 
