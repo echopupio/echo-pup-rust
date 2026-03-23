@@ -426,7 +426,7 @@ fn play_feedback_sound(enabled: bool, event: FeedbackSoundEvent) {
     }
 }
 
-fn send_feedback_sound(_event: FeedbackSoundEvent) -> Result<()> {
+fn send_feedback_sound(event: FeedbackSoundEvent) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let sound_path = match event {
@@ -448,6 +448,7 @@ fn send_feedback_sound(_event: FeedbackSoundEvent) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
+        let _ = event;
         let status = if command_exists("paplay") {
             std::process::Command::new("paplay")
                 .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
