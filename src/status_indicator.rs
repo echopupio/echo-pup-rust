@@ -2428,15 +2428,29 @@ fn build_linux_icon(state: IndicatorState) -> Result<tray_icon::Icon> {
     let width = 24u32;
     let height = 24u32;
     let mut rgba = vec![0u8; (width * height * 4) as usize];
+    let cx = (width as f32 - 1.0) / 2.0;
+    let cy = (height as f32 - 1.0) / 2.0;
+    let outer_radius = (width.min(height) as f32 / 2.0) - 1.0;
+    let inner_radius = outer_radius - 1.6;
     for y in 0..height {
         for x in 0..width {
             let idx = ((y * width + x) * 4) as usize;
-            let border = x <= 1 || y <= 1 || x >= width - 2 || y >= height - 2;
-            let (pr, pg, pb) = if border { (26, 29, 33) } else { (r, g, b) };
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist2 = dx * dx + dy * dy;
+            let outer2 = outer_radius * outer_radius;
+            let inner2 = inner_radius * inner_radius;
+            let (pr, pg, pb, pa) = if dist2 <= outer2 && dist2 > inner2 {
+                (26u8, 29u8, 33u8, 255u8)
+            } else if dist2 <= inner2 {
+                (r, g, b, 255u8)
+            } else {
+                (0u8, 0u8, 0u8, 0u8)
+            };
             rgba[idx] = pr;
             rgba[idx + 1] = pg;
             rgba[idx + 2] = pb;
-            rgba[idx + 3] = 255;
+            rgba[idx + 3] = pa;
         }
     }
 
@@ -2596,8 +2610,9 @@ fn update_download_popup_view_linux(
     }
 
     if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Cancel) {
-        widget.set_sensitive(can_cancel);
-        widget.set_visible(can_cancel || matches!(popup.phase, DownloadDialogPhaseLinux::Selecting));
+        let _ = can_cancel;
+        widget.set_sensitive(true);
+        widget.set_visible(true);
     }
     if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
         let label = if finished_or_failed {
@@ -2840,7 +2855,9 @@ fn handle_download_popup_response_linux(
 
     let response = popup.response.borrow_mut().take();
     match response {
-        Some(gtk::ResponseType::Ok) if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) => {
+        Some(gtk::ResponseType::Ok)
+            if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) =>
+        {
             let size = popup
                 .model_combo
                 .as_ref()
@@ -2861,13 +2878,11 @@ fn handle_download_popup_response_linux(
             );
             Some(MenuAction::DownloadModel { size })
         }
-        Some(gtk::ResponseType::Cancel)
-            if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) =>
-        {
+        Some(gtk::ResponseType::Cancel) | Some(gtk::ResponseType::DeleteEvent) => {
             close_download_popup_linux(popup);
             None
         }
-        Some(gtk::ResponseType::Ok) | Some(gtk::ResponseType::Cancel) | Some(gtk::ResponseType::DeleteEvent)
+        Some(gtk::ResponseType::Ok)
             if matches!(
                 popup.phase,
                 DownloadDialogPhaseLinux::Finished | DownloadDialogPhaseLinux::Failed
@@ -2888,29 +2903,8 @@ fn open_hotkey_popup_linux(
     use gtk::prelude::*;
 
     popup.current_hotkey = snapshot.hotkey.clone();
-    popup.is_editing = false;
-
-    let summary_dialog = gtk::MessageDialog::new(
-        None::<&gtk::Window>,
-        gtk::DialogFlags::MODAL,
-        gtk::MessageType::Info,
-        gtk::ButtonsType::None,
-        "当前热键设置",
-    );
-    summary_dialog.set_secondary_text(Some(&format!(
-        "当前热键: {}\n点击“编辑”输入新热键。",
-        popup.current_hotkey
-    )));
-    summary_dialog.add_button("取消", gtk::ResponseType::Cancel);
-    summary_dialog.add_button("编辑", gtk::ResponseType::Accept);
-    summary_dialog.show_all();
-    let summary_response = summary_dialog.run();
-    summary_dialog.close();
-    if summary_response != gtk::ResponseType::Accept {
-        return None;
-    }
-
     popup.is_editing = true;
+
     let dialog = gtk::Dialog::with_buttons(
         Some("编辑热键"),
         None::<&gtk::Window>,
@@ -2921,19 +2915,21 @@ fn open_hotkey_popup_linux(
         ],
     );
     let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
 
-    let hint = gtk::Label::new(Some("请输入新热键（例如 right_ctrl）"));
+    let hint = gtk::Label::new(Some("请输入热键，例如 ctrl+shift+space 或 right_ctrl"));
     hint.set_xalign(0.0);
     content.pack_start(&hint, false, false, 6);
 
     let entry = gtk::Entry::new();
     entry.set_text(&popup.current_hotkey);
     entry.set_activates_default(true);
-    content.pack_start(&entry, false, false, 6);
-
-    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
-        widget.grab_default();
-    }
+    content.pack_start(&entry, false, false, 0);
+    dialog.set_default_response(gtk::ResponseType::Ok);
 
     dialog.show_all();
     let response = dialog.run();
@@ -2942,6 +2938,9 @@ fn open_hotkey_popup_linux(
     popup.is_editing = false;
 
     if response != gtk::ResponseType::Ok || value.is_empty() {
+        return None;
+    }
+    if crate::hotkey::validate_hotkey_config(&value).is_err() {
         return None;
     }
     popup.current_hotkey = value.clone();
@@ -3048,10 +3047,12 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
 
     let status_line = muda::MenuItem::new("状态: 就绪", false, None);
     let hotkey_line = muda::MenuItem::new("热键: -", false, None);
-    let llm_enabled = muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM", true, false, None);
+    let llm_enabled =
+        muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM", true, false, None);
     let correction_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
-    let vad_enabled = muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_VAD, "启用 VAD", true, false, None);
+    let vad_enabled =
+        muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_VAD, "启用 VAD", true, false, None);
 
     menu.append(&status_line)?;
     menu.append(&hotkey_line)?;
@@ -3104,8 +3105,18 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         true,
         None,
     ))?;
-    menu.append(&muda::MenuItem::with_id(MENU_ID_RELOAD_CONFIG, "重载配置", true, None))?;
-    menu.append(&muda::MenuItem::with_id(MENU_ID_QUIT_UI, "退出", true, None))?;
+    menu.append(&muda::MenuItem::with_id(
+        MENU_ID_RELOAD_CONFIG,
+        "重载配置",
+        true,
+        None,
+    ))?;
+    menu.append(&muda::MenuItem::with_id(
+        MENU_ID_QUIT_UI,
+        "退出",
+        true,
+        None,
+    ))?;
 
     Ok((
         menu,
@@ -3137,7 +3148,9 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
     handles
         .status_line
         .set_text(format!("状态: {}", status_text.replace('\n', " ")));
-    handles.hotkey_line.set_text(format!("热键: {}", snapshot.hotkey));
+    handles
+        .hotkey_line
+        .set_text(format!("热键: {}", snapshot.hotkey));
     handles.edit_llm_form.set_text(format!(
         "编辑 LLM 配置 ({}/{})",
         snapshot.llm_provider, snapshot.llm_model
@@ -3342,8 +3355,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                         }
                         if !result.ok
                             && matches!(download_popup.phase, DownloadDialogPhaseLinux::Starting)
-                            && (result.message.contains("下载")
-                                || snapshot.status.contains("下载"))
+                            && (result.message.contains("下载") || snapshot.status.contains("下载"))
                         {
                             download_popup.phase = DownloadDialogPhaseLinux::Failed;
                             let logs = if snapshot.download_logs.is_empty() {
