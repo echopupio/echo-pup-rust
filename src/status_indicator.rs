@@ -2416,14 +2416,104 @@ fn spawn_linux_stdin_reader() -> std::sync::mpsc::Receiver<LinuxIndicatorCommand
 }
 
 #[cfg(target_os = "linux")]
-fn build_linux_icon(_state: IndicatorState) -> Result<tray_icon::Icon> {
+const LINUX_TRAY_ICON_SIZE: u32 = 32;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 1.28;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 1.34;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_BADGE_RADIUS: f32 = 4.6;
+
+#[cfg(target_os = "linux")]
+fn build_linux_icon(state: IndicatorState) -> Result<tray_icon::Icon> {
+    use image::imageops::{overlay, resize, FilterType};
+    use image::{Rgba, RgbaImage};
+
     let image = image::load_from_memory_with_format(STATUS_LOGO_PNG, image::ImageFormat::Png)
         .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
         .into_rgba8();
-    let (width, height) = image.dimensions();
+    let trimmed = trim_transparent_edges_linux(&image).unwrap_or(image);
+    let scale = if matches!(state, IndicatorState::Idle) {
+        LINUX_TRAY_ICON_SCALE_IDLE
+    } else {
+        LINUX_TRAY_ICON_SCALE_ACTIVE
+    };
+    let target_size = ((LINUX_TRAY_ICON_SIZE as f32 * scale).round() as u32).max(LINUX_TRAY_ICON_SIZE);
+    let resized = resize(&trimmed, target_size, target_size, FilterType::Lanczos3);
 
-    tray_icon::Icon::from_rgba(image.into_raw(), width, height)
+    let mut canvas =
+        RgbaImage::from_pixel(LINUX_TRAY_ICON_SIZE, LINUX_TRAY_ICON_SIZE, Rgba([0, 0, 0, 0]));
+    let offset_x = ((LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2).min(0);
+    let offset_y = ((LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2).min(0);
+    overlay(&mut canvas, &resized, i64::from(offset_x), i64::from(offset_y));
+    draw_state_badge_linux(&mut canvas, state);
+
+    tray_icon::Icon::from_rgba(canvas.into_raw(), LINUX_TRAY_ICON_SIZE, LINUX_TRAY_ICON_SIZE)
         .map_err(|err| anyhow::anyhow!("创建 Linux 托盘图标失败: {}", err))
+}
+
+#[cfg(target_os = "linux")]
+fn trim_transparent_edges_linux(image: &image::RgbaImage) -> Option<image::RgbaImage> {
+    use image::GenericImageView;
+
+    let (width, height) = image.dimensions();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        if pixel[3] == 0 {
+            continue;
+        }
+        found = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(
+        image
+            .view(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+            .to_image(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn draw_state_badge_linux(canvas: &mut image::RgbaImage, state: IndicatorState) {
+    let badge = match state {
+        IndicatorState::Idle => None,
+        IndicatorState::RecordingStart | IndicatorState::Recording => Some([245, 92, 52, 255]),
+        IndicatorState::Transcribing => Some([250, 168, 39, 255]),
+        IndicatorState::Completed => Some([66, 186, 101, 255]),
+        IndicatorState::Failed => Some([228, 87, 58, 255]),
+    };
+    let Some(color) = badge else {
+        return;
+    };
+
+    let center_x = LINUX_TRAY_ICON_SIZE as f32 - 6.5;
+    let center_y = LINUX_TRAY_ICON_SIZE as f32 - 6.5;
+    let outer = LINUX_TRAY_BADGE_RADIUS;
+    let inner = (outer - 1.8).max(1.0);
+
+    for (x, y, pixel) in canvas.enumerate_pixels_mut() {
+        let dx = x as f32 - center_x;
+        let dy = y as f32 - center_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance <= outer {
+            *pixel = image::Rgba([255, 255, 255, 235]);
+        }
+        if distance <= inner {
+            *pixel = image::Rgba(color);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2472,6 +2562,13 @@ struct LinuxMenuHandles {
 struct HotkeyPopupLinux {
     current_hotkey: String,
     is_editing: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+enum HotkeyCaptureStateLinux {
+    Captured(String),
+    Cancelled,
 }
 
 #[cfg(target_os = "linux")]
@@ -2869,6 +2966,8 @@ fn open_hotkey_popup_linux(
     popup: &mut HotkeyPopupLinux,
 ) -> Option<String> {
     use gtk::prelude::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     popup.current_hotkey = snapshot.hotkey.clone();
     popup.is_editing = true;
@@ -2889,19 +2988,82 @@ fn open_hotkey_popup_linux(
     content.set_margin_start(10);
     content.set_margin_end(10);
 
-    let hint = gtk::Label::new(Some("请输入热键，例如 ctrl+shift+space 或 right_ctrl"));
+    let hint = gtk::Label::new(Some("请直接按下目标热键，Esc 取消，Enter 确认"));
     hint.set_xalign(0.0);
     content.pack_start(&hint, false, false, 6);
 
-    let entry = gtk::Entry::new();
-    entry.set_text(&popup.current_hotkey);
-    entry.set_activates_default(true);
-    content.pack_start(&entry, false, false, 0);
+    let captured_label = gtk::Label::new(Some(&format!("当前按键: {}", popup.current_hotkey)));
+    captured_label.set_xalign(0.0);
+    content.pack_start(&captured_label, false, false, 0);
     dialog.set_default_response(gtk::ResponseType::Ok);
+    dialog.set_can_focus(true);
+
+    let captured_value = Rc::new(RefCell::new(popup.current_hotkey.clone()));
+    let response_state = Rc::new(RefCell::new(None::<HotkeyCaptureStateLinux>));
+
+    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
+        widget.set_sensitive(crate::hotkey::validate_hotkey_config(&popup.current_hotkey).is_ok());
+    }
+
+    let label_for_key = captured_label.clone();
+    let hint_for_key = hint.clone();
+    let dialog_for_key = dialog.clone();
+    let value_for_key = captured_value.clone();
+    let response_for_key = response_state.clone();
+    dialog.connect_key_press_event(move |dialog, event| {
+        use gtk::glib::Propagation;
+
+        let keyval = event.keyval();
+        let state = event.state();
+
+        if keyval == gtk::gdk::keys::constants::Escape && state.is_empty() {
+            *response_for_key.borrow_mut() = Some(HotkeyCaptureStateLinux::Cancelled);
+            dialog.response(gtk::ResponseType::Cancel);
+            return Propagation::Stop;
+        }
+
+        let response_type = if (keyval == gtk::gdk::keys::constants::Return
+            || keyval == gtk::gdk::keys::constants::KP_Enter)
+            && state.is_empty()
+        {
+            Some(gtk::ResponseType::Ok)
+        } else {
+            None
+        };
+        if let Some(response_type) = response_type {
+            dialog.response(response_type);
+            return Propagation::Stop;
+        }
+
+        match linux_hotkey_from_key_event(event) {
+            Some(hotkey) => {
+                *value_for_key.borrow_mut() = hotkey.clone();
+                *response_for_key.borrow_mut() =
+                    Some(HotkeyCaptureStateLinux::Captured(hotkey.clone()));
+                label_for_key.set_text(&format!("当前按键: {}", hotkey));
+                hint_for_key.set_text("已捕获，按 Enter 确认，继续按键可覆盖");
+                if let Some(widget) = dialog_for_key.widget_for_response(gtk::ResponseType::Ok) {
+                    widget.set_sensitive(true);
+                }
+            }
+            None => {
+                hint_for_key.set_text("该按键暂不支持作为热键，请换一个");
+                if let Some(widget) = dialog_for_key.widget_for_response(gtk::ResponseType::Ok) {
+                    widget.set_sensitive(
+                        crate::hotkey::validate_hotkey_config(&value_for_key.borrow()).is_ok(),
+                    );
+                }
+            }
+        }
+
+        Propagation::Stop
+    });
 
     dialog.show_all();
+    dialog.present();
+    dialog.grab_focus();
     let response = dialog.run();
-    let value = entry.text().trim().to_string();
+    let value = captured_value.borrow().trim().to_string();
     dialog.close();
     popup.is_editing = false;
 
@@ -2913,6 +3075,124 @@ fn open_hotkey_popup_linux(
     }
     popup.current_hotkey = value.clone();
     Some(value)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_hotkey_from_key_event(event: &gtk::gdk::EventKey) -> Option<String> {
+    let keyval = event.keyval();
+    let state = event.state();
+
+    if keyval == gtk::gdk::keys::constants::Control_R
+        && !state.intersects(
+            gtk::gdk::ModifierType::SHIFT_MASK
+                | gtk::gdk::ModifierType::MOD1_MASK
+                | gtk::gdk::ModifierType::SUPER_MASK
+                | gtk::gdk::ModifierType::META_MASK,
+        )
+    {
+        return Some("right_ctrl".to_string());
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        parts.push("ctrl".to_string());
+    }
+    if state.contains(gtk::gdk::ModifierType::MOD1_MASK) {
+        parts.push("alt".to_string());
+    }
+    if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+        parts.push("shift".to_string());
+    }
+    if state.intersects(
+        gtk::gdk::ModifierType::SUPER_MASK | gtk::gdk::ModifierType::META_MASK,
+    ) {
+        parts.push("super".to_string());
+    }
+
+    let key = linux_keyval_to_hotkey_key(keyval)?;
+    parts.push(key);
+    let hotkey = parts.join("+");
+    crate::hotkey::validate_hotkey_config(&hotkey)
+        .ok()
+        .map(|_| hotkey)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_keyval_to_hotkey_key(keyval: gtk::gdk::keys::Key) -> Option<String> {
+    use gtk::gdk::keys::constants;
+
+    let key = match keyval {
+        constants::Return | constants::KP_Enter => "enter".to_string(),
+        constants::Tab | constants::ISO_Left_Tab => "tab".to_string(),
+        constants::BackSpace => "backspace".to_string(),
+        constants::Delete | constants::KP_Delete => "delete".to_string(),
+        constants::Insert | constants::KP_Insert => "insert".to_string(),
+        constants::Home | constants::KP_Home => "home".to_string(),
+        constants::End | constants::KP_End => "end".to_string(),
+        constants::Page_Up | constants::KP_Page_Up => "pageup".to_string(),
+        constants::Page_Down | constants::KP_Page_Down => "pagedown".to_string(),
+        constants::Left | constants::KP_Left => "left".to_string(),
+        constants::Right | constants::KP_Right => "right".to_string(),
+        constants::Up | constants::KP_Up => "up".to_string(),
+        constants::Down | constants::KP_Down => "down".to_string(),
+        constants::Escape => "esc".to_string(),
+        constants::Caps_Lock => "capslock".to_string(),
+        constants::Scroll_Lock => "scrolllock".to_string(),
+        constants::Num_Lock => "numlock".to_string(),
+        constants::Print => "printscreen".to_string(),
+        constants::Pause => "pause".to_string(),
+        _ => {
+            if let Some(name) = linux_function_key_name(keyval) {
+                return Some(name.to_string());
+            }
+            let ch = keyval.to_unicode()?;
+            return linux_char_to_hotkey_key(ch);
+        }
+    };
+    Some(key)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_function_key_name(keyval: gtk::gdk::keys::Key) -> Option<&'static str> {
+    use gtk::gdk::keys::constants;
+
+    match keyval {
+        constants::F1 => Some("f1"),
+        constants::F2 => Some("f2"),
+        constants::F3 => Some("f3"),
+        constants::F4 => Some("f4"),
+        constants::F5 => Some("f5"),
+        constants::F6 => Some("f6"),
+        constants::F7 => Some("f7"),
+        constants::F8 => Some("f8"),
+        constants::F9 => Some("f9"),
+        constants::F10 => Some("f10"),
+        constants::F11 => Some("f11"),
+        constants::F12 => Some("f12"),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_char_to_hotkey_key(c: char) -> Option<String> {
+    let key = match c {
+        'a'..='z' | '0'..='9' => c.to_string(),
+        'A'..='Z' => c.to_ascii_lowercase().to_string(),
+        ' ' => "space".to_string(),
+        '+' | '=' => "equal".to_string(),
+        '-' | '_' => "minus".to_string(),
+        ',' | '<' => "comma".to_string(),
+        '.' | '>' => "period".to_string(),
+        ';' | ':' => "semicolon".to_string(),
+        '/' | '?' => "slash".to_string(),
+        '\'' | '"' => "quote".to_string(),
+        '[' | '{' => "bracketleft".to_string(),
+        ']' | '}' => "bracketright".to_string(),
+        '\\' | '|' => "backslash".to_string(),
+        '`' | '~' => "backquote".to_string(),
+        _ => return None,
+    };
+    Some(key)
 }
 
 #[cfg(target_os = "linux")]
@@ -3105,10 +3385,7 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
 
 #[cfg(target_os = "linux")]
 fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state: IndicatorState) {
-    let mut status_text = snapshot.status.trim().to_string();
-    if status_text.is_empty() {
-        status_text = state.menu_title().to_string();
-    }
+    let mut status_text = linux_status_text(snapshot, state);
     if status_text.chars().count() > 56 {
         status_text = format!("{}...", status_text.chars().take(56).collect::<String>());
     }
@@ -3154,6 +3431,31 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         "下载模型...".to_string()
     };
     handles.download_model.set_text(download_title);
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status_text(snapshot: &MenuSnapshot, state: IndicatorState) -> String {
+    match state {
+        IndicatorState::RecordingStart | IndicatorState::Recording | IndicatorState::Transcribing => {
+            state.menu_title().to_string()
+        }
+        IndicatorState::Completed | IndicatorState::Failed => {
+            let status = snapshot.status.trim();
+            if status.is_empty() {
+                state.menu_title().to_string()
+            } else {
+                status.to_string()
+            }
+        }
+        IndicatorState::Idle => {
+            let status = snapshot.status.trim();
+            if status.is_empty() {
+                state.menu_title().to_string()
+            } else {
+                status.to_string()
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3246,7 +3548,7 @@ pub fn run_status_indicator_process() -> Result<()> {
         .with_menu(Box::new(menu))
         .with_icon(build_linux_icon(state)?)
         .with_tooltip("EchoPup 状态栏")
-        .with_title(state.menu_title())
+        .with_title(linux_status_text(&snapshot, state))
         .build()?;
 
     let mut should_exit = false;
@@ -3297,7 +3599,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                 LinuxIndicatorCommand::Message(message) => match message {
                     ParentMessage::SetState { state: next_state } => {
                         state = next_state;
-                        tray_icon.set_title(Some(state.menu_title()));
+                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
                         if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state)?)) {
                             warn!("更新 Linux 托盘图标失败: {}", err);
                         }
@@ -3310,6 +3612,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                         if !hotkey_popup.is_editing {
                             hotkey_popup.current_hotkey = snapshot.hotkey.clone();
                         }
+                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
                         update_linux_menu(&handles, &snapshot, state);
                         sync_download_popup_linux(&snapshot, &mut download_popup);
                     }
@@ -3321,6 +3624,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                         if !hotkey_popup.is_editing {
                             hotkey_popup.current_hotkey = snapshot.hotkey.clone();
                         }
+                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
                         if !result.ok
                             && matches!(download_popup.phase, DownloadDialogPhaseLinux::Starting)
                             && (result.message.contains("下载") || snapshot.status.contains("下载"))
