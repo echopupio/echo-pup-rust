@@ -1166,7 +1166,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             }
                             last_snapshot_len = snapshot.len();
 
-                            let callback_text = partial_callback_latest_text_for_poll.lock().clone();
+                            let callback_text =
+                                partial_callback_latest_text_for_poll.lock().clone();
                             let callback_trimmed = callback_text.trim();
                             if !callback_trimmed.is_empty()
                                 && callback_trimmed != "[BLANK_AUDIO]"
@@ -1249,25 +1250,27 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             let callback_result = {
                                 let mut whisper_guard = whisper_callback_runtime.lock();
                                 if let Some(ref mut whisper) = *whisper_guard {
-                                    whisper.transcribe_with_callback(&snapshot, move |segment| {
-                                        let trimmed = segment.trim();
-                                        if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
-                                            return;
-                                        }
+                                    whisper
+                                        .transcribe_with_callback(&snapshot, move |segment| {
+                                            let trimmed = segment.trim();
+                                            if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
+                                                return;
+                                            }
 
-                                        let mut latest = callback_text_shared.lock();
-                                        if latest.as_str() == trimmed {
-                                            return;
-                                        }
-                                        *latest = trimmed.to_string();
-                                        drop(latest);
+                                            let mut latest = callback_text_shared.lock();
+                                            if latest.as_str() == trimmed {
+                                                return;
+                                            }
+                                            *latest = trimmed.to_string();
+                                            drop(latest);
 
-                                        send_status_snapshot(
-                                            &status_indicator_callback_inner,
-                                            &menu_snapshot_callback_inner,
-                                            format_partial_status(trimmed),
-                                        );
-                                    }).ok()
+                                            send_status_snapshot(
+                                                &status_indicator_callback_inner,
+                                                &menu_snapshot_callback_inner,
+                                                format_partial_status(trimmed),
+                                            );
+                                        })
+                                        .ok()
                                 } else {
                                     None
                                 }
@@ -1276,7 +1279,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             if let Some(callback_result) = callback_result {
                                 let trimmed = callback_result.trim();
                                 if !trimmed.is_empty() && trimmed != "[BLANK_AUDIO]" {
-                                    let mut latest = partial_callback_latest_text_for_callback.lock();
+                                    let mut latest =
+                                        partial_callback_latest_text_for_callback.lock();
                                     if latest.as_str() != trimmed {
                                         *latest = trimmed.to_string();
                                         drop(latest);
