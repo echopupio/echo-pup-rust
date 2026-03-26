@@ -2418,50 +2418,63 @@ fn spawn_linux_stdin_reader() -> std::sync::mpsc::Receiver<LinuxIndicatorCommand
 #[cfg(target_os = "linux")]
 const LINUX_TRAY_ICON_SIZE: u32 = 32;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 0.86;
+const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 0.84;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 0.82;
+const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 0.62;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_RING_THICKNESS: f32 = 2.4;
+const LINUX_TRAY_BACKGROUND_CORNER_RATIO: f32 = 0.30;
 
 #[cfg(target_os = "linux")]
 fn build_linux_icon(state: IndicatorState, phase: f32) -> Result<tray_icon::Icon> {
     use image::imageops::{overlay, resize, FilterType};
     use image::{Rgba, RgbaImage};
 
-    let base_png = if matches!(state, IndicatorState::Idle) {
-        STATUS_LOGO_PNG
-    } else {
-        STATUS_MICROPHONE_PNG
-    };
-    let image = image::load_from_memory_with_format(base_png, image::ImageFormat::Png)
-        .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
-        .into_rgba8();
-    let trimmed = trim_transparent_edges_linux(&image).unwrap_or(image);
-    let scale = if matches!(state, IndicatorState::Idle) {
-        LINUX_TRAY_ICON_SCALE_IDLE
-    } else {
-        LINUX_TRAY_ICON_SCALE_ACTIVE
-    };
-    let max_side = ((LINUX_TRAY_ICON_SIZE as f32 * scale).round() as u32).max(1);
-    let (target_width, target_height) =
-        fit_within_square_linux(trimmed.width(), trimmed.height(), max_side);
-    let resized = resize(&trimmed, target_width, target_height, FilterType::Lanczos3);
-
     let mut canvas = RgbaImage::from_pixel(
         LINUX_TRAY_ICON_SIZE,
         LINUX_TRAY_ICON_SIZE,
         Rgba([0, 0, 0, 0]),
     );
-    draw_state_ring_linux(&mut canvas, state, phase);
-    let offset_x = ((LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2).max(0);
-    let offset_y = ((LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2).max(0);
-    overlay(
-        &mut canvas,
-        &resized,
-        i64::from(offset_x),
-        i64::from(offset_y),
-    );
+
+    if let Some((color, scale)) = linux_background_style(state, phase) {
+        fill_rounded_rect_linux(
+            &mut canvas,
+            Rgba(color),
+            scale,
+            LINUX_TRAY_BACKGROUND_CORNER_RATIO,
+        );
+    }
+
+    let base_png = match state {
+        IndicatorState::Idle => Some(STATUS_LOGO_PNG),
+        IndicatorState::RecordingStart
+        | IndicatorState::Recording
+        | IndicatorState::Transcribing => Some(STATUS_MICROPHONE_PNG),
+        IndicatorState::Completed | IndicatorState::Failed => None,
+    };
+
+    if let Some(base_png) = base_png {
+        let image = image::load_from_memory_with_format(base_png, image::ImageFormat::Png)
+            .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
+            .into_rgba8();
+        let trimmed = trim_transparent_edges_linux(&image).unwrap_or(image);
+        let scale = if matches!(state, IndicatorState::Idle) {
+            LINUX_TRAY_ICON_SCALE_IDLE
+        } else {
+            LINUX_TRAY_ICON_SCALE_ACTIVE
+        };
+        let max_side = ((LINUX_TRAY_ICON_SIZE as f32 * scale).round() as u32).max(1);
+        let (target_width, target_height) =
+            fit_within_square_linux(trimmed.width(), trimmed.height(), max_side);
+        let resized = resize(&trimmed, target_width, target_height, FilterType::Lanczos3);
+        let offset_x = ((LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2).max(0);
+        let offset_y = ((LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2).max(0);
+        overlay(
+            &mut canvas,
+            &resized,
+            i64::from(offset_x),
+            i64::from(offset_y),
+        );
+    }
 
     tray_icon::Icon::from_rgba(
         canvas.into_raw(),
@@ -2524,7 +2537,7 @@ fn fit_within_square_linux(width: u32, height: u32, max_side: u32) -> (u32, u32)
 }
 
 #[cfg(target_os = "linux")]
-fn linux_ring_style(state: IndicatorState, phase: f32) -> Option<([u8; 4], f32)> {
+fn linux_background_style(state: IndicatorState, phase: f32) -> Option<([u8; 4], f32)> {
     let wave = if state.visual_style().is_pulsing() {
         pulse_wave(phase)
     } else {
@@ -2533,34 +2546,49 @@ fn linux_ring_style(state: IndicatorState, phase: f32) -> Option<([u8; 4], f32)>
 
     match state.visual_style() {
         VisualStyle::Idle => None,
-        VisualStyle::RecordingPulse => Some(([245, 92, 52, (170.0 + 70.0 * wave) as u8], wave)),
-        VisualStyle::TranscribingPulse => Some(([250, 168, 39, (165.0 + 65.0 * wave) as u8], wave)),
-        VisualStyle::CompletedSolid => Some(([66, 186, 101, 210], 1.0)),
-        VisualStyle::FailedSolid => Some(([228, 87, 58, 210], 1.0)),
+        VisualStyle::RecordingPulse => Some((
+            [245, 92, 52, (165.0 + 55.0 * wave) as u8],
+            0.74 + 0.10 * wave,
+        )),
+        VisualStyle::TranscribingPulse => Some((
+            [250, 168, 39, (160.0 + 55.0 * wave) as u8],
+            0.74 + 0.08 * wave,
+        )),
+        VisualStyle::CompletedSolid => Some(([66, 186, 101, 228], 0.82)),
+        VisualStyle::FailedSolid => Some(([228, 87, 58, 228], 0.82)),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn draw_state_ring_linux(canvas: &mut image::RgbaImage, state: IndicatorState, phase: f32) {
-    let Some((color, wave)) = linux_ring_style(state, phase) else {
+fn fill_rounded_rect_linux(
+    canvas: &mut image::RgbaImage,
+    color: image::Rgba<u8>,
+    scale: f32,
+    corner_ratio: f32,
+) {
+    let Some(side) = i32::try_from(canvas.width().min(canvas.height())).ok() else {
         return;
     };
-
-    let center = (LINUX_TRAY_ICON_SIZE as f32 - 1.0) * 0.5;
-    let outer = center;
-    let thickness = if state.visual_style().is_pulsing() {
-        LINUX_TRAY_RING_THICKNESS + 0.75 * wave
-    } else {
-        LINUX_TRAY_RING_THICKNESS
-    };
-    let inner = (outer - thickness).max(1.0);
+    let rect_side = ((side as f32 * scale).round() as i32).clamp(1, side);
+    let left = (side - rect_side) / 2;
+    let top = (side - rect_side) / 2;
+    let right = left + rect_side;
+    let bottom = top + rect_side;
+    let radius = (rect_side as f32 * corner_ratio).clamp(2.0, rect_side as f32 * 0.5);
+    let inner_left = left as f32 + radius;
+    let inner_right = right as f32 - radius;
+    let inner_top = top as f32 + radius;
+    let inner_bottom = bottom as f32 - radius;
 
     for (x, y, pixel) in canvas.enumerate_pixels_mut() {
-        let dx = x as f32 - center;
-        let dy = y as f32 - center;
-        let distance = (dx * dx + dy * dy).sqrt();
-        if distance <= outer && distance >= inner {
-            *pixel = image::Rgba(color);
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let nearest_x = px.clamp(inner_left, inner_right);
+        let nearest_y = py.clamp(inner_top, inner_bottom);
+        let dx = px - nearest_x;
+        let dy = py - nearest_y;
+        if dx * dx + dy * dy <= radius * radius {
+            *pixel = color;
         }
     }
 }
@@ -3693,13 +3721,11 @@ pub fn run_status_indicator_process() -> Result<()> {
                         auto_back_to_idle_deadline = state
                             .auto_reset_duration()
                             .map(|duration| std::time::Instant::now() + duration);
-                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
                         if let Err(err) =
                             tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?))
                         {
                             warn!("更新 Linux 托盘图标失败: {}", err);
                         }
-                        update_linux_menu(&handles, &snapshot, state);
                     }
                     ParentMessage::SetSnapshot {
                         snapshot: next_snapshot,
