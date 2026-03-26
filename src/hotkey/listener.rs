@@ -612,7 +612,7 @@ fn is_right_ctrl_event_key(key: Key) -> bool {
     not(target_os = "macos")
 ))]
 fn is_right_ctrl_event_key(key: Key) -> bool {
-    matches!(key, Key::ControlRight)
+    matches!(key, Key::ControlRight | Key::ControlLeft)
 }
 
 impl Default for HotkeyListener {

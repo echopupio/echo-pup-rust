@@ -73,7 +73,7 @@ enum ChildMessage {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const STATUS_LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const STATUS_MICROPHONE_PNG: &[u8] = include_bytes!("../assets/mic.png");
 #[cfg(target_os = "macos")]
 const STATUS_ITEM_LENGTH_IDLE: f64 = 16.0;
@@ -98,7 +98,7 @@ fn status_item_length_for_state(state: IndicatorState) -> f64 {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisualStyle {
     Idle,
@@ -108,14 +108,14 @@ enum VisualStyle {
     FailedSolid,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl VisualStyle {
     fn is_pulsing(self) -> bool {
         matches!(self, Self::RecordingPulse | Self::TranscribingPulse)
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl IndicatorState {
     fn visual_style(self) -> VisualStyle {
         match self {
@@ -576,7 +576,7 @@ struct LayerStyle {
     corner_scale: f64,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn pulse_wave(phase: f32) -> f32 {
     0.5 + 0.5 * phase.sin()
 }
@@ -2418,18 +2418,23 @@ fn spawn_linux_stdin_reader() -> std::sync::mpsc::Receiver<LinuxIndicatorCommand
 #[cfg(target_os = "linux")]
 const LINUX_TRAY_ICON_SIZE: u32 = 32;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 1.28;
+const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 0.86;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 1.34;
+const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 0.82;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_BADGE_RADIUS: f32 = 4.6;
+const LINUX_TRAY_RING_THICKNESS: f32 = 2.4;
 
 #[cfg(target_os = "linux")]
-fn build_linux_icon(state: IndicatorState) -> Result<tray_icon::Icon> {
+fn build_linux_icon(state: IndicatorState, phase: f32) -> Result<tray_icon::Icon> {
     use image::imageops::{overlay, resize, FilterType};
     use image::{Rgba, RgbaImage};
 
-    let image = image::load_from_memory_with_format(STATUS_LOGO_PNG, image::ImageFormat::Png)
+    let base_png = if matches!(state, IndicatorState::Idle) {
+        STATUS_LOGO_PNG
+    } else {
+        STATUS_MICROPHONE_PNG
+    };
+    let image = image::load_from_memory_with_format(base_png, image::ImageFormat::Png)
         .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
         .into_rgba8();
     let trimmed = trim_transparent_edges_linux(&image).unwrap_or(image);
@@ -2438,18 +2443,32 @@ fn build_linux_icon(state: IndicatorState) -> Result<tray_icon::Icon> {
     } else {
         LINUX_TRAY_ICON_SCALE_ACTIVE
     };
-    let target_size = ((LINUX_TRAY_ICON_SIZE as f32 * scale).round() as u32).max(LINUX_TRAY_ICON_SIZE);
-    let resized = resize(&trimmed, target_size, target_size, FilterType::Lanczos3);
+    let max_side = ((LINUX_TRAY_ICON_SIZE as f32 * scale).round() as u32).max(1);
+    let (target_width, target_height) =
+        fit_within_square_linux(trimmed.width(), trimmed.height(), max_side);
+    let resized = resize(&trimmed, target_width, target_height, FilterType::Lanczos3);
 
-    let mut canvas =
-        RgbaImage::from_pixel(LINUX_TRAY_ICON_SIZE, LINUX_TRAY_ICON_SIZE, Rgba([0, 0, 0, 0]));
-    let offset_x = ((LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2).min(0);
-    let offset_y = ((LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2).min(0);
-    overlay(&mut canvas, &resized, i64::from(offset_x), i64::from(offset_y));
-    draw_state_badge_linux(&mut canvas, state);
+    let mut canvas = RgbaImage::from_pixel(
+        LINUX_TRAY_ICON_SIZE,
+        LINUX_TRAY_ICON_SIZE,
+        Rgba([0, 0, 0, 0]),
+    );
+    draw_state_ring_linux(&mut canvas, state, phase);
+    let offset_x = ((LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2).max(0);
+    let offset_y = ((LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2).max(0);
+    overlay(
+        &mut canvas,
+        &resized,
+        i64::from(offset_x),
+        i64::from(offset_y),
+    );
 
-    tray_icon::Icon::from_rgba(canvas.into_raw(), LINUX_TRAY_ICON_SIZE, LINUX_TRAY_ICON_SIZE)
-        .map_err(|err| anyhow::anyhow!("创建 Linux 托盘图标失败: {}", err))
+    tray_icon::Icon::from_rgba(
+        canvas.into_raw(),
+        LINUX_TRAY_ICON_SIZE,
+        LINUX_TRAY_ICON_SIZE,
+    )
+    .map_err(|err| anyhow::anyhow!("创建 Linux 托盘图标失败: {}", err))
 }
 
 #[cfg(target_os = "linux")]
@@ -2486,31 +2505,61 @@ fn trim_transparent_edges_linux(image: &image::RgbaImage) -> Option<image::RgbaI
 }
 
 #[cfg(target_os = "linux")]
-fn draw_state_badge_linux(canvas: &mut image::RgbaImage, state: IndicatorState) {
-    let badge = match state {
-        IndicatorState::Idle => None,
-        IndicatorState::RecordingStart | IndicatorState::Recording => Some([245, 92, 52, 255]),
-        IndicatorState::Transcribing => Some([250, 168, 39, 255]),
-        IndicatorState::Completed => Some([66, 186, 101, 255]),
-        IndicatorState::Failed => Some([228, 87, 58, 255]),
+fn fit_within_square_linux(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (max_side.max(1), max_side.max(1));
+    }
+
+    if width >= height {
+        let ratio = height as f32 / width as f32;
+        let target_width = max_side.max(1);
+        let target_height = ((target_width as f32 * ratio).round() as u32).max(1);
+        (target_width, target_height)
+    } else {
+        let ratio = width as f32 / height as f32;
+        let target_height = max_side.max(1);
+        let target_width = ((target_height as f32 * ratio).round() as u32).max(1);
+        (target_width, target_height)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ring_style(state: IndicatorState, phase: f32) -> Option<([u8; 4], f32)> {
+    let wave = if state.visual_style().is_pulsing() {
+        pulse_wave(phase)
+    } else {
+        1.0
     };
-    let Some(color) = badge else {
+
+    match state.visual_style() {
+        VisualStyle::Idle => None,
+        VisualStyle::RecordingPulse => Some(([245, 92, 52, (170.0 + 70.0 * wave) as u8], wave)),
+        VisualStyle::TranscribingPulse => Some(([250, 168, 39, (165.0 + 65.0 * wave) as u8], wave)),
+        VisualStyle::CompletedSolid => Some(([66, 186, 101, 210], 1.0)),
+        VisualStyle::FailedSolid => Some(([228, 87, 58, 210], 1.0)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn draw_state_ring_linux(canvas: &mut image::RgbaImage, state: IndicatorState, phase: f32) {
+    let Some((color, wave)) = linux_ring_style(state, phase) else {
         return;
     };
 
-    let center_x = LINUX_TRAY_ICON_SIZE as f32 - 6.5;
-    let center_y = LINUX_TRAY_ICON_SIZE as f32 - 6.5;
-    let outer = LINUX_TRAY_BADGE_RADIUS;
-    let inner = (outer - 1.8).max(1.0);
+    let center = (LINUX_TRAY_ICON_SIZE as f32 - 1.0) * 0.5;
+    let outer = center;
+    let thickness = if state.visual_style().is_pulsing() {
+        LINUX_TRAY_RING_THICKNESS + 0.75 * wave
+    } else {
+        LINUX_TRAY_RING_THICKNESS
+    };
+    let inner = (outer - thickness).max(1.0);
 
     for (x, y, pixel) in canvas.enumerate_pixels_mut() {
-        let dx = x as f32 - center_x;
-        let dy = y as f32 - center_y;
+        let dx = x as f32 - center;
+        let dy = y as f32 - center;
         let distance = (dx * dx + dy * dy).sqrt();
-        if distance <= outer {
-            *pixel = image::Rgba([255, 255, 255, 235]);
-        }
-        if distance <= inner {
+        if distance <= outer && distance >= inner {
             *pixel = image::Rgba(color);
         }
     }
@@ -3014,9 +3063,9 @@ fn open_hotkey_popup_linux(
         use gtk::glib::Propagation;
 
         let keyval = event.keyval();
-        let state = event.state();
+        let state = normalize_linux_modifier_state(event.state(), keyval);
 
-        if keyval == gtk::gdk::keys::constants::Escape && state.is_empty() {
+        if keyval == gtk::gdk::keys::constants::Escape {
             *response_for_key.borrow_mut() = Some(HotkeyCaptureStateLinux::Cancelled);
             dialog.response(gtk::ResponseType::Cancel);
             return Propagation::Stop;
@@ -3080,9 +3129,14 @@ fn open_hotkey_popup_linux(
 #[cfg(target_os = "linux")]
 fn linux_hotkey_from_key_event(event: &gtk::gdk::EventKey) -> Option<String> {
     let keyval = event.keyval();
-    let state = event.state();
+    let state = normalize_linux_modifier_state(event.state(), keyval);
 
-    if keyval == gtk::gdk::keys::constants::Control_R
+    if keyval == gtk::gdk::keys::constants::Escape {
+        return Some("esc".to_string());
+    }
+
+    if (keyval == gtk::gdk::keys::constants::Control_L
+        || keyval == gtk::gdk::keys::constants::Control_R)
         && !state.intersects(
             gtk::gdk::ModifierType::SHIFT_MASK
                 | gtk::gdk::ModifierType::MOD1_MASK
@@ -3103,9 +3157,7 @@ fn linux_hotkey_from_key_event(event: &gtk::gdk::EventKey) -> Option<String> {
     if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
         parts.push("shift".to_string());
     }
-    if state.intersects(
-        gtk::gdk::ModifierType::SUPER_MASK | gtk::gdk::ModifierType::META_MASK,
-    ) {
+    if state.intersects(gtk::gdk::ModifierType::SUPER_MASK | gtk::gdk::ModifierType::META_MASK) {
         parts.push("super".to_string());
     }
 
@@ -3115,6 +3167,42 @@ fn linux_hotkey_from_key_event(event: &gtk::gdk::EventKey) -> Option<String> {
     crate::hotkey::validate_hotkey_config(&hotkey)
         .ok()
         .map(|_| hotkey)
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_linux_modifier_state(
+    mut state: gtk::gdk::ModifierType,
+    keyval: gtk::gdk::keys::Key,
+) -> gtk::gdk::ModifierType {
+    use gtk::gdk::keys::constants;
+
+    state.remove(
+        gtk::gdk::ModifierType::LOCK_MASK
+            | gtk::gdk::ModifierType::MOD2_MASK
+            | gtk::gdk::ModifierType::BUTTON1_MASK
+            | gtk::gdk::ModifierType::BUTTON2_MASK
+            | gtk::gdk::ModifierType::BUTTON3_MASK
+            | gtk::gdk::ModifierType::BUTTON4_MASK
+            | gtk::gdk::ModifierType::BUTTON5_MASK,
+    );
+
+    match keyval {
+        constants::Control_L | constants::Control_R => {
+            state.remove(gtk::gdk::ModifierType::CONTROL_MASK);
+        }
+        constants::Shift_L | constants::Shift_R => {
+            state.remove(gtk::gdk::ModifierType::SHIFT_MASK);
+        }
+        constants::Alt_L | constants::Alt_R | constants::Meta_L | constants::Meta_R => {
+            state.remove(gtk::gdk::ModifierType::MOD1_MASK | gtk::gdk::ModifierType::META_MASK);
+        }
+        constants::Super_L | constants::Super_R => {
+            state.remove(gtk::gdk::ModifierType::SUPER_MASK);
+        }
+        _ => {}
+    }
+
+    state
 }
 
 #[cfg(target_os = "linux")]
@@ -3436,9 +3524,9 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
 #[cfg(target_os = "linux")]
 fn linux_status_text(snapshot: &MenuSnapshot, state: IndicatorState) -> String {
     match state {
-        IndicatorState::RecordingStart | IndicatorState::Recording | IndicatorState::Transcribing => {
-            state.menu_title().to_string()
-        }
+        IndicatorState::RecordingStart
+        | IndicatorState::Recording
+        | IndicatorState::Transcribing => state.menu_title().to_string(),
         IndicatorState::Completed | IndicatorState::Failed => {
             let status = snapshot.status.trim();
             if status.is_empty() {
@@ -3546,11 +3634,13 @@ pub fn run_status_indicator_process() -> Result<()> {
 
     let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_icon(build_linux_icon(state)?)
+        .with_icon(build_linux_icon(state, 0.0)?)
         .with_tooltip("EchoPup 状态栏")
         .with_title(linux_status_text(&snapshot, state))
         .build()?;
 
+    let mut pulse_phase = 0.0f32;
+    let mut auto_back_to_idle_deadline: Option<std::time::Instant> = None;
     let mut should_exit = false;
     info!("Linux 托盘状态指示器已启动");
 
@@ -3599,8 +3689,14 @@ pub fn run_status_indicator_process() -> Result<()> {
                 LinuxIndicatorCommand::Message(message) => match message {
                     ParentMessage::SetState { state: next_state } => {
                         state = next_state;
+                        pulse_phase = 0.0;
+                        auto_back_to_idle_deadline = state
+                            .auto_reset_duration()
+                            .map(|duration| std::time::Instant::now() + duration);
                         tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
-                        if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state)?)) {
+                        if let Err(err) =
+                            tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?))
+                        {
                             warn!("更新 Linux 托盘图标失败: {}", err);
                         }
                         update_linux_menu(&handles, &snapshot, state);
@@ -3658,6 +3754,26 @@ pub fn run_status_indicator_process() -> Result<()> {
                     should_exit = true;
                     break;
                 }
+            }
+        }
+
+        if state.visual_style().is_pulsing() {
+            pulse_phase = (pulse_phase + 0.20) % std::f32::consts::TAU;
+            if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?)) {
+                warn!("更新 Linux 托盘脉冲图标失败: {}", err);
+            }
+        }
+
+        if let Some(deadline) = auto_back_to_idle_deadline {
+            if std::time::Instant::now() >= deadline {
+                state = IndicatorState::Idle;
+                pulse_phase = 0.0;
+                auto_back_to_idle_deadline = None;
+                tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
+                if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?)) {
+                    warn!("重置 Linux 托盘图标失败: {}", err);
+                }
+                update_linux_menu(&handles, &snapshot, state);
             }
         }
 
