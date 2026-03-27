@@ -48,6 +48,10 @@ pub struct DownloadStart {
     pub initial_logs: Vec<String>,
 }
 
+fn normalize_content_length(content_length: Option<u64>) -> Option<u64> {
+    content_length.filter(|&len| len > 0)
+}
+
 fn build_http_client(ignore_env_proxy: bool) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(20))
@@ -229,7 +233,7 @@ fn download_model_with_progress(
         Ok(resp) => {
             let status = resp.status();
             let content_length = if status.is_success() {
-                resp.content_length()
+                normalize_content_length(resp.content_length())
             } else {
                 None
             };
@@ -254,7 +258,7 @@ fn download_model_with_progress(
                     Ok(resp) => {
                         let status = resp.status();
                         let content_length = if status.is_success() {
-                            resp.content_length()
+                            normalize_content_length(resp.content_length())
                         } else {
                             None
                         };
@@ -422,7 +426,7 @@ fn download_model_with_progress(
                     .and_then(|v| v.to_str().ok())
                     .and_then(parse_total_from_content_range)
                     .or_else(|| {
-                        response.content_length().map(|len| {
+                        normalize_content_length(response.content_length()).map(|len| {
                             if status == StatusCode::PARTIAL_CONTENT {
                                 downloaded + len
                             } else {
@@ -659,5 +663,12 @@ mod tests {
 
         assert_eq!(format_bytes(500), "500 B");
         assert_eq!(format_bytes(2048), "2.00 KB");
+    }
+
+    #[test]
+    fn test_normalize_content_length() {
+        assert_eq!(normalize_content_length(None), None);
+        assert_eq!(normalize_content_length(Some(0)), None);
+        assert_eq!(normalize_content_length(Some(1)), Some(1));
     }
 }

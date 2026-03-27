@@ -2416,13 +2416,50 @@ fn spawn_linux_stdin_reader() -> std::sync::mpsc::Receiver<LinuxIndicatorCommand
 }
 
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SIZE: u32 = 32;
+fn load_linux_window_icon_pixbuf() -> Option<gtk::gdk_pixbuf::Pixbuf> {
+    use gtk::prelude::*;
+
+    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+    if loader.write(STATUS_LOGO_PNG).is_err() {
+        return None;
+    }
+    if loader.close().is_err() {
+        return None;
+    }
+    loader.pixbuf()
+}
+
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 0.84;
+fn apply_linux_dialog_icon(dialog: &gtk::Dialog) {
+    use gtk::prelude::*;
+
+    let Some(icon) = load_linux_window_icon_pixbuf() else {
+        warn!("加载 Linux 弹窗图标失败，将继续使用系统默认图标");
+        return;
+    };
+    dialog.set_icon(Some(&icon));
+}
+
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 0.62;
+const LINUX_TRAY_ICON_SIZE: u32 = 64;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_BACKGROUND_CORNER_RATIO: f32 = 0.30;
+const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 0.90;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 0.80;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_BACKGROUND_CORNER_RATIO: f32 = 0.34;
+
+#[cfg(target_os = "linux")]
+fn linux_foreground_png(state: IndicatorState) -> Option<&'static [u8]> {
+    match state {
+        IndicatorState::Idle => Some(STATUS_LOGO_PNG),
+        IndicatorState::RecordingStart
+        | IndicatorState::Recording
+        | IndicatorState::Transcribing
+        | IndicatorState::Completed
+        | IndicatorState::Failed => Some(STATUS_MICROPHONE_PNG),
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn build_linux_icon(state: IndicatorState, phase: f32) -> Result<tray_icon::Icon> {
@@ -2444,15 +2481,7 @@ fn build_linux_icon(state: IndicatorState, phase: f32) -> Result<tray_icon::Icon
         );
     }
 
-    let base_png = match state {
-        IndicatorState::Idle => Some(STATUS_LOGO_PNG),
-        IndicatorState::RecordingStart
-        | IndicatorState::Recording
-        | IndicatorState::Transcribing => Some(STATUS_MICROPHONE_PNG),
-        IndicatorState::Completed | IndicatorState::Failed => None,
-    };
-
-    if let Some(base_png) = base_png {
+    if let Some(base_png) = linux_foreground_png(state) {
         let image = image::load_from_memory_with_format(base_png, image::ImageFormat::Png)
             .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
             .into_rgba8();
@@ -2548,14 +2577,14 @@ fn linux_background_style(state: IndicatorState, phase: f32) -> Option<([u8; 4],
         VisualStyle::Idle => None,
         VisualStyle::RecordingPulse => Some((
             [245, 92, 52, (165.0 + 55.0 * wave) as u8],
-            0.74 + 0.10 * wave,
+            0.80 + 0.08 * wave,
         )),
         VisualStyle::TranscribingPulse => Some((
             [250, 168, 39, (160.0 + 55.0 * wave) as u8],
-            0.74 + 0.08 * wave,
+            0.80 + 0.06 * wave,
         )),
-        VisualStyle::CompletedSolid => Some(([66, 186, 101, 228], 0.82)),
-        VisualStyle::FailedSolid => Some(([228, 87, 58, 228], 0.82)),
+        VisualStyle::CompletedSolid => Some(([66, 186, 101, 228], 0.88)),
+        VisualStyle::FailedSolid => Some(([228, 87, 58, 228], 0.88)),
     }
 }
 
@@ -2639,13 +2668,6 @@ struct LinuxMenuHandles {
 struct HotkeyPopupLinux {
     current_hotkey: String,
     is_editing: bool,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-enum HotkeyCaptureStateLinux {
-    Captured(String),
-    Cancelled,
 }
 
 #[cfg(target_os = "linux")]
@@ -2888,6 +2910,7 @@ fn download_model_popup_linux(snapshot: &MenuSnapshot, popup: &mut DownloadPopup
                 ("确认", gtk::ResponseType::Ok),
             ],
         );
+        apply_linux_dialog_icon(&dialog);
         dialog.set_default_size(620, 440);
 
         let content = dialog.content_area();
@@ -3058,6 +3081,7 @@ fn open_hotkey_popup_linux(
             ("确认", gtk::ResponseType::Ok),
         ],
     );
+    apply_linux_dialog_icon(&dialog);
     let content = dialog.content_area();
     content.set_spacing(8);
     content.set_margin_top(10);
@@ -3076,8 +3100,6 @@ fn open_hotkey_popup_linux(
     dialog.set_can_focus(true);
 
     let captured_value = Rc::new(RefCell::new(popup.current_hotkey.clone()));
-    let response_state = Rc::new(RefCell::new(None::<HotkeyCaptureStateLinux>));
-
     if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
         widget.set_sensitive(crate::hotkey::validate_hotkey_config(&popup.current_hotkey).is_ok());
     }
@@ -3086,7 +3108,6 @@ fn open_hotkey_popup_linux(
     let hint_for_key = hint.clone();
     let dialog_for_key = dialog.clone();
     let value_for_key = captured_value.clone();
-    let response_for_key = response_state.clone();
     dialog.connect_key_press_event(move |dialog, event| {
         use gtk::glib::Propagation;
 
@@ -3094,7 +3115,6 @@ fn open_hotkey_popup_linux(
         let state = normalize_linux_modifier_state(event.state(), keyval);
 
         if keyval == gtk::gdk::keys::constants::Escape {
-            *response_for_key.borrow_mut() = Some(HotkeyCaptureStateLinux::Cancelled);
             dialog.response(gtk::ResponseType::Cancel);
             return Propagation::Stop;
         }
@@ -3115,8 +3135,6 @@ fn open_hotkey_popup_linux(
         match linux_hotkey_from_key_event(event) {
             Some(hotkey) => {
                 *value_for_key.borrow_mut() = hotkey.clone();
-                *response_for_key.borrow_mut() =
-                    Some(HotkeyCaptureStateLinux::Captured(hotkey.clone()));
                 label_for_key.set_text(&format!("当前按键: {}", hotkey));
                 hint_for_key.set_text("已捕获，按 Enter 确认，继续按键可覆盖");
                 if let Some(widget) = dialog_for_key.widget_for_response(gtk::ResponseType::Ok) {
@@ -3328,6 +3346,7 @@ fn open_llm_form_popup_linux(
             ("确认", gtk::ResponseType::Ok),
         ],
     );
+    apply_linux_dialog_icon(&dialog);
 
     let content = dialog.content_area();
     content.set_spacing(8);
@@ -3649,6 +3668,11 @@ pub fn run_status_indicator_process() -> Result<()> {
     use tray_icon::TrayIconBuilder;
 
     gtk::init().map_err(|err| anyhow::anyhow!("初始化 GTK 失败: {}", err))?;
+    if let Some(icon) = load_linux_window_icon_pixbuf() {
+        gtk::Window::set_default_icon(&icon);
+    } else {
+        warn!("设置 Linux 默认窗口图标失败，将继续使用系统默认图标");
+    }
 
     let rx = spawn_linux_stdin_reader();
     let (menu, handles) = build_linux_menu()?;
@@ -3721,11 +3745,13 @@ pub fn run_status_indicator_process() -> Result<()> {
                         auto_back_to_idle_deadline = state
                             .auto_reset_duration()
                             .map(|duration| std::time::Instant::now() + duration);
+                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
                         if let Err(err) =
                             tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?))
                         {
                             warn!("更新 Linux 托盘图标失败: {}", err);
                         }
+                        update_linux_menu(&handles, &snapshot, state);
                     }
                     ParentMessage::SetSnapshot {
                         snapshot: next_snapshot,
@@ -3877,5 +3903,30 @@ mod tests {
                 state: IndicatorState::Idle
             })
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_active_states_keep_microphone_foreground() {
+        assert_eq!(
+            linux_foreground_png(IndicatorState::Idle),
+            Some(STATUS_LOGO_PNG)
+        );
+        assert_eq!(
+            linux_foreground_png(IndicatorState::Recording),
+            Some(STATUS_MICROPHONE_PNG)
+        );
+        assert_eq!(
+            linux_foreground_png(IndicatorState::Transcribing),
+            Some(STATUS_MICROPHONE_PNG)
+        );
+        assert_eq!(
+            linux_foreground_png(IndicatorState::Completed),
+            Some(STATUS_MICROPHONE_PNG)
+        );
+        assert_eq!(
+            linux_foreground_png(IndicatorState::Failed),
+            Some(STATUS_MICROPHONE_PNG)
+        );
     }
 }

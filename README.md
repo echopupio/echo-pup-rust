@@ -40,6 +40,9 @@ sudo apt install pkg-config libssl-dev libasound2-dev libnotify-bin pulseaudio-u
 
 ```bash
 # 模型将下载到 ~/.echopup/models
+./target/release/echopup download-model large-v3
+
+# 或继续使用脚本
 ./scripts/download_model.sh large-v3
 ```
 

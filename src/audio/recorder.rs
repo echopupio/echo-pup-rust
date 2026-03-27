@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::Stream;
+use cpal::{FromSample, Sample, SizedSample, Stream, SupportedStreamConfig};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -227,6 +227,81 @@ fn resample_audio_linear(audio: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32
     result
 }
 
+fn push_input_samples<T>(
+    data: &[T],
+    input_channels: usize,
+    audio_buffer: &Arc<Mutex<Vec<f32>>>,
+    captured_samples: &Arc<AtomicU64>,
+    gain: &Arc<Mutex<f32>>,
+    denoiser: &Arc<Mutex<Denoiser>>,
+    denoise_enabled: &Arc<AtomicBool>,
+) where
+    T: Sample,
+    f32: FromSample<T>,
+{
+    let mut buffer = audio_buffer.lock();
+    let gain_val = *gain.lock();
+
+    let interleaved_f32: Vec<f32> = data
+        .iter()
+        .copied()
+        .map(|sample| <f32 as Sample>::from_sample(sample))
+        .collect();
+    let mono = downmix_to_mono(&interleaved_f32, input_channels);
+
+    let mut processed: Vec<f32> = mono
+        .iter()
+        .map(|&sample| (sample * gain_val).clamp(-1.0, 1.0))
+        .collect();
+
+    if denoise_enabled.load(Ordering::SeqCst) {
+        let denoiser = denoiser.lock();
+        processed = denoiser.denoise(&processed);
+    }
+
+    captured_samples.fetch_add(processed.len() as u64, Ordering::SeqCst);
+    buffer.extend(processed);
+}
+
+fn build_input_stream_for<T>(
+    device: &cpal::Device,
+    config: &SupportedStreamConfig,
+    input_channels: usize,
+    is_recording: Arc<AtomicBool>,
+    audio_buffer: Arc<Mutex<Vec<f32>>>,
+    captured_samples: Arc<AtomicU64>,
+    gain: Arc<Mutex<f32>>,
+    denoiser: Arc<Mutex<Denoiser>>,
+    denoise_enabled: Arc<AtomicBool>,
+) -> Result<Stream>
+where
+    T: Sample + SizedSample + Send + 'static,
+    f32: FromSample<T>,
+{
+    let stream_config: cpal::StreamConfig = config.clone().into();
+    let stream = device.build_input_stream(
+        &stream_config,
+        move |data: &[T], _: &cpal::InputCallbackInfo| {
+            if !is_recording.load(Ordering::SeqCst) {
+                return;
+            }
+
+            push_input_samples(
+                data,
+                input_channels,
+                &audio_buffer,
+                &captured_samples,
+                &gain,
+                &denoiser,
+                &denoise_enabled,
+            );
+        },
+        |err| eprintln!("音频流错误: {}", err),
+        None,
+    )?;
+    Ok(stream)
+}
+
 impl AudioRecorder {
     /// 创建新的录音器
     pub fn new(sample_rate: u32, channels: u16) -> Result<Self> {
@@ -357,7 +432,6 @@ impl AudioRecorder {
         let config = device.default_input_config().context("无法获取音频配置")?;
         let sample_format = config.sample_format();
 
-        let _sample_rate = self.sample_rate;
         let is_recording = self.is_recording.clone();
         let audio_buffer = self.audio_buffer.clone();
         let captured_samples = self.captured_samples.clone();
@@ -378,89 +452,120 @@ impl AudioRecorder {
             sample_format
         );
 
-        let err_fn = |err| eprintln!("音频流错误: {}", err);
-
-        // 直接使用设备原始采样率，不做降采样
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => {
-                let audio_buffer = audio_buffer.clone();
-                let is_recording = is_recording.clone();
-                let captured_samples = captured_samples.clone();
-                let gain = self.gain.clone();
-                let denoiser = self.denoiser.clone();
-                let denoise_enabled = self.denoise_enabled.clone();
-                device.build_input_stream(
-                    &config_clone.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if is_recording.load(Ordering::SeqCst) {
-                            let mut buffer = audio_buffer.lock();
-                            let gain_val = *gain.lock();
-
-                            // 先 downmix 到单声道，避免交错多声道数据直接送入 ASR
-                            let mono = downmix_to_mono(data, input_channels);
-
-                            // 应用增益并限制最大值防止爆音
-                            let mut processed: Vec<f32> = mono
-                                .iter()
-                                .map(|&sample| (sample * gain_val).clamp(-1.0, 1.0))
-                                .collect();
-
-                            // 应用降噪（如果启用）
-                            if denoise_enabled.load(Ordering::SeqCst) {
-                                let denoiser = denoiser.lock();
-                                processed = denoiser.denoise(&processed);
-                            }
-
-                            captured_samples.fetch_add(processed.len() as u64, Ordering::SeqCst);
-                            buffer.extend(processed);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )?
-            }
-            cpal::SampleFormat::I16 => {
-                let audio_buffer = audio_buffer.clone();
-                let is_recording = is_recording.clone();
-                let captured_samples = captured_samples.clone();
-                let gain = self.gain.clone();
-                let denoiser = self.denoiser.clone();
-                let denoise_enabled = self.denoise_enabled.clone();
-                device.build_input_stream(
-                    &config_clone.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if is_recording.load(Ordering::SeqCst) {
-                            let mut buffer = audio_buffer.lock();
-                            let gain_val = *gain.lock();
-
-                            // 先转为 f32 并 downmix 到单声道
-                            let interleaved_f32: Vec<f32> =
-                                data.iter().map(|&sample| sample as f32 / 32768.0).collect();
-                            let mono = downmix_to_mono(&interleaved_f32, input_channels);
-
-                            // 应用增益并限制最大值防止爆音
-                            let mut processed: Vec<f32> = mono
-                                .iter()
-                                .map(|&sample| (sample * gain_val).clamp(-1.0, 1.0))
-                                .collect();
-
-                            // 应用降噪（如果启用）
-                            if denoise_enabled.load(Ordering::SeqCst) {
-                                let denoiser = denoiser.lock();
-                                processed = denoiser.denoise(&processed);
-                            }
-
-                            captured_samples.fetch_add(processed.len() as u64, Ordering::SeqCst);
-                            buffer.extend(processed);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )?
-            }
+            cpal::SampleFormat::F32 => build_input_stream_for::<f32>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::F64 => build_input_stream_for::<f64>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::I8 => build_input_stream_for::<i8>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::I16 => build_input_stream_for::<i16>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::I32 => build_input_stream_for::<i32>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::I64 => build_input_stream_for::<i64>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::U8 => build_input_stream_for::<u8>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::U16 => build_input_stream_for::<u16>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::U32 => build_input_stream_for::<u32>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
+            cpal::SampleFormat::U64 => build_input_stream_for::<u64>(
+                &device,
+                &config_clone,
+                input_channels,
+                is_recording.clone(),
+                audio_buffer.clone(),
+                captured_samples.clone(),
+                self.gain.clone(),
+                self.denoiser.clone(),
+                self.denoise_enabled.clone(),
+            )?,
             _ => {
                 is_recording.store(false, Ordering::SeqCst);
-                return Err(anyhow::anyhow!("不支持的音频格式"));
+                return Err(anyhow::anyhow!("不支持的音频格式: {}", sample_format));
             }
         };
 

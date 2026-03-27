@@ -16,7 +16,7 @@ mod vad;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use parking_lot::Mutex;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -585,16 +585,98 @@ fn main() -> anyhow::Result<()> {
                 println!("{:#?}", config);
             }
         }
-        Some(Commands::DownloadModel { size }) => {
-            info!("下载 Whisper {} 模型", size);
-            println!("请运行: ./scripts/download_model.sh {}", size);
-            println!("模型目录: ~/.echopup/models");
-        }
+        Some(Commands::DownloadModel { size }) => download_model_via_shared_runtime(&size)?,
         Some(Commands::StatusIndicator) => status_indicator::run_status_indicator_process()?,
         None => start_background_mode(&cli.config)?,
     }
 
     Ok(())
+}
+
+fn download_model_via_shared_runtime(size: &str) -> Result<()> {
+    use model_download::{DownloadEvent, DownloadStart};
+
+    info!("下载 Whisper {} 模型", size);
+
+    let DownloadStart {
+        rx, initial_logs, ..
+    } = model_download::start_model_download(size)?;
+
+    for line in initial_logs {
+        println!("{}", line);
+    }
+
+    let mut latest_total = None::<u64>;
+    let mut progress_active = false;
+
+    loop {
+        match rx.recv() {
+            Ok(DownloadEvent::Started {
+                downloaded, total, ..
+            }) => {
+                latest_total = total;
+                if progress_active {
+                    println!();
+                    progress_active = false;
+                }
+                println!(
+                    "[started] 已下载 {}，总大小 {}",
+                    model_download::format_bytes(downloaded),
+                    total
+                        .map(model_download::format_bytes)
+                        .unwrap_or_else(|| "未知".to_string())
+                );
+            }
+            Ok(DownloadEvent::Progress { downloaded, total }) => {
+                if total.is_some() {
+                    latest_total = total;
+                }
+
+                let progress_text = match latest_total {
+                    Some(total) if total > 0 => {
+                        let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                        format!(
+                            "{} / {} ({:.1}%)",
+                            model_download::format_bytes(downloaded),
+                            model_download::format_bytes(total),
+                            ratio * 100.0
+                        )
+                    }
+                    _ => format!("已下载 {}", model_download::format_bytes(downloaded)),
+                };
+
+                print!("\r[progress] {}", progress_text);
+                let _ = std::io::stdout().flush();
+                progress_active = true;
+            }
+            Ok(DownloadEvent::Finished) => {
+                if progress_active {
+                    println!();
+                }
+                println!("[finished] 下载完成");
+                return Ok(());
+            }
+            Ok(DownloadEvent::Failed(err)) => {
+                if progress_active {
+                    println!();
+                }
+                return Err(anyhow::anyhow!("下载失败: {}", err));
+            }
+            Ok(DownloadEvent::Log(line)) => {
+                if progress_active {
+                    println!();
+                    progress_active = false;
+                }
+                println!("{}", line);
+            }
+            Err(_) => {
+                if progress_active {
+                    println!();
+                }
+                return Err(anyhow::anyhow!("下载线程已断开"));
+            }
+        }
+    }
 }
 
 fn start_background_mode(config_path: &str) -> Result<()> {
