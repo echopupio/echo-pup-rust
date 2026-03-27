@@ -1817,7 +1817,7 @@ fn open_path_in_finder(path: &std::path::Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn show_about_popup() {
-    let text = "EchoPup 主要功能:\\n- 支持长按模式与按压切换模式\\n- 长按阈值 1 秒启动录音\\n- 语音转写并自动输入\\n- 支持模型下载与切换\\n\\n开发者: liupx\\n开源地址: https://github.com/echopupio/echo-pup-rust";
+    let text = "EchoPup 主要功能:\\n- 支持长按模式与按压切换模式\\n- 长按阈值 1 秒启动录音\\n- 语音转写并自动输入\\n- 支持模型下载与切换\\n\\n开发者: liupx\\n开源地址: https://github.com/pupkit-labs/echo-pup-rust";
     let script = format!(
         "display dialog \"{}\" buttons {{\"确定\"}} default button \"确定\" with title \"关于 EchoPup\"",
         text
