@@ -1,6 +1,6 @@
 # 文档索引
 
-最后更新：2026-03-19
+最后更新：2026-03-27
 
 ## 基线文档（主入口）
 
@@ -20,6 +20,16 @@
 - `architecture/performance-optimization-roadmap-v1.md` - 性能优化路线图。
 - `adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md` - 热键双模式与状态栏自适应占位决策。
 
+## 治理与协作
+
+- `governance/zhou-tianzi.md` - 周天子百官协作制说明。
+- `governance/task-routing.md` - 官署分工与任务路由规则。
+- `reports/project-court-ledger.md` - 项目朝议总账与当前风险/阻塞。
+- `reports/court-agent-roster.md` - 多代理会话官职映射。
+- `reviews/README.md` - 评审记录索引。
+- `setup/environment-resources.md` - 环境、命令与资源说明。
+- `history/README.md` - 筛选后的阶段纪要、复盘与历史档案。
+
 ## 人类可读文档
 
 - `human-doc/BRD.md`
@@ -31,7 +41,8 @@
 ## 历史文档策略
 
 - 旧版不规范文档已清理，不再并列保留。
-- 历史版本统一通过 Git 提交历史追溯。
+- 原始变更历史统一通过 Git 提交历史追溯。
+- `history/` 仅保存需要单独阅读的阶段纪要、复盘和规则演进说明，不替代 Git。
 
 ## 使用规则
 

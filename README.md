@@ -228,6 +228,9 @@ echo-pup-rust/
 ## 文档
 
 - 文档索引：`docs/README.md`
+- 治理说明：`docs/governance/zhou-tianzi.md`
+- 朝议总账：`docs/reports/project-court-ledger.md`
+- 环境与资源：`docs/setup/environment-resources.md`
 - 性能路线图：`docs/architecture/performance-optimization-roadmap-v1.md`
 - 状态栏菜单同步方案：`docs/architecture/status-bar-menu-sync-plan-v1.md`
 
