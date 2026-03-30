@@ -19,6 +19,7 @@ use parking_lot::Mutex;
 use std::io::{IsTerminal, Write};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::{AsRawFd, RawFd};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -173,6 +174,23 @@ fn format_partial_status(text: &str) -> String {
         format!("识别中: {}…", clipped)
     } else {
         format!("识别中: {}", clipped)
+    }
+}
+
+fn trim_audio_tail(mut audio: Vec<f32>, max_samples: usize) -> Vec<f32> {
+    if audio.len() <= max_samples {
+        return audio;
+    }
+    let start = audio.len() - max_samples;
+    audio.drain(..start);
+    audio
+}
+
+fn detach_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) {
+    if let Some(join_handle) = handle.lock().take() {
+        std::thread::spawn(move || {
+            let _ = join_handle.join();
+        });
     }
 }
 
@@ -449,29 +467,28 @@ fn send_feedback_sound(event: FeedbackSoundEvent) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let _ = event;
-        let status = if command_exists("paplay") {
+        let mut child = if command_exists("paplay") {
             std::process::Command::new("paplay")
                 .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status()
-                .context("执行 paplay 失败")?
+                .spawn()
+                .context("启动 paplay 失败")?
         } else if command_exists("aplay") {
             std::process::Command::new("aplay")
                 .arg("/usr/share/sounds/alsa/Front_Center.wav")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status()
-                .context("执行 aplay 失败")?
+                .spawn()
+                .context("启动 aplay 失败")?
         } else {
             anyhow::bail!("未找到 paplay/aplay");
         };
-
-        if !status.success() {
-            anyhow::bail!("提示音命令返回非零状态: {}", status);
-        }
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         return Ok(());
     }
 
@@ -814,6 +831,46 @@ fn build_whisper_stt(whisper_cfg: &config::config::WhisperConfig) -> Result<stt:
     Ok(w)
 }
 
+fn resolve_preview_model_path(whisper_cfg: &config::config::WhisperConfig) -> Option<String> {
+    let current_path = Path::new(&whisper_cfg.model_path);
+    let model_dir = current_path.parent()?;
+    let file_name = current_path.file_name()?.to_str()?;
+    let candidates: &[&str] = match file_name {
+        "ggml-large-v3.bin" => &["ggml-large-v3-turbo.bin", "ggml-medium.bin"],
+        "ggml-large-v3-turbo.bin" => &["ggml-medium.bin"],
+        _ => &[],
+    };
+
+    for candidate in candidates {
+        let candidate_path = model_dir.join(candidate);
+        if candidate_path.is_file() {
+            return Some(candidate_path.to_string_lossy().into_owned());
+        }
+    }
+
+    None
+}
+
+fn build_preview_whisper_stt(
+    whisper_cfg: &config::config::WhisperConfig,
+) -> Result<stt::WhisperSTT> {
+    let mut preview_cfg = whisper_cfg.clone();
+    let current_model_name = Path::new(&whisper_cfg.model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if let Some(preview_model_path) = resolve_preview_model_path(whisper_cfg) {
+        preview_cfg.model_path = preview_model_path;
+    } else if current_model_name == "ggml-large-v3.bin" {
+        anyhow::bail!("large-v3 预览需要已下载 turbo 或 medium 模型");
+    }
+    preview_cfg.n_threads =
+        config::config::WhisperThreadSetting::Fixed(whisper_cfg.resolved_n_threads().clamp(1, 2));
+    preview_cfg.decoding_strategy = config::WhisperDecodingStrategy::Greedy;
+    preview_cfg.greedy_best_of = 1;
+    build_whisper_stt(&preview_cfg)
+}
+
 fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewrite> {
     if !llm_cfg.enabled {
         return None;
@@ -863,7 +920,7 @@ fn apply_runtime_menu_action(
                     *guard = Some(new_whisper);
                     drop(guard);
                     let mut callback_guard = whisper_callback_runtime.lock();
-                    *callback_guard = build_whisper_stt(&whisper_cfg).ok();
+                    *callback_guard = build_preview_whisper_stt(&whisper_cfg).ok();
                     info!("Whisper 模型已热更新: {}", whisper_cfg.model_path);
                 }
                 Err(err) => {
@@ -918,7 +975,7 @@ fn apply_runtime_menu_action(
                     *guard = Some(new_whisper);
                     drop(guard);
                     let mut callback_guard = whisper_callback_runtime.lock();
-                    *callback_guard = build_whisper_stt(&whisper_cfg).ok();
+                    *callback_guard = build_preview_whisper_stt(&whisper_cfg).ok();
                     info!("Whisper 配置已重载: {}", whisper_cfg.model_path);
                 }
                 Err(err) => {
@@ -1075,7 +1132,25 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     };
     // 使用 Mutex 包装，以便在回调中共享（transcribe 需要 &mut self）
     let whisper = Arc::new(Mutex::new(whisper));
-    let whisper_callback = Arc::new(Mutex::new(build_whisper_stt(&whisper_cfg).ok()));
+    let preview_threads = whisper_cfg.resolved_n_threads().clamp(1, 2);
+    let whisper_callback = match build_preview_whisper_stt(&whisper_cfg) {
+        Ok(w) => {
+            let preview_model_name = Path::new(w.model_path())
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            info!(
+                "Whisper 预览运行时已启用: model={}, threads={}",
+                preview_model_name, preview_threads
+            );
+            Some(w)
+        }
+        Err(e) => {
+            warn!("Whisper 预览运行时初始化失败: {}，将禁用流式预览", e);
+            None
+        }
+    };
+    let whisper_callback = Arc::new(Mutex::new(whisper_callback));
 
     let llm = if config.llm.enabled {
         match build_llm_runtime(&config.llm) {
@@ -1105,7 +1180,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         info!("谐音纠错未启用");
     }
 
-    let keyboard = Arc::new(Mutex::new(input::Keyboard::new()?));
+    let keyboard = Arc::new(Mutex::new(input::Keyboard::new().map_err(|e| {
+        error!("键盘输入初始化失败: {}", e);
+        e
+    })?));
     info!("键盘输入已初始化");
 
     let (desktop_notify_enabled, notify_desc) = detect_desktop_notify_capability();
@@ -1174,7 +1252,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let hotkey_trigger_mode = Arc::new(Mutex::new(config.hotkey.trigger_mode));
 
     let recorder_start = recorder.clone();
-    let whisper_for_partial_start = whisper.clone();
     let whisper_for_callback_start = whisper_callback.clone();
     let is_recording_start = is_recording.clone();
     let recording_animation_start = recording_animation.clone();
@@ -1213,86 +1290,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
                     partial_stt_stop_on_start.store(false, Ordering::SeqCst);
                     partial_callback_latest_text_on_start.lock().clear();
-                    join_thread_handle(&partial_stt_handle_on_start);
-                    join_thread_handle(&partial_stt_callback_handle_on_start);
-
-                    let recorder_partial = recorder_start.clone();
-                    let whisper_partial = whisper_for_partial_start.clone();
-                    let status_indicator_partial = status_indicator_on_start.clone();
-                    let menu_snapshot_partial = menu_snapshot_on_start.clone();
-                    let is_recording_partial = is_recording_start.clone();
-                    let partial_stt_stop = partial_stt_stop_on_start.clone();
-                    let partial_callback_latest_text_for_poll =
-                        partial_callback_latest_text_on_start.clone();
-                    let handle = std::thread::spawn(move || {
-                        let poll_interval = Duration::from_millis(500);
-                        let min_samples = (recorder_partial.target_sample_rate() as usize)
-                            .saturating_mul(800)
-                            / 1000;
-                        let mut last_snapshot_len = 0usize;
-                        let mut last_sent_text = String::new();
-
-                        while is_recording_partial.load(Ordering::SeqCst)
-                            && !partial_stt_stop.load(Ordering::SeqCst)
-                        {
-                            std::thread::sleep(poll_interval);
-                            if !is_recording_partial.load(Ordering::SeqCst)
-                                || partial_stt_stop.load(Ordering::SeqCst)
-                            {
-                                break;
-                            }
-
-                            let snapshot = recorder_partial.get_snapshot();
-                            if snapshot.len() < min_samples || snapshot.len() <= last_snapshot_len {
-                                continue;
-                            }
-                            last_snapshot_len = snapshot.len();
-
-                            let callback_text =
-                                partial_callback_latest_text_for_poll.lock().clone();
-                            let callback_trimmed = callback_text.trim();
-                            if !callback_trimmed.is_empty()
-                                && callback_trimmed != "[BLANK_AUDIO]"
-                                && callback_trimmed != last_sent_text
-                            {
-                                last_sent_text = callback_trimmed.to_string();
-                                send_status_snapshot(
-                                    &status_indicator_partial,
-                                    &menu_snapshot_partial,
-                                    format_partial_status(callback_trimmed),
-                                );
-                                continue;
-                            }
-
-                            let partial_text = {
-                                let mut whisper_guard = whisper_partial.lock();
-                                if let Some(ref mut whisper) = *whisper_guard {
-                                    whisper.transcribe_incremental(&snapshot).ok()
-                                } else {
-                                    None
-                                }
-                            };
-
-                            let Some(partial_text) = partial_text else {
-                                continue;
-                            };
-                            let trimmed = partial_text.trim();
-                            if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
-                                continue;
-                            }
-                            if trimmed == last_sent_text {
-                                continue;
-                            }
-
-                            last_sent_text = trimmed.to_string();
-                            send_status_snapshot(
-                                &status_indicator_partial,
-                                &menu_snapshot_partial,
-                                format_partial_status(trimmed),
-                            );
-                        }
-                    });
-                    *partial_stt_handle_on_start.lock() = Some(handle);
+                    detach_thread_handle(&partial_stt_handle_on_start);
+                    detach_thread_handle(&partial_stt_callback_handle_on_start);
 
                     let recorder_callback = recorder_start.clone();
                     let whisper_callback_runtime = whisper_for_callback_start.clone();
@@ -1307,6 +1306,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         let min_samples = (recorder_callback.target_sample_rate() as usize)
                             .saturating_mul(800)
                             / 1000;
+                        let max_preview_samples =
+                            (recorder_callback.target_sample_rate() as usize).saturating_mul(3);
                         let mut last_snapshot_len = 0usize;
 
                         while is_recording_callback.load(Ordering::SeqCst)
@@ -1324,35 +1325,52 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                 continue;
                             }
                             last_snapshot_len = snapshot.len();
+                            let snapshot = trim_audio_tail(snapshot, max_preview_samples);
 
                             let callback_text_shared =
                                 partial_callback_latest_text_for_callback.clone();
                             let status_indicator_callback_inner = status_indicator_callback.clone();
                             let menu_snapshot_callback_inner = menu_snapshot_callback.clone();
+                            let partial_stt_stop_for_segment = partial_stt_stop_callback.clone();
                             let callback_result = {
-                                let mut whisper_guard = whisper_callback_runtime.lock();
-                                if let Some(ref mut whisper) = *whisper_guard {
-                                    whisper
-                                        .transcribe_with_callback(&snapshot, move |segment| {
-                                            let trimmed = segment.trim();
-                                            if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
-                                                return;
-                                            }
+                                if let Some(mut whisper_guard) = whisper_callback_runtime.try_lock()
+                                {
+                                    if let Some(ref mut whisper) = *whisper_guard {
+                                        whisper
+                                            .transcribe_with_callback_abortable(
+                                                &snapshot,
+                                                partial_stt_stop_callback.clone(),
+                                                move |segment| {
+                                                    if partial_stt_stop_for_segment
+                                                        .load(Ordering::SeqCst)
+                                                    {
+                                                        return;
+                                                    }
+                                                    let trimmed = segment.trim();
+                                                    if trimmed.is_empty()
+                                                        || trimmed == "[BLANK_AUDIO]"
+                                                    {
+                                                        return;
+                                                    }
 
-                                            let mut latest = callback_text_shared.lock();
-                                            if latest.as_str() == trimmed {
-                                                return;
-                                            }
-                                            *latest = trimmed.to_string();
-                                            drop(latest);
+                                                    let mut latest = callback_text_shared.lock();
+                                                    if latest.as_str() == trimmed {
+                                                        return;
+                                                    }
+                                                    *latest = trimmed.to_string();
+                                                    drop(latest);
 
-                                            send_status_snapshot(
-                                                &status_indicator_callback_inner,
-                                                &menu_snapshot_callback_inner,
-                                                format_partial_status(trimmed),
-                                            );
-                                        })
-                                        .ok()
+                                                    send_status_snapshot(
+                                                        &status_indicator_callback_inner,
+                                                        &menu_snapshot_callback_inner,
+                                                        format_partial_status(trimmed),
+                                                    );
+                                                },
+                                            )
+                                            .ok()
+                                    } else {
+                                        None
+                                    }
                                 } else {
                                     None
                                 }
@@ -1361,6 +1379,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             if let Some(callback_result) = callback_result {
                                 let trimmed = callback_result.trim();
                                 if !trimmed.is_empty() && trimmed != "[BLANK_AUDIO]" {
+                                    if partial_stt_stop_callback.load(Ordering::SeqCst) {
+                                        break;
+                                    }
                                     let mut latest =
                                         partial_callback_latest_text_for_callback.lock();
                                     if latest.as_str() != trimmed {
@@ -1409,6 +1430,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_callback_handle_on_stop = partial_stt_callback_handle.clone();
     let partial_callback_latest_text_on_stop = partial_callback_latest_text.clone();
     let stop_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        info!("stop_recording_action 开始执行");
         if is_recording_stop.load(Ordering::SeqCst) {
             *stop_debounce_on_stop.lock() = None;
             is_recording_stop.store(false, Ordering::SeqCst);
@@ -1416,10 +1438,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             print!("\r");
             clear_terminal_artifacts_if_tty();
             partial_stt_stop_on_stop.store(true, Ordering::SeqCst);
-            join_thread_handle(&partial_stt_handle_on_stop);
-            join_thread_handle(&partial_stt_callback_handle_on_stop);
-            partial_callback_latest_text_on_stop.lock().clear();
-
+            info!("stop_recording_action: 准备调用 recorder.stop()");
             let audio_data = match recorder_stop.stop() {
                 Ok(data) => data,
                 Err(e) => {
@@ -1432,6 +1451,11 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     return;
                 }
             };
+            info!("stop_recording_action: recorder.stop() 返回成功");
+            partial_callback_latest_text_on_stop.lock().clear();
+            info!("stop_recording_action: 预览线程转为后台回收");
+            detach_thread_handle(&partial_stt_handle_on_stop);
+            detach_thread_handle(&partial_stt_callback_handle_on_stop);
             play_feedback_sound(sound_feedback_on_stop, FeedbackSoundEvent::RecordingEnd);
 
             let is_vad = vad_triggered_stop.swap(false, Ordering::SeqCst);
@@ -1521,22 +1545,30 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let stop_action_on_release = stop_recording_action.clone();
     let mode_on_release = hotkey_trigger_mode.clone();
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        info!("release_callback triggered");
         let started_by_hold = {
             let mut state = press_state_on_release.lock();
             if !state.pressed {
+                info!("release_callback: state.pressed was false, returning early");
                 return;
             }
             state.pressed = false;
             state.sequence = state.sequence.wrapping_add(1);
             let started = state.started_by_hold_on_current_press;
             state.started_by_hold_on_current_press = false;
+            info!("release_callback: started_by_hold={}", started);
             started
         };
 
-        if *mode_on_release.lock() == config::HotkeyTriggerMode::HoldToRecord
-            && started_by_hold
-            && is_recording_on_release.load(Ordering::SeqCst)
-        {
+        let mode = *mode_on_release.lock();
+        let recording = is_recording_on_release.load(Ordering::SeqCst);
+        info!(
+            "release_callback: mode={:?}, started_by_hold={}, is_recording={}",
+            mode, started_by_hold, recording
+        );
+
+        if mode == config::HotkeyTriggerMode::HoldToRecord && started_by_hold && recording {
+            info!("release_callback: calling stop_action_on_release");
             stop_action_on_release();
         }
     });
@@ -1578,9 +1610,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 print!("\r"); // 清除动画行
             }
             partial_stt_stop_on_vad.store(true, Ordering::SeqCst);
-            join_thread_handle(&partial_stt_handle_on_vad);
-            join_thread_handle(&partial_stt_callback_handle_on_vad);
-            partial_callback_latest_text_on_vad.lock().clear();
 
             // 获取音频数据并处理
             let audio_data = match vad_recorder.stop() {
@@ -1595,6 +1624,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     return;
                 }
             };
+            partial_callback_latest_text_on_vad.lock().clear();
+            detach_thread_handle(&partial_stt_handle_on_vad);
+            detach_thread_handle(&partial_stt_callback_handle_on_vad);
             play_feedback_sound(sound_feedback_on_vad, FeedbackSoundEvent::RecordingEnd);
 
             // 处理音频

@@ -14,7 +14,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 const MAX_HOTKEY_KEYS: usize = 3;
 
@@ -268,14 +268,17 @@ impl HotkeyListener {
                         }
                     }
                     EventType::KeyRelease(key) if is_right_ctrl_event_key(key) => {
+                        debug!("rdev KeyRelease event received for right ctrl");
                         let mut count = pressed_count.lock();
                         if *count > 0 {
                             *count -= 1;
                         }
                         let became_zero = *count == 0;
+                        debug!("KeyRelease: count={}, became_zero={}", *count, became_zero);
                         drop(count);
 
                         if became_zero {
+                            debug!("Calling release_callback due to became_zero");
                             let mut pressed = is_pressed.lock();
                             *pressed = false;
                             drop(pressed);

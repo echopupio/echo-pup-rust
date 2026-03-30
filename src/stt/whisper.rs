@@ -2,6 +2,10 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
@@ -146,16 +150,39 @@ impl WhisperSTT {
         }
     }
 
-    /// 转写音频数据
-    pub fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
+    fn configure_full_params(
+        &self,
+        params: &mut FullParams<'_, '_>,
+        abort_flag: Option<Arc<AtomicBool>>,
+    ) {
+        params.set_n_threads(self.n_threads.max(1));
+        params.set_print_progress(false);
+        params.set_print_timestamps(false);
+        params.set_print_special(false);
+        params.set_no_timestamps(true);
+        params.set_no_context(self.no_context);
+        params.set_suppress_nst(self.suppress_nst);
+        params.set_suppress_blank(true);
+        params.set_temperature(self.temperature);
+
+        if let Some(abort_flag) = abort_flag {
+            let abort_callback =
+                Box::new(move || abort_flag.load(Ordering::Relaxed)) as Box<dyn FnMut() -> bool>;
+            params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
+        }
+    }
+
+    fn transcribe_inner(
+        &mut self,
+        audio: &[f32],
+        abort_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<String> {
         if audio.is_empty() {
             return Ok(String::new());
         }
 
         let initial_prompt = self.build_initial_prompt();
-        let state = self.state.as_mut().context("Whisper state 未创建")?;
 
-        // 创建转写参数（默认使用更稳的 Beam Search）
         let strategy = match self.decoding_strategy {
             DecodingStrategy::Greedy { best_of } => SamplingStrategy::Greedy {
                 best_of: best_of.max(1),
@@ -166,43 +193,24 @@ impl WhisperSTT {
             },
         };
         let mut params = FullParams::new(strategy);
-        params.set_n_threads(self.n_threads.max(1));
-        params.set_print_progress(false);
-        params.set_print_timestamps(false);
-        params.set_print_special(false);
-        params.set_no_timestamps(true);
-        params.set_no_context(self.no_context);
-        params.set_suppress_nst(self.suppress_nst);
-        params.set_suppress_blank(true);
-
-        // 设置温度 (0.0 = 确定性输出，提高准确率)
-        params.set_temperature(self.temperature);
-
-        // 设置初始提示（帮助识别）
-        if let Some(prompt) = initial_prompt {
-            params.set_initial_prompt(&prompt);
+        self.configure_full_params(&mut params, abort_flag);
+        if let Some(prompt) = initial_prompt.as_deref() {
+            params.set_initial_prompt(prompt);
         }
-
-        // 设置语言
         if let Some(ref lang) = self.language {
             if lang != "auto" {
-                // 设置目标语言
                 params.set_language(Some(lang.as_str()));
             } else {
-                // 自动检测语言
                 params.set_detect_language(true);
             }
         }
-
-        // 设置翻译
         params.set_translate(self.translate);
 
-        // 执行转写 - 新版本 API
+        let state = self.state.as_mut().context("Whisper state 未创建")?;
         state
             .full(params, audio)
             .map_err(|e| anyhow::anyhow!("Whisper 转写失败: {:?}", e))?;
 
-        // 获取结果
         let num_segments = state.full_n_segments();
         let mut result = String::new();
 
@@ -214,19 +222,34 @@ impl WhisperSTT {
             }
         }
 
-        // 修复标点符号
-        let result = Self::fix_punctuation(&result);
+        Ok(Self::fix_punctuation(&result))
+    }
 
-        Ok(result)
+    /// 转写音频数据
+    pub fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
+        self.transcribe_inner(audio, None)
     }
 
     /// 用于实时预览场景的可复用转写入口
     pub fn transcribe_incremental(&mut self, audio: &[f32]) -> Result<String> {
-        self.transcribe(audio)
+        self.transcribe_inner(audio, None)
     }
 
-    /// 回调模式转写：开启 single_segment，并在每个新分段时触发回调。
-    pub fn transcribe_with_callback<C>(&mut self, audio: &[f32], on_segment: C) -> Result<String>
+    /// 用于实时预览场景的可中断转写入口
+    pub fn transcribe_incremental_abortable(
+        &mut self,
+        audio: &[f32],
+        abort_flag: Arc<AtomicBool>,
+    ) -> Result<String> {
+        self.transcribe_inner(audio, Some(abort_flag))
+    }
+
+    fn transcribe_with_callback_inner<C>(
+        &mut self,
+        audio: &[f32],
+        abort_flag: Option<Arc<AtomicBool>>,
+        on_segment: C,
+    ) -> Result<String>
     where
         C: FnMut(String) + Send + 'static,
     {
@@ -235,7 +258,6 @@ impl WhisperSTT {
         }
 
         let initial_prompt = self.build_initial_prompt();
-        let state = self.state.as_mut().context("Whisper state 未创建")?;
 
         let strategy = match self.decoding_strategy {
             DecodingStrategy::Greedy { best_of } => SamplingStrategy::Greedy {
@@ -247,21 +269,10 @@ impl WhisperSTT {
             },
         };
         let mut params = FullParams::new(strategy);
-        params.set_n_threads(self.n_threads.max(1));
-        params.set_print_progress(false);
-        params.set_print_timestamps(false);
-        params.set_print_special(false);
-        params.set_no_timestamps(true);
-        params.set_no_context(self.no_context);
-        params.set_suppress_nst(self.suppress_nst);
-        params.set_suppress_blank(true);
-        params.set_temperature(self.temperature);
-        params.set_single_segment(true);
-
-        if let Some(prompt) = initial_prompt {
-            params.set_initial_prompt(&prompt);
+        self.configure_full_params(&mut params, abort_flag);
+        if let Some(prompt) = initial_prompt.as_deref() {
+            params.set_initial_prompt(prompt);
         }
-
         if let Some(ref lang) = self.language {
             if lang != "auto" {
                 params.set_language(Some(lang.as_str()));
@@ -270,6 +281,7 @@ impl WhisperSTT {
             }
         }
         params.set_translate(self.translate);
+        params.set_single_segment(true);
 
         let callback = std::sync::Arc::new(std::sync::Mutex::new(on_segment));
         let callback_clone = callback.clone();
@@ -288,6 +300,7 @@ impl WhisperSTT {
             Box<dyn FnMut(whisper_rs::SegmentCallbackData)>,
         >(Some(segment_callback));
 
+        let state = self.state.as_mut().context("Whisper state 未创建")?;
         state
             .full(params, audio)
             .map_err(|e| anyhow::anyhow!("Whisper 回调转写失败: {:?}", e))?;
@@ -303,6 +316,27 @@ impl WhisperSTT {
         }
 
         Ok(Self::fix_punctuation(&result))
+    }
+
+    /// 回调模式转写：开启 single_segment，并在每个新分段时触发回调。
+    pub fn transcribe_with_callback<C>(&mut self, audio: &[f32], on_segment: C) -> Result<String>
+    where
+        C: FnMut(String) + Send + 'static,
+    {
+        self.transcribe_with_callback_inner(audio, None, on_segment)
+    }
+
+    /// 回调模式转写：支持通过 stop flag 中断长时间运行的预览转写。
+    pub fn transcribe_with_callback_abortable<C>(
+        &mut self,
+        audio: &[f32],
+        abort_flag: Arc<AtomicBool>,
+        on_segment: C,
+    ) -> Result<String>
+    where
+        C: FnMut(String) + Send + 'static,
+    {
+        self.transcribe_with_callback_inner(audio, Some(abort_flag), on_segment)
     }
 
     /// 修复标点符号（中文场景下 Whisper 往往不带标点）

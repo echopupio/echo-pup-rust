@@ -3810,7 +3810,11 @@ pub fn run_status_indicator_process() -> Result<()> {
         }
 
         if state.visual_style().is_pulsing() {
-            pulse_phase = (pulse_phase + 0.20) % std::f32::consts::TAU;
+            pulse_phase = (pulse_phase + 0.15) % std::f32::consts::TAU;
+            // 使用 set_tooltip 来同步 GNOME AppIndicator 的内部状态
+            // 这有助于减少 AppIndicator 的渲染问题
+            let tooltip_text = format!("EchoPup - {}", linux_status_text(&snapshot, state));
+            let _ = tray_icon.set_tooltip(Some(&tooltip_text));
             if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?)) {
                 warn!("更新 Linux 托盘脉冲图标失败: {}", err);
             }

@@ -662,7 +662,10 @@ impl AudioRecorder {
 
     /// 停止录音并返回音频数据（已重采样到目标采样率）
     pub fn stop(&self) -> Result<Vec<f32>> {
+        let start_instant = std::time::Instant::now();
+        info!("recorder.stop() 开始执行");
         if !self.is_recording.load(Ordering::SeqCst) {
+            info!("recorder.stop() 提前返回: is_recording 为 false");
             return Ok(Vec::new());
         }
 
@@ -673,27 +676,69 @@ impl AudioRecorder {
             .take()
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
+        info!(
+            "recorder.stop(): is_recording 设置为 false, elapsed_ms={}",
+            elapsed_ms
+        );
 
         // 停止 VAD 线程
+        let vad_join_start = std::time::Instant::now();
+        info!("recorder.stop(): 准备停止 VAD 线程");
         if let Some(handle) = self.vad_thread_handle.lock().take() {
+            info!("recorder.stop(): 找到 VAD 线程, 准备 join");
             if handle.thread().id() != thread::current().id() {
                 let _ = handle.join();
             }
+            info!("recorder.stop(): VAD 线程已 join");
+        } else {
+            info!("recorder.stop(): 没有 VAD 线程需要 join");
         }
+        let vad_join_elapsed = vad_join_start.elapsed().as_millis();
 
+        let stream_lock_start = std::time::Instant::now();
+        info!("recorder.stop(): 准备 drop stream");
         *self.stream.lock() = None;
+        let stream_lock_elapsed = stream_lock_start.elapsed().as_millis();
+        info!(
+            "recorder.stop(): stream 已 drop, 耗时={}ms",
+            stream_lock_elapsed
+        );
 
+        let buffer_clone_start = std::time::Instant::now();
         let mut buffer = self.audio_buffer.lock().clone();
+        let buffer_clone_elapsed = buffer_clone_start.elapsed().as_millis();
+        info!(
+            "recorder.stop(): buffer 已 clone, 大小={}, 耗时={}ms",
+            buffer.len(),
+            buffer_clone_elapsed
+        );
 
         // 重采样到目标采样率（Whisper 需要 16000 Hz）
+        let resample_start = std::time::Instant::now();
         let device_rate = *self.device_sample_rate.lock();
+        info!(
+            "recorder.stop(): 准备重采样, device_rate={}, target_rate={}",
+            device_rate, self.sample_rate
+        );
         if device_rate != 0 && device_rate != self.sample_rate {
             buffer = resample_audio(&buffer, device_rate, self.sample_rate);
         }
+        let resample_elapsed = resample_start.elapsed().as_millis();
+        info!(
+            "recorder.stop(): 重采样完成, 耗时={}ms, 新大小={}",
+            resample_elapsed,
+            buffer.len()
+        );
 
         let captured_samples = self.captured_samples.load(Ordering::SeqCst);
+        let total_elapsed = start_instant.elapsed().as_millis();
         info!(
-            "停止录音: 时长={}ms, 捕获采样点={}, 重采样后采样点={}",
+            "停止录音: 总耗时={}ms (vad_join={}ms, stream_lock={}ms, buffer_clone={}ms, resample={}ms), 录音时长={}ms, 捕获采样点={}, 重采样后采样点={}",
+            total_elapsed,
+            vad_join_elapsed,
+            stream_lock_elapsed,
+            buffer_clone_elapsed,
+            resample_elapsed,
             elapsed_ms,
             captured_samples,
             buffer.len()
