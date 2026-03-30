@@ -6,13 +6,18 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::runtime;
 
 pub const DOWNLOAD_LOG_MAX_LINES: usize = 120;
 pub const DOWNLOAD_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
+pub const DOWNLOAD_PARALLEL_CHUNK_SIZE: u64 = 16 * 1024 * 1024;
+pub const DOWNLOAD_MAX_CONCURRENT_REQUESTS: usize = 8;
 pub const DOWNLOAD_NO_PROGRESS_TIMEOUT_SECS: u64 = 300;
 pub const DOWNLOAD_MAX_RETRIES: usize = 6;
 
@@ -46,6 +51,14 @@ pub struct DownloadStart {
     pub state: DownloadState,
     pub rx: Receiver<DownloadEvent>,
     pub initial_logs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadPartPlan {
+    index: usize,
+    start: u64,
+    end: u64,
+    path: PathBuf,
 }
 
 fn normalize_content_length(content_length: Option<u64>) -> Option<u64> {
@@ -87,6 +100,411 @@ fn cleanup_empty_tmp_file_after_failure(model_file_name: &str, tx: &mpsc::Sender
             tmp_file.display()
         )));
     }
+}
+
+fn cleanup_parallel_parts_dir(parts_dir: &Path) {
+    if parts_dir.exists() {
+        let _ = fs::remove_dir_all(parts_dir);
+    }
+}
+
+fn build_parallel_download_plan(
+    total_size: u64,
+    chunk_size: u64,
+    parts_dir: &Path,
+) -> Vec<DownloadPartPlan> {
+    if total_size == 0 || chunk_size == 0 {
+        return Vec::new();
+    }
+
+    let mut plans = Vec::new();
+    let mut start = 0u64;
+    let mut index = 0usize;
+    while start < total_size {
+        let end = start
+            .saturating_add(chunk_size)
+            .saturating_sub(1)
+            .min(total_size.saturating_sub(1));
+        plans.push(DownloadPartPlan {
+            index,
+            start,
+            end,
+            path: parts_dir.join(format!("part-{:04}", index)),
+        });
+        start = end.saturating_add(1);
+        index += 1;
+    }
+    plans
+}
+
+fn should_try_parallel_download(total_size: Option<u64>, resume_size: u64) -> bool {
+    resume_size == 0
+        && total_size.is_some_and(|total| total >= DOWNLOAD_PARALLEL_CHUNK_SIZE.saturating_mul(2))
+}
+
+fn emit_parallel_progress(
+    downloaded: &Arc<AtomicU64>,
+    reported: &Arc<AtomicU64>,
+    total_size: u64,
+    tx: &mpsc::Sender<DownloadEvent>,
+) {
+    let current = downloaded.load(Ordering::SeqCst);
+    let mut last = reported.load(Ordering::SeqCst);
+    while current > last {
+        match reported.compare_exchange(last, current, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => {
+                let _ = tx.send(DownloadEvent::Progress {
+                    downloaded: current,
+                    total: Some(total_size),
+                });
+                break;
+            }
+            Err(actual) => last = actual,
+        }
+    }
+}
+
+fn probe_range_support(
+    client: &mut reqwest::blocking::Client,
+    using_direct_client: &mut bool,
+    model_url: &str,
+    tx: &mpsc::Sender<DownloadEvent>,
+) -> Result<bool> {
+    let mut attempt = 0usize;
+    let range_text = "bytes=0-0";
+    loop {
+        attempt += 1;
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[probe] range={} attempt={}/{}",
+            range_text, attempt, DOWNLOAD_MAX_RETRIES
+        )));
+
+        let response = match client.get(model_url).header(RANGE, range_text).send() {
+            Ok(resp) => resp,
+            Err(err) => {
+                if !*using_direct_client && is_likely_proxy_error(&err) {
+                    let _ = tx.send(DownloadEvent::Log(format!(
+                        "[proxy] range probe 走代理失败，切换直连重试: {}",
+                        err
+                    )));
+                    *client = build_http_client(true)?;
+                    *using_direct_client = true;
+                    continue;
+                }
+                if attempt >= DOWNLOAD_MAX_RETRIES {
+                    let _ = tx.send(DownloadEvent::Log(format!(
+                        "[probe] range 探测失败，回退串行下载: {}",
+                        err
+                    )));
+                    return Ok(false);
+                }
+                std::thread::sleep(Duration::from_secs(attempt as u64));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[probe] status={} content-range={}",
+            status,
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("无")
+        )));
+
+        if status == StatusCode::PARTIAL_CONTENT {
+            return Ok(true);
+        }
+
+        if status.is_success() {
+            let _ = tx.send(DownloadEvent::Log(format!(
+                "[probe] 服务端未返回 206（status={}），回退串行下载",
+                status
+            )));
+            return Ok(false);
+        }
+
+        if attempt >= DOWNLOAD_MAX_RETRIES {
+            let _ = tx.send(DownloadEvent::Log(format!(
+                "[probe] 探测失败，回退串行下载: HTTP {}",
+                status
+            )));
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_secs(attempt as u64));
+    }
+}
+
+fn download_part_with_retries(
+    base_client: reqwest::blocking::Client,
+    using_direct_client: bool,
+    model_url: &str,
+    plan: DownloadPartPlan,
+    total_size: u64,
+    tx: mpsc::Sender<DownloadEvent>,
+    downloaded: Arc<AtomicU64>,
+    reported: Arc<AtomicU64>,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
+    let chunk_target_len = plan.end.saturating_sub(plan.start).saturating_add(1);
+    let range_text = format!("bytes={}-{}", plan.start, plan.end);
+    let mut client = base_client;
+    let mut using_direct_client = using_direct_client;
+    let mut attempt = 0usize;
+
+    'attempt: loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        attempt += 1;
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[parallel {}] range={} attempt={}/{}",
+            plan.index, range_text, attempt, DOWNLOAD_MAX_RETRIES
+        )));
+
+        let mut response = match client
+            .get(model_url)
+            .header(RANGE, range_text.clone())
+            .send()
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                if !using_direct_client && is_likely_proxy_error(&err) {
+                    let _ = tx.send(DownloadEvent::Log(format!(
+                        "[parallel {}] 走代理失败，切换直连重试: {}",
+                        plan.index, err
+                    )));
+                    client = build_http_client(true)?;
+                    using_direct_client = true;
+                    continue;
+                }
+                if attempt >= DOWNLOAD_MAX_RETRIES {
+                    return Err(anyhow!(
+                        "并发分片 {} 下载失败（{} 次重试后仍失败）: {}",
+                        plan.index,
+                        DOWNLOAD_MAX_RETRIES,
+                        err
+                    ));
+                }
+                std::thread::sleep(Duration::from_secs(attempt as u64));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if status != StatusCode::PARTIAL_CONTENT {
+            if attempt >= DOWNLOAD_MAX_RETRIES {
+                return Err(anyhow!(
+                    "服务端不支持并发分片下载（range={}, status={}）",
+                    range_text,
+                    status
+                ));
+            }
+            std::thread::sleep(Duration::from_secs(attempt as u64));
+            continue;
+        }
+
+        let mut writer = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&plan.path)
+            .with_context(|| format!("打开分片文件失败: {}", plan.path.display()))?;
+
+        let mut buf = [0u8; 64 * 1024];
+        let mut written = 0u64;
+        let mut last_emit = Instant::now();
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            let n = match response.read(&mut buf) {
+                Ok(n) => n,
+                Err(err) => {
+                    if attempt >= DOWNLOAD_MAX_RETRIES {
+                        return Err(anyhow!(
+                            "并发分片 {} 读取失败（{} 次重试后仍失败）: {}",
+                            plan.index,
+                            DOWNLOAD_MAX_RETRIES,
+                            err
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_secs(attempt as u64));
+                    continue 'attempt;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+
+            let remain = chunk_target_len.saturating_sub(written) as usize;
+            let to_write = n.min(remain);
+            if to_write == 0 {
+                break;
+            }
+            writer
+                .write_all(&buf[..to_write])
+                .with_context(|| format!("写入分片文件失败: {}", plan.path.display()))?;
+            written += to_write as u64;
+            downloaded.fetch_add(to_write as u64, Ordering::SeqCst);
+
+            if last_emit.elapsed() >= Duration::from_millis(120) {
+                emit_parallel_progress(&downloaded, &reported, total_size, &tx);
+                last_emit = Instant::now();
+            }
+
+            if written >= chunk_target_len {
+                break;
+            }
+        }
+
+        writer
+            .flush()
+            .with_context(|| format!("刷新分片文件失败: {}", plan.path.display()))?;
+
+        if written != chunk_target_len {
+            if attempt >= DOWNLOAD_MAX_RETRIES {
+                return Err(anyhow!(
+                    "分片 {} 下载不完整：期望 {}，实际 {}",
+                    plan.index,
+                    format_bytes(chunk_target_len),
+                    format_bytes(written)
+                ));
+            }
+            let _ = tx.send(DownloadEvent::Log(format!(
+                "[parallel {}] 分片大小不完整，{} 秒后重试",
+                plan.index, attempt
+            )));
+            std::thread::sleep(Duration::from_secs(attempt as u64));
+            continue;
+        }
+
+        emit_parallel_progress(&downloaded, &reported, total_size, &tx);
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[parallel {}] 分片完成: {}",
+            plan.index,
+            format_bytes(written)
+        )));
+        return Ok(());
+    }
+}
+
+fn try_parallel_download(
+    client: &reqwest::blocking::Client,
+    using_direct_client: bool,
+    model_url: &str,
+    total_size: u64,
+    tmp_file: &Path,
+    tx: &mpsc::Sender<DownloadEvent>,
+) -> Result<()> {
+    let parts_dir = tmp_file.with_extension("parts");
+    cleanup_parallel_parts_dir(&parts_dir);
+    fs::create_dir_all(&parts_dir).context("创建并发分片目录失败")?;
+
+    let plans = build_parallel_download_plan(total_size, DOWNLOAD_PARALLEL_CHUNK_SIZE, &parts_dir);
+    if plans.len() < 2 {
+        cleanup_parallel_parts_dir(&parts_dir);
+        return Err(anyhow!("文件过小，不适合并发分片下载"));
+    }
+
+    let parallelism = plans.len().min(DOWNLOAD_MAX_CONCURRENT_REQUESTS).max(1);
+    let _ = tx.send(DownloadEvent::Log(format!(
+        "[parallel] 启用并发分片下载: workers={}, parts={}, part_size={}",
+        parallelism,
+        plans.len(),
+        format_bytes(DOWNLOAD_PARALLEL_CHUNK_SIZE)
+    )));
+
+    let plans = Arc::new(plans);
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let reported = Arc::new(AtomicU64::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut handles = Vec::with_capacity(parallelism);
+
+    for _ in 0..parallelism {
+        let worker_client = client.clone();
+        let worker_model_url = model_url.to_string();
+        let worker_tx = tx.clone();
+        let worker_plans = plans.clone();
+        let worker_next_index = next_index.clone();
+        let worker_downloaded = downloaded.clone();
+        let worker_reported = reported.clone();
+        let worker_cancel = cancel.clone();
+        handles.push(std::thread::spawn(move || -> Result<()> {
+            loop {
+                if worker_cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                let idx = worker_next_index.fetch_add(1, Ordering::SeqCst);
+                let Some(plan) = worker_plans.get(idx).cloned() else {
+                    return Ok(());
+                };
+                if let Err(err) = download_part_with_retries(
+                    worker_client.clone(),
+                    using_direct_client,
+                    &worker_model_url,
+                    plan,
+                    total_size,
+                    worker_tx.clone(),
+                    worker_downloaded.clone(),
+                    worker_reported.clone(),
+                    worker_cancel.clone(),
+                ) {
+                    worker_cancel.store(true, Ordering::SeqCst);
+                    return Err(err);
+                }
+            }
+        }));
+    }
+
+    let mut first_err = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+            Err(_) => {
+                if first_err.is_none() {
+                    first_err = Some(anyhow!("并发下载线程异常退出"));
+                }
+            }
+        }
+    }
+
+    if let Some(err) = first_err {
+        cleanup_parallel_parts_dir(&parts_dir);
+        return Err(err);
+    }
+
+    let _ = tx.send(DownloadEvent::Log(
+        "[parallel] 所有分片已完成，开始合并".to_string(),
+    ));
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(tmp_file)
+        .context("打开模型临时文件失败")?;
+
+    for plan in plans.iter() {
+        let mut reader = OpenOptions::new()
+            .read(true)
+            .open(&plan.path)
+            .with_context(|| format!("打开分片文件失败: {}", plan.path.display()))?;
+        std::io::copy(&mut reader, &mut writer)
+            .with_context(|| format!("合并分片失败: {}", plan.path.display()))?;
+    }
+    writer.flush().context("刷新模型临时文件失败")?;
+    cleanup_parallel_parts_dir(&parts_dir);
+    emit_parallel_progress(&downloaded, &reported, total_size, tx);
+    Ok(())
 }
 
 pub fn list_local_models() -> Vec<String> {
@@ -297,6 +715,66 @@ fn download_model_with_progress(
         tmp_file.display(),
         model_url
     )));
+
+    if should_try_parallel_download(total_size, resume_size) {
+        match probe_range_support(&mut client, &mut using_direct_client, &model_url, &tx) {
+            Ok(true) => match try_parallel_download(
+                &client,
+                using_direct_client,
+                &model_url,
+                total_size.unwrap_or(0),
+                &tmp_file,
+                &tx,
+            ) {
+                Ok(()) => {
+                    let _ = tx.send(DownloadEvent::Log(
+                        "[parallel] 并发分片下载完成，跳过串行回退".to_string(),
+                    ));
+                }
+                Err(err) => {
+                    let _ = tx.send(DownloadEvent::Log(format!(
+                        "[parallel] 并发分片下载失败，回退串行: {}",
+                        err
+                    )));
+                    cleanup_parallel_parts_dir(&tmp_file.with_extension("parts"));
+                }
+            },
+            Ok(false) => {
+                let _ = tx.send(DownloadEvent::Log(
+                    "[parallel] 服务端或环境不适合并发分片，继续使用串行下载".to_string(),
+                ));
+            }
+            Err(err) => {
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[parallel] 并发分片探测异常，继续使用串行下载: {}",
+                    err
+                )));
+            }
+        }
+
+        if tmp_file.exists() {
+            let downloaded = fs::metadata(&tmp_file)
+                .map(|m| m.len())
+                .context("读取并发下载临时文件大小失败")?;
+            if total_size.is_some_and(|total| downloaded >= total) {
+                fs::rename(&tmp_file, &model_file).context("保存模型文件失败")?;
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[save] 写入完成: {}",
+                    model_file.display()
+                )));
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[save] 文件大小: {}",
+                    format_bytes(downloaded)
+                )));
+                let _ = tx.send(DownloadEvent::Progress {
+                    downloaded,
+                    total: total_size.or(Some(downloaded)),
+                });
+                let _ = tx.send(DownloadEvent::Finished);
+                return Ok(());
+            }
+        }
+    }
 
     let mut writer = if resume_size > 0 {
         OpenOptions::new()
@@ -670,5 +1148,34 @@ mod tests {
         assert_eq!(normalize_content_length(None), None);
         assert_eq!(normalize_content_length(Some(0)), None);
         assert_eq!(normalize_content_length(Some(1)), Some(1));
+    }
+
+    #[test]
+    fn test_should_try_parallel_download() {
+        assert!(should_try_parallel_download(
+            Some(DOWNLOAD_PARALLEL_CHUNK_SIZE * 2),
+            0
+        ));
+        assert!(!should_try_parallel_download(
+            Some(DOWNLOAD_PARALLEL_CHUNK_SIZE),
+            0
+        ));
+        assert!(!should_try_parallel_download(
+            Some(DOWNLOAD_PARALLEL_CHUNK_SIZE * 2),
+            1024
+        ));
+        assert!(!should_try_parallel_download(None, 0));
+    }
+
+    #[test]
+    fn test_build_parallel_download_plan() {
+        let parts_dir = std::env::temp_dir().join("echopup-model-download-plan-test");
+        let plans = build_parallel_download_plan(10, 4, &parts_dir);
+        assert_eq!(plans.len(), 3);
+        assert_eq!((plans[0].start, plans[0].end), (0, 3));
+        assert_eq!((plans[1].start, plans[1].end), (4, 7));
+        assert_eq!((plans[2].start, plans[2].end), (8, 9));
+        assert!(plans[0].path.ends_with("part-0000"));
+        assert!(plans[2].path.ends_with("part-0002"));
     }
 }
