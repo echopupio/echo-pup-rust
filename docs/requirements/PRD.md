@@ -53,6 +53,7 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
 | R-013.3 | Linux 模型下载弹窗（显示下载进度） | 中 | 对齐 macOS 功能 |
 | R-013.4 | Linux 打开配置文件夹 | 中 | 提升可用性 |
 | R-013.5 | Linux 查看模型文件 | 低 | 提升可用性 |
+| R-014 | 模型下载需支持 aria2 风格高速并发下载，在大模型场景显著缩短首次下载耗时，并在不支持多连接时自动降级 | 中 | 下载体验优化 |
 
 ## 6. 非功能需求
 
@@ -79,12 +80,14 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
 | R-013.3 | 模型下载弹窗显示下载进度 | Linux 手工验收 |
 | R-013.4 | 点击可打开配置文件夹 | Linux 手工验收 |
 | R-013.5 | 点击可打开模型文件夹 | Linux 手工验收 |
+| R-014 | 在支持 `Range` 的服务端上可自动启用多连接并发下载；下载中断后支持分片级恢复或明确降级；下载过程中的进度与错误在 UI / 状态栏中可见 | `cargo test -q` + 大模型下载手工回归 + 中断恢复验证 |
 
 ## 8. 风险与待确认问题
 
 - 风险：
   - 状态栏与 TUI 并存可能导致状态不同步
   - 菜单交互与主进程通信失败时可能出现“点击无响应”
+  - aria2 风格下载若引入 piece map / 随机写入，需重点关注恢复语义与文件一致性
 - 待确认问题：
   - 状态栏菜单中下载日志展示采用“最近 N 条文本”还是“独立详情窗”形式
   - Linux 状态栏菜单已实现全部功能 (tray-icon + muda + gtk)，与 macOS 等效
@@ -96,6 +99,7 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
 - 技术方案：`docs/architecture/technical-solution-v1.md`
 - 专项方案：`docs/architecture/status-bar-menu-sync-plan-v1.md`
 - 性能路线图：`docs/architecture/performance-optimization-roadmap-v1.md`
+- 专项需求：`docs/changes/R-014-aria2-style-model-download.md`
 - 变更日志：`docs/changes/changelog-20260319.md`
 
 ## 10. 历史兼容说明

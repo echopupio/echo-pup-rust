@@ -1,6 +1,6 @@
 # 需求到实现追踪矩阵
 
-最后更新：2026-03-19
+最后更新：2026-03-30
 
 | 需求 ID | 需求摘要 | 设计章节 | 代码位置 | 测试证据 | 状态 |
 | --- | --- | --- | --- | --- | --- |
@@ -17,6 +17,7 @@
 | R-011 | 下载在代理异常环境下可回退直连并清理异常临时文件 | `architecture/technical-solution-v1.md` 第 4 节 | `src/model_download.rs` | `cargo test -q` + 下载日志核对 | 已实现 |
 | R-012 | 录音过程中实时输出识别文本（流式转写预览） | `docs/changes/R-012-streaming-transcription.md` | `src/main.rs`, `src/stt/whisper.rs`, `src/audio/recorder.rs` | `cargo build` | 已实现 |
 | R-013 | Linux 状态栏菜单（GNOME/X11） | `docs/changes/R-013-Linux-vs-macOS-comparison.md` | `src/status_indicator.rs` | `review-20260323-01` | 已实现（含待修复项） |
+| R-014 | 模型下载 aria2 风格高速并发下载 | `docs/changes/R-014-aria2-style-model-download.md` | `src/model_download.rs`, `src/menu_core.rs`, `src/status_indicator.rs`, `src/ui.rs` | 待实现：`cargo test -q` + 下载回归（并发 / 降级 / 恢复） | 规划中 |
 
 ## 说明
 

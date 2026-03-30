@@ -1,6 +1,6 @@
 # 文档索引
 
-最后更新：2026-03-27
+最后更新：2026-03-30
 
 ## 基线文档（主入口）
 
@@ -18,6 +18,7 @@
 
 - `architecture/status-bar-menu-sync-plan-v1.md` - 状态栏菜单与 TUI 功能同步实施方案。
 - `architecture/performance-optimization-roadmap-v1.md` - 性能优化路线图。
+- `changes/R-014-aria2-style-model-download.md` - 模型下载 aria2 风格高速并发下载需求。
 - `adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md` - 热键双模式与状态栏自适应占位决策。
 
 ## 治理与协作
