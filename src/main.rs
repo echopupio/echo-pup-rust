@@ -10,6 +10,7 @@ mod llm;
 mod menu_core;
 mod model_download;
 mod runtime;
+mod session;
 mod status_indicator;
 mod stt;
 mod ui;
@@ -169,18 +170,6 @@ fn send_status_snapshot(
     guard.send_snapshot(&snapshot);
 }
 
-fn format_partial_status(text: &str) -> String {
-    const MAX_CHARS: usize = 48;
-    let clean = text.replace('\n', " ").trim().to_string();
-    let mut chars = clean.chars();
-    let clipped: String = chars.by_ref().take(MAX_CHARS).collect();
-    if chars.next().is_some() {
-        format!("识别中: {}…", clipped)
-    } else {
-        format!("识别中: {}", clipped)
-    }
-}
-
 fn whisper_fallback_candidates(file_name: &str) -> Vec<&'static str> {
     match file_name {
         "ggml-medium.bin" => vec![
@@ -277,6 +266,7 @@ fn process_audio(
     llm: &Arc<Mutex<Option<llm::LLMRewrite>>>,
     post_processor: &Arc<stt::TextPostProcessor>,
     text_commit: &Arc<Mutex<Box<dyn commit::TextCommitBackend>>>,
+    recognition_session: &Arc<Mutex<session::RecognitionSession>>,
     is_vad_triggered: bool,
     e2e_start: Instant,
     desktop_notify_enabled: bool,
@@ -395,13 +385,20 @@ fn process_audio(
     postprocess_ms = postprocess_start.elapsed().as_millis();
 
     // 4. 文本提交
+    let commit_action = {
+        let mut session_guard = recognition_session.lock();
+        session_guard.prepare_final_commit(&final_text)
+    };
+    let Some(commit_action) = commit_action else {
+        info!("最终结果为空或与本次会话已提交内容重复，跳过文本提交");
+        return false;
+    };
+
     let type_start = Instant::now();
     let mut type_success = false;
     {
         let mut commit_guard = text_commit.lock();
-        match commit_guard.apply(commit::CommitAction::CommitFinal {
-            text: final_text.clone(),
-        }) {
+        match commit_guard.apply(commit_action) {
             Ok(_) => {
                 info!("文本已提交");
                 type_success = true;
@@ -1337,7 +1334,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_should_stop = Arc::new(AtomicBool::new(false));
     let partial_stt_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let partial_stt_callback_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
-    let partial_callback_latest_text = Arc::new(Mutex::new(String::new()));
+    let recognition_session = Arc::new(Mutex::new(session::RecognitionSession::new()));
 
     // 录音动画控制
     let recording_animation = Arc::new(AtomicBool::new(false));
@@ -1389,7 +1386,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_stop_on_start = partial_stt_should_stop.clone();
     let partial_stt_handle_on_start = partial_stt_handle.clone();
     let partial_stt_callback_handle_on_start = partial_stt_callback_handle.clone();
-    let partial_callback_latest_text_on_start = partial_callback_latest_text.clone();
+    let recognition_session_on_start = recognition_session.clone();
     let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
@@ -1415,7 +1412,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     desktop_notify(desktop_notify_on_start, "EchoPup", "开始录音");
 
                     partial_stt_stop_on_start.store(false, Ordering::SeqCst);
-                    partial_callback_latest_text_on_start.lock().clear();
+                    recognition_session_on_start.lock().reset();
                     detach_thread_handle(&partial_stt_handle_on_start);
                     detach_thread_handle(&partial_stt_callback_handle_on_start);
 
@@ -1425,8 +1422,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     let menu_snapshot_callback = menu_snapshot_on_start.clone();
                     let is_recording_callback = is_recording_start.clone();
                     let partial_stt_stop_callback = partial_stt_stop_on_start.clone();
-                    let partial_callback_latest_text_for_callback =
-                        partial_callback_latest_text_on_start.clone();
+                    let recognition_session_for_callback = recognition_session_on_start.clone();
                     let callback_handle = std::thread::spawn(move || {
                         let poll_interval = Duration::from_millis(500);
                         let min_samples = (recorder_callback.target_sample_rate() as usize)
@@ -1454,7 +1450,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             let snapshot = trim_audio_tail(snapshot, max_preview_samples);
 
                             let callback_text_shared =
-                                partial_callback_latest_text_for_callback.clone();
+                                recognition_session_for_callback.clone();
                             let status_indicator_callback_inner = status_indicator_callback.clone();
                             let menu_snapshot_callback_inner = menu_snapshot_callback.clone();
                             let partial_stt_stop_for_segment = partial_stt_stop_callback.clone();
@@ -1479,18 +1475,19 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                                         return;
                                                     }
 
-                                                    let mut latest = callback_text_shared.lock();
-                                                    if latest.as_str() == trimmed {
-                                                        return;
-                                                    }
-                                                    *latest = trimmed.to_string();
-                                                    drop(latest);
+                                                    let update = {
+                                                        let mut session_guard =
+                                                            callback_text_shared.lock();
+                                                        session_guard.update_partial(trimmed)
+                                                    };
 
-                                                    send_status_snapshot(
-                                                        &status_indicator_callback_inner,
-                                                        &menu_snapshot_callback_inner,
-                                                        format_partial_status(trimmed),
-                                                    );
+                                                    if let Some(update) = update {
+                                                        send_status_snapshot(
+                                                            &status_indicator_callback_inner,
+                                                            &menu_snapshot_callback_inner,
+                                                            update.status_text,
+                                                        );
+                                                    }
                                                 }),
                                             )
                                             .ok()
@@ -1508,16 +1505,17 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                     if partial_stt_stop_callback.load(Ordering::SeqCst) {
                                         break;
                                     }
-                                    let mut latest =
-                                        partial_callback_latest_text_for_callback.lock();
-                                    if latest.as_str() != trimmed {
-                                        *latest = trimmed.to_string();
-                                        drop(latest);
+                                    let update = {
+                                        let mut session_guard =
+                                            recognition_session_for_callback.lock();
+                                        session_guard.update_partial(trimmed)
+                                    };
 
+                                    if let Some(update) = update {
                                         send_status_snapshot(
                                             &status_indicator_callback,
                                             &menu_snapshot_callback,
-                                            format_partial_status(trimmed),
+                                            update.status_text,
                                         );
                                     }
                                 }
@@ -1554,7 +1552,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_stop_on_stop = partial_stt_should_stop.clone();
     let partial_stt_handle_on_stop = partial_stt_handle.clone();
     let partial_stt_callback_handle_on_stop = partial_stt_callback_handle.clone();
-    let partial_callback_latest_text_on_stop = partial_callback_latest_text.clone();
+    let recognition_session_on_stop = recognition_session.clone();
     let stop_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         info!("stop_recording_action 开始执行");
         if is_recording_stop.load(Ordering::SeqCst) {
@@ -1578,7 +1576,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 }
             };
             info!("stop_recording_action: recorder.stop() 返回成功");
-            partial_callback_latest_text_on_stop.lock().clear();
+            recognition_session_on_stop.lock().clear_partials();
             info!("stop_recording_action: 预览线程转为后台回收");
             detach_thread_handle(&partial_stt_handle_on_stop);
             detach_thread_handle(&partial_stt_callback_handle_on_stop);
@@ -1598,6 +1596,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &llm_stop,
                 &post_processor_stop,
                 &text_commit_stop,
+                &recognition_session_on_stop,
                 is_vad,
                 e2e_start,
                 desktop_notify_on_stop,
@@ -1720,7 +1719,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let partial_stt_stop_on_vad = partial_stt_should_stop.clone();
         let partial_stt_handle_on_vad = partial_stt_handle.clone();
         let partial_stt_callback_handle_on_vad = partial_stt_callback_handle.clone();
-        let partial_callback_latest_text_on_vad = partial_callback_latest_text.clone();
+        let recognition_session_on_vad = recognition_session.clone();
 
         let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             info!("端点检测：语音结束，触发自动转写");
@@ -1750,7 +1749,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     return;
                 }
             };
-            partial_callback_latest_text_on_vad.lock().clear();
+            recognition_session_on_vad.lock().clear_partials();
             detach_thread_handle(&partial_stt_handle_on_vad);
             detach_thread_handle(&partial_stt_callback_handle_on_vad);
             play_feedback_sound(sound_feedback_on_vad, FeedbackSoundEvent::RecordingEnd);
@@ -1768,6 +1767,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &vad_llm,
                 &vad_post_processor,
                 &vad_text_commit,
+                &recognition_session_on_vad,
                 true,
                 e2e_start,
                 desktop_notify_on_vad,
