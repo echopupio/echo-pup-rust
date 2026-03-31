@@ -71,11 +71,8 @@ impl AudioRingBuffer {
     pub fn push_samples(&mut self, samples: &[f32]) {
         if samples.len() >= self.capacity {
             self.samples.clear();
-            self.samples.extend(
-                samples[samples.len() - self.capacity..]
-                    .iter()
-                    .copied(),
-            );
+            self.samples
+                .extend(samples[samples.len() - self.capacity..].iter().copied());
             return;
         }
 

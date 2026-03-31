@@ -1,7 +1,7 @@
 //! EchoPup - AI Voice Dictation Tool
 
-mod audio;
 mod asr;
+mod audio;
 mod commit;
 mod config;
 mod hotkey;
@@ -233,15 +233,6 @@ fn log_asr_runtime(label: &str, engine: &dyn asr::AsrEngine) {
         runtime.detail.unwrap_or_else(|| "n/a".to_string()),
         runtime.threads.unwrap_or_default()
     );
-}
-
-fn trim_audio_tail(mut audio: Vec<f32>, max_samples: usize) -> Vec<f32> {
-    if audio.len() <= max_samples {
-        return audio;
-    }
-    let start = audio.len() - max_samples;
-    audio.drain(..start);
-    audio
 }
 
 fn detach_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) {
@@ -1430,7 +1421,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             / 1000;
                         let max_preview_samples =
                             (recorder_callback.target_sample_rate() as usize).saturating_mul(3);
-                        let mut last_snapshot_len = 0usize;
+                        let mut preview_cursor: audio::AudioChunkCursor =
+                            recorder_callback.incremental_cursor();
+                        let mut preview_window =
+                            audio::buffer::AudioRingBuffer::with_capacity(max_preview_samples);
 
                         while is_recording_callback.load(Ordering::SeqCst)
                             && !partial_stt_stop_callback.load(Ordering::SeqCst)
@@ -1442,15 +1436,19 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                 break;
                             }
 
-                            let snapshot = recorder_callback.get_snapshot();
-                            if snapshot.len() < min_samples || snapshot.len() <= last_snapshot_len {
+                            let new_samples = recorder_callback
+                                .read_incremental_target_samples(&mut preview_cursor);
+                            if new_samples.is_empty() {
                                 continue;
                             }
-                            last_snapshot_len = snapshot.len();
-                            let snapshot = trim_audio_tail(snapshot, max_preview_samples);
 
-                            let callback_text_shared =
-                                recognition_session_for_callback.clone();
+                            preview_window.push_samples(&new_samples);
+                            if preview_window.len() < min_samples {
+                                continue;
+                            }
+                            let snapshot = preview_window.snapshot();
+
+                            let callback_text_shared = recognition_session_for_callback.clone();
                             let status_indicator_callback_inner = status_indicator_callback.clone();
                             let menu_snapshot_callback_inner = menu_snapshot_callback.clone();
                             let partial_stt_stop_for_segment = partial_stt_stop_callback.clone();

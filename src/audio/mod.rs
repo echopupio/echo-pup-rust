@@ -3,4 +3,4 @@
 pub mod buffer;
 pub mod recorder;
 
-pub use recorder::AudioRecorder;
+pub use recorder::{AudioChunkCursor, AudioRecorder};

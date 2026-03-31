@@ -57,7 +57,8 @@ impl AsrEngine for WhisperAsrEngine {
         audio: &[f32],
         abort_flag: Arc<AtomicBool>,
     ) -> Result<String> {
-        self.inner.transcribe_incremental_abortable(audio, abort_flag)
+        self.inner
+            .transcribe_incremental_abortable(audio, abort_flag)
     }
 
     fn transcribe_with_segment_callback(

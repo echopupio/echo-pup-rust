@@ -1,6 +1,7 @@
 //! 音频录制器
 #![allow(dead_code)]
 
+use super::buffer::AudioRingBuffer;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample, Stream, SupportedStreamConfig};
@@ -10,6 +11,54 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::info;
+
+const RECENT_BUFFER_SECONDS: usize = 5;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AudioChunkCursor {
+    captured_source_samples: usize,
+}
+
+#[derive(Debug)]
+struct CaptureBuffer {
+    full_samples: Vec<f32>,
+    recent_samples: AudioRingBuffer,
+}
+
+impl CaptureBuffer {
+    fn new(recent_capacity: usize) -> Self {
+        Self {
+            full_samples: Vec::new(),
+            recent_samples: AudioRingBuffer::with_capacity(recent_capacity),
+        }
+    }
+
+    fn reset(&mut self, recent_capacity: usize) {
+        self.full_samples.clear();
+        self.recent_samples = AudioRingBuffer::with_capacity(recent_capacity);
+    }
+
+    fn push_samples(&mut self, samples: &[f32]) {
+        self.full_samples.extend_from_slice(samples);
+        self.recent_samples.push_samples(samples);
+    }
+
+    fn full_snapshot(&self) -> Vec<f32> {
+        self.full_samples.clone()
+    }
+
+    fn len(&self) -> usize {
+        self.full_samples.len()
+    }
+
+    fn samples_from(&self, start: usize) -> Vec<f32> {
+        self.full_samples[start.min(self.full_samples.len())..].to_vec()
+    }
+
+    fn recent_tail(&self, count: usize) -> Vec<f32> {
+        self.recent_samples.tail(count)
+    }
+}
 
 /// 降噪强度配置
 #[derive(Clone, Debug)]
@@ -151,7 +200,7 @@ pub struct AudioRecorder {
     sample_rate: u32,
     channels: u16,
     is_recording: Arc<AtomicBool>,
-    audio_buffer: Arc<Mutex<Vec<f32>>>,
+    capture_buffer: Arc<Mutex<CaptureBuffer>>,
     captured_samples: Arc<AtomicU64>,
     recording_started_at: Arc<Mutex<Option<Instant>>>,
     stream: Arc<Mutex<Option<Stream>>>,
@@ -230,7 +279,7 @@ fn resample_audio_linear(audio: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32
 fn push_input_samples<T>(
     data: &[T],
     input_channels: usize,
-    audio_buffer: &Arc<Mutex<Vec<f32>>>,
+    capture_buffer: &Arc<Mutex<CaptureBuffer>>,
     captured_samples: &Arc<AtomicU64>,
     gain: &Arc<Mutex<f32>>,
     denoiser: &Arc<Mutex<Denoiser>>,
@@ -239,7 +288,6 @@ fn push_input_samples<T>(
     T: Sample,
     f32: FromSample<T>,
 {
-    let mut buffer = audio_buffer.lock();
     let gain_val = *gain.lock();
 
     let interleaved_f32: Vec<f32> = data
@@ -260,7 +308,7 @@ fn push_input_samples<T>(
     }
 
     captured_samples.fetch_add(processed.len() as u64, Ordering::SeqCst);
-    buffer.extend(processed);
+    capture_buffer.lock().push_samples(&processed);
 }
 
 fn build_input_stream_for<T>(
@@ -268,7 +316,7 @@ fn build_input_stream_for<T>(
     config: &SupportedStreamConfig,
     input_channels: usize,
     is_recording: Arc<AtomicBool>,
-    audio_buffer: Arc<Mutex<Vec<f32>>>,
+    capture_buffer: Arc<Mutex<CaptureBuffer>>,
     captured_samples: Arc<AtomicU64>,
     gain: Arc<Mutex<f32>>,
     denoiser: Arc<Mutex<Denoiser>>,
@@ -289,7 +337,7 @@ where
             push_input_samples(
                 data,
                 input_channels,
-                &audio_buffer,
+                &capture_buffer,
                 &captured_samples,
                 &gain,
                 &denoiser,
@@ -303,13 +351,19 @@ where
 }
 
 impl AudioRecorder {
+    fn recent_buffer_capacity(sample_rate: u32) -> usize {
+        (sample_rate as usize).max(1) * RECENT_BUFFER_SECONDS
+    }
+
     /// 创建新的录音器
     pub fn new(sample_rate: u32, channels: u16) -> Result<Self> {
         Ok(Self {
             sample_rate,
             channels,
             is_recording: Arc::new(AtomicBool::new(false)),
-            audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            capture_buffer: Arc::new(Mutex::new(CaptureBuffer::new(
+                Self::recent_buffer_capacity(sample_rate),
+            ))),
             captured_samples: Arc::new(AtomicU64::new(0)),
             recording_started_at: Arc::new(Mutex::new(None)),
             stream: Arc::new(Mutex::new(None)),
@@ -433,14 +487,17 @@ impl AudioRecorder {
         let sample_format = config.sample_format();
 
         let is_recording = self.is_recording.clone();
-        let audio_buffer = self.audio_buffer.clone();
+        let capture_buffer = self.capture_buffer.clone();
         let captured_samples = self.captured_samples.clone();
 
         let config_clone = config.clone();
         let input_channels = config.channels() as usize;
+        let device_sample_rate = config.sample_rate().0;
 
         is_recording.store(true, Ordering::SeqCst);
-        audio_buffer.lock().clear();
+        capture_buffer
+            .lock()
+            .reset(Self::recent_buffer_capacity(device_sample_rate));
         captured_samples.store(0, Ordering::SeqCst);
         *self.recording_started_at.lock() = Some(Instant::now());
 
@@ -458,7 +515,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -469,7 +526,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -480,7 +537,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -491,7 +548,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -502,7 +559,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -513,7 +570,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -524,7 +581,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -535,7 +592,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -546,7 +603,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -557,7 +614,7 @@ impl AudioRecorder {
                 &config_clone,
                 input_channels,
                 is_recording.clone(),
-                audio_buffer.clone(),
+                capture_buffer.clone(),
                 captured_samples.clone(),
                 self.gain.clone(),
                 self.denoiser.clone(),
@@ -591,7 +648,7 @@ impl AudioRecorder {
         }
 
         let is_recording = self.is_recording.clone();
-        let audio_buffer = self.audio_buffer.clone();
+        let capture_buffer = self.capture_buffer.clone();
         let vad_enabled = self.vad_enabled.clone();
         let vad_threshold = self.vad_threshold.clone();
         let vad_silence_duration_ms = self.vad_silence_duration_ms.clone();
@@ -610,14 +667,12 @@ impl AudioRecorder {
                 }
 
                 // 计算最近一小段音频的能量
-                let buffer = audio_buffer.lock();
                 let threshold = *vad_threshold.lock();
 
                 // 获取最近 200ms 的音频进行能量计算
                 let sample_rate = *device_sample_rate.lock();
                 let lookback_samples = (sample_rate as usize * 200) / 1000; // 200ms
-                let start_idx = buffer.len().saturating_sub(lookback_samples);
-                let recent_audio = &buffer[start_idx..];
+                let recent_audio = capture_buffer.lock().recent_tail(lookback_samples);
 
                 if recent_audio.is_empty() {
                     continue;
@@ -705,7 +760,7 @@ impl AudioRecorder {
         );
 
         let buffer_clone_start = std::time::Instant::now();
-        let mut buffer = self.audio_buffer.lock().clone();
+        let mut buffer = self.capture_buffer.lock().full_snapshot();
         let buffer_clone_elapsed = buffer_clone_start.elapsed().as_millis();
         info!(
             "recorder.stop(): buffer 已 clone, 大小={}, 耗时={}ms",
@@ -756,12 +811,79 @@ impl AudioRecorder {
 
     /// 获取当前录音快照（已重采样到目标采样率）
     pub fn get_snapshot(&self) -> Vec<f32> {
-        let mut buffer = self.audio_buffer.lock().clone();
+        let mut buffer = self.capture_buffer.lock().full_snapshot();
         let device_rate = *self.device_sample_rate.lock();
         if device_rate != 0 && device_rate != self.sample_rate {
             buffer = resample_audio(&buffer, device_rate, self.sample_rate);
         }
         buffer
+    }
+
+    /// 获取最近一段录音快照（已重采样到目标采样率）
+    pub fn get_recent_snapshot(&self, max_target_samples: usize) -> Vec<f32> {
+        let device_rate = *self.device_sample_rate.lock();
+        let source_samples = if device_rate == 0 || device_rate == self.sample_rate {
+            max_target_samples
+        } else {
+            ((max_target_samples as u64 * device_rate as u64) / self.sample_rate as u64) as usize
+                + 1
+        };
+
+        let mut buffer = self.capture_buffer.lock().recent_tail(source_samples);
+        if device_rate != 0 && device_rate != self.sample_rate {
+            buffer = resample_audio(&buffer, device_rate, self.sample_rate);
+        }
+        if buffer.len() > max_target_samples {
+            let start = buffer.len() - max_target_samples;
+            buffer.drain(..start);
+        }
+        buffer
+    }
+
+    /// 创建增量读取游标。
+    ///
+    /// 第三阶段开始，流式消费方应优先使用增量读取接口，
+    /// 自己维护最近窗口，避免频繁从 recorder 侧重复裁剪和重采样。
+    pub fn incremental_cursor(&self) -> AudioChunkCursor {
+        AudioChunkCursor::default()
+    }
+
+    /// 读取自上次游标位置之后新增的音频（已重采样到目标采样率）。
+    pub fn read_incremental_target_samples(&self, cursor: &mut AudioChunkCursor) -> Vec<f32> {
+        let device_rate = *self.device_sample_rate.lock();
+        let mut raw_chunk = {
+            let capture_buffer = self.capture_buffer.lock();
+            let total_samples = capture_buffer.len();
+            if cursor.captured_source_samples > total_samples {
+                cursor.captured_source_samples = 0;
+            }
+
+            let start = cursor.captured_source_samples.min(total_samples);
+            if start == total_samples {
+                return Vec::new();
+            }
+
+            let chunk = capture_buffer.samples_from(start);
+            cursor.captured_source_samples = total_samples;
+            chunk
+        };
+
+        if device_rate != 0 && device_rate != self.sample_rate {
+            raw_chunk = resample_audio(&raw_chunk, device_rate, self.sample_rate);
+        }
+
+        raw_chunk
+    }
+
+    /// 获取按目标采样率估算的已捕获采样点数
+    pub fn captured_target_samples(&self) -> usize {
+        let captured_samples = self.captured_samples.load(Ordering::SeqCst) as usize;
+        let device_rate = *self.device_sample_rate.lock() as usize;
+        if device_rate == 0 || device_rate == self.sample_rate as usize {
+            return captured_samples;
+        }
+
+        captured_samples.saturating_mul(self.sample_rate as usize) / device_rate.max(1)
     }
 
     /// 获取目标采样率
@@ -783,5 +905,59 @@ impl AudioRecorder {
 impl Default for AudioRecorder {
     fn default() -> Self {
         Self::new(16000, 1).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioRecorder;
+
+    #[test]
+    fn incremental_cursor_reads_only_new_samples() {
+        let recorder = AudioRecorder::new(16000, 1).unwrap();
+        *recorder.device_sample_rate.lock() = 16000;
+
+        recorder
+            .capture_buffer
+            .lock()
+            .push_samples(&[0.1, 0.2, 0.3, 0.4]);
+
+        let mut cursor = recorder.incremental_cursor();
+        assert_eq!(
+            recorder.read_incremental_target_samples(&mut cursor),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert!(recorder
+            .read_incremental_target_samples(&mut cursor)
+            .is_empty());
+
+        recorder.capture_buffer.lock().push_samples(&[0.5, 0.6]);
+        assert_eq!(
+            recorder.read_incremental_target_samples(&mut cursor),
+            vec![0.5, 0.6]
+        );
+    }
+
+    #[test]
+    fn incremental_cursor_recovers_after_buffer_reset() {
+        let recorder = AudioRecorder::new(16000, 1).unwrap();
+        *recorder.device_sample_rate.lock() = 16000;
+
+        recorder
+            .capture_buffer
+            .lock()
+            .push_samples(&[1.0, 2.0, 3.0]);
+        let mut cursor = recorder.incremental_cursor();
+        assert_eq!(
+            recorder.read_incremental_target_samples(&mut cursor),
+            vec![1.0, 2.0, 3.0]
+        );
+
+        recorder.capture_buffer.lock().reset(16);
+        recorder.capture_buffer.lock().push_samples(&[4.0, 5.0]);
+        assert_eq!(
+            recorder.read_incremental_target_samples(&mut cursor),
+            vec![4.0, 5.0]
+        );
     }
 }
