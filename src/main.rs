@@ -1,6 +1,8 @@
 //! EchoPup - AI Voice Dictation Tool
 
 mod audio;
+mod asr;
+mod commit;
 mod config;
 mod hotkey;
 mod input;
@@ -13,6 +15,8 @@ mod stt;
 mod ui;
 mod vad;
 
+use crate::asr::AsrEngine as _;
+use crate::commit::TextCommitBackend as _;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use parking_lot::Mutex;
@@ -177,21 +181,6 @@ fn format_partial_status(text: &str) -> String {
     }
 }
 
-fn whisper_model_display_name(model_path: &str) -> String {
-    Path::new(model_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(model_path)
-        .to_string()
-}
-
-fn whisper_strategy_label(strategy: stt::DecodingStrategy) -> &'static str {
-    match strategy {
-        stt::DecodingStrategy::Greedy { .. } => "greedy",
-        stt::DecodingStrategy::BeamSearch { .. } => "beam_search",
-    }
-}
-
 fn whisper_fallback_candidates(file_name: &str) -> Vec<&'static str> {
     match file_name {
         "ggml-medium.bin" => vec![
@@ -245,13 +234,15 @@ fn resolve_runtime_model_path(model_path: &str) -> Result<String> {
     Err(anyhow::anyhow!("未找到 Whisper 模型: {}", model_path))
 }
 
-fn log_whisper_runtime(label: &str, whisper: &stt::WhisperSTT) {
+fn log_asr_runtime(label: &str, engine: &dyn asr::AsrEngine) {
+    let runtime = engine.runtime_info();
     info!(
-        "Whisper {}: model={}, strategy={}, threads={}",
+        "ASR {}: backend={}, model={}, detail={}, threads={}",
         label,
-        whisper_model_display_name(whisper.model_path()),
-        whisper_strategy_label(whisper.decoding_strategy()),
-        whisper.n_threads()
+        runtime.backend.label(),
+        runtime.model,
+        runtime.detail.unwrap_or_else(|| "n/a".to_string()),
+        runtime.threads.unwrap_or_default()
     );
 }
 
@@ -282,10 +273,10 @@ fn join_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) 
 /// is_vad_triggered: 是否由 VAD 自动触发（用于日志区分）
 fn process_audio(
     audio_data: &[f32],
-    whisper: &Arc<Mutex<Option<stt::WhisperSTT>>>,
+    asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
     llm: &Arc<Mutex<Option<llm::LLMRewrite>>>,
     post_processor: &Arc<stt::TextPostProcessor>,
-    keyboard: &Arc<Mutex<input::Keyboard>>,
+    text_commit: &Arc<Mutex<Box<dyn commit::TextCommitBackend>>>,
     is_vad_triggered: bool,
     e2e_start: Instant,
     desktop_notify_enabled: bool,
@@ -306,24 +297,27 @@ fn process_audio(
     let mut llm_ms = 0u128;
     let mut postprocess_ms = 0u128;
     let mut type_ms = 0u128;
+    let mut stt_backend = "unknown".to_string();
 
-    // 1. 音频转写 (Whisper)
+    // 1. 音频转写
     // 为避免轻音/尾音被误裁剪，这里关闭“转写前二次 VAD 裁剪”
     let processed_audio = audio_data;
     let mut final_text = String::new();
     let mut transcribe_success = false;
     let stt_start = Instant::now();
     let mut stt_model = "uninitialized".to_string();
-    let mut stt_strategy = "unknown".to_string();
+    let mut stt_detail = "unknown".to_string();
     let mut stt_threads = 0;
 
     {
-        let mut whisper_guard = whisper.lock();
-        if let Some(ref mut whisper) = *whisper_guard {
-            stt_model = whisper_model_display_name(whisper.model_path());
-            stt_strategy = whisper_strategy_label(whisper.decoding_strategy()).to_string();
-            stt_threads = whisper.n_threads();
-            match whisper.transcribe(processed_audio) {
+        let mut asr_guard = asr_runtime.lock();
+        if let Some(ref mut asr_engine) = *asr_guard {
+            let runtime = asr_engine.runtime_info();
+            stt_backend = runtime.backend.label().to_string();
+            stt_model = runtime.model;
+            stt_detail = runtime.detail.unwrap_or_else(|| "n/a".to_string());
+            stt_threads = runtime.threads.unwrap_or_default();
+            match asr_engine.transcribe(processed_audio) {
                 Ok(text) => {
                     // 过滤无效结果
                     let trimmed = text.trim();
@@ -341,7 +335,7 @@ fn process_audio(
                 }
             }
         } else {
-            error!("Whisper 未初始化");
+            error!("ASR 运行时未初始化");
         }
     }
     let stt_ms = stt_start.elapsed().as_millis();
@@ -353,10 +347,11 @@ fn process_audio(
             "语音识别失败，请查看日志",
         );
         info!(
-            "[{}] 性能埋点: model={} strategy={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
+            "[{}] 性能埋点: backend={} model={} detail={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
             trigger_type,
+            stt_backend,
             stt_model,
-            stt_strategy,
+            stt_detail,
             stt_threads,
             stt_ms,
             llm_ms,
@@ -399,14 +394,16 @@ fn process_audio(
     }
     postprocess_ms = postprocess_start.elapsed().as_millis();
 
-    // 4. 键盘输入
+    // 4. 文本提交
     let type_start = Instant::now();
     let mut type_success = false;
     {
-        let mut keyboard_guard = keyboard.lock();
-        match keyboard_guard.type_text(&final_text) {
+        let mut commit_guard = text_commit.lock();
+        match commit_guard.apply(commit::CommitAction::CommitFinal {
+            text: final_text.clone(),
+        }) {
             Ok(_) => {
-                info!("文本已输入");
+                info!("文本已提交");
                 type_success = true;
                 desktop_notify(
                     desktop_notify_enabled,
@@ -415,7 +412,7 @@ fn process_audio(
                 );
             }
             Err(e) => {
-                error!("键盘输入失败: {}", e);
+                error!("文本提交失败: {}", e);
                 desktop_notify(desktop_notify_enabled, "EchoPup", "识别完成，但输入失败");
             }
         }
@@ -423,10 +420,11 @@ fn process_audio(
     type_ms = type_start.elapsed().as_millis();
 
     info!(
-        "[{}] 性能埋点: model={} strategy={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
+        "[{}] 性能埋点: backend={} model={} detail={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
         trigger_type,
+        stt_backend,
         stt_model,
-        stt_strategy,
+        stt_detail,
         stt_threads,
         stt_ms,
         llm_ms,
@@ -896,7 +894,9 @@ fn run_ui_foreground(config_path: &str) -> Result<()> {
     ui_result
 }
 
-fn build_whisper_stt(whisper_cfg: &config::config::WhisperConfig) -> Result<stt::WhisperSTT> {
+fn build_whisper_asr_engine(
+    whisper_cfg: &config::config::WhisperConfig,
+) -> Result<asr::WhisperAsrEngine> {
     let mut runtime_cfg = whisper_cfg.clone();
     let resolved_model_path = resolve_runtime_model_path(&runtime_cfg.model_path)?;
     if resolved_model_path != runtime_cfg.model_path {
@@ -929,7 +929,7 @@ fn build_whisper_stt(whisper_cfg: &config::config::WhisperConfig) -> Result<stt:
     w.set_n_threads(runtime_cfg.resolved_n_threads());
     w.set_initial_prompt(runtime_cfg.initial_prompt.clone());
     w.set_hotwords(runtime_cfg.hotwords.clone());
-    Ok(w)
+    Ok(asr::WhisperAsrEngine::new(w))
 }
 
 fn resolve_preview_model_path(whisper_cfg: &config::config::WhisperConfig) -> Option<String> {
@@ -952,9 +952,9 @@ fn resolve_preview_model_path(whisper_cfg: &config::config::WhisperConfig) -> Op
     None
 }
 
-fn build_preview_whisper_stt(
+fn build_preview_whisper_asr_engine(
     whisper_cfg: &config::config::WhisperConfig,
-) -> Result<stt::WhisperSTT> {
+) -> Result<asr::WhisperAsrEngine> {
     let mut preview_cfg = whisper_cfg.clone();
     let current_model_name = Path::new(&whisper_cfg.model_path)
         .file_name()
@@ -969,7 +969,7 @@ fn build_preview_whisper_stt(
         config::config::WhisperThreadSetting::Fixed(whisper_cfg.resolved_n_threads().clamp(1, 2));
     preview_cfg.decoding_strategy = config::WhisperDecodingStrategy::Greedy;
     preview_cfg.greedy_best_of = 1;
-    build_whisper_stt(&preview_cfg)
+    build_whisper_asr_engine(&preview_cfg)
 }
 
 fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewrite> {
@@ -995,8 +995,8 @@ fn apply_runtime_menu_action(
     snapshot: &menu_core::MenuSnapshot,
     hotkey_listener: &mut hotkey::HotkeyListener,
     hotkey_trigger_mode_runtime: &Arc<Mutex<config::HotkeyTriggerMode>>,
-    whisper_runtime: &Arc<Mutex<Option<stt::WhisperSTT>>>,
-    whisper_callback_runtime: &Arc<Mutex<Option<stt::WhisperSTT>>>,
+    asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
+    preview_asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
     llm_runtime: &Arc<Mutex<Option<llm::LLMRewrite>>>,
 ) -> Result<()> {
     match action {
@@ -1015,21 +1015,25 @@ fn apply_runtime_menu_action(
         | menu_core::MenuAction::SwitchWhisperModel { .. } => {
             let cfg = config::Config::load(&snapshot.config_path)?;
             let whisper_cfg = cfg.whisper.effective();
-            match build_whisper_stt(&whisper_cfg) {
-                Ok(new_whisper) => {
-                    log_whisper_runtime("主转写运行时已热更新", &new_whisper);
-                    let mut guard = whisper_runtime.lock();
-                    *guard = Some(new_whisper);
+            match build_whisper_asr_engine(&whisper_cfg) {
+                Ok(new_asr) => {
+                    log_asr_runtime("主转写运行时已热更新", &new_asr);
+                    let mut guard = asr_runtime.lock();
+                    *guard = Some(Box::new(new_asr));
                     drop(guard);
-                    let mut callback_guard = whisper_callback_runtime.lock();
-                    *callback_guard = build_preview_whisper_stt(&whisper_cfg).ok();
+                    let mut callback_guard = preview_asr_runtime.lock();
+                    *callback_guard = build_preview_whisper_asr_engine(&whisper_cfg)
+                        .ok()
+                        .map(|engine| Box::new(engine) as Box<dyn asr::AsrEngine>);
                 }
                 Err(err) => {
-                    warn!("Whisper 热更新失败: {}", err);
-                    if let Some(current) = whisper_runtime.lock().as_ref() {
+                    warn!("ASR 热更新失败: {}", err);
+                    if let Some(current) = asr_runtime.lock().as_ref() {
+                        let runtime = current.runtime_info();
                         warn!(
-                            "Whisper 热更新失败后继续使用当前模型: {}",
-                            whisper_model_display_name(current.model_path())
+                            "ASR 热更新失败后继续使用当前运行时: backend={}, model={}",
+                            runtime.backend.label(),
+                            runtime.model
                         );
                     }
                 }
@@ -1076,21 +1080,25 @@ fn apply_runtime_menu_action(
             *hotkey_trigger_mode_runtime.lock() = cfg.hotkey.trigger_mode;
 
             let whisper_cfg = cfg.whisper.effective();
-            match build_whisper_stt(&whisper_cfg) {
-                Ok(new_whisper) => {
-                    log_whisper_runtime("主转写运行时已重载", &new_whisper);
-                    let mut guard = whisper_runtime.lock();
-                    *guard = Some(new_whisper);
+            match build_whisper_asr_engine(&whisper_cfg) {
+                Ok(new_asr) => {
+                    log_asr_runtime("主转写运行时已重载", &new_asr);
+                    let mut guard = asr_runtime.lock();
+                    *guard = Some(Box::new(new_asr));
                     drop(guard);
-                    let mut callback_guard = whisper_callback_runtime.lock();
-                    *callback_guard = build_preview_whisper_stt(&whisper_cfg).ok();
+                    let mut callback_guard = preview_asr_runtime.lock();
+                    *callback_guard = build_preview_whisper_asr_engine(&whisper_cfg)
+                        .ok()
+                        .map(|engine| Box::new(engine) as Box<dyn asr::AsrEngine>);
                 }
                 Err(err) => {
-                    warn!("Whisper 重载失败: {}", err);
-                    if let Some(current) = whisper_runtime.lock().as_ref() {
+                    warn!("ASR 重载失败: {}", err);
+                    if let Some(current) = asr_runtime.lock().as_ref() {
+                        let runtime = current.runtime_info();
                         warn!(
-                            "Whisper 重载失败后继续使用当前模型: {}",
-                            whisper_model_display_name(current.model_path())
+                            "ASR 重载失败后继续使用当前运行时: backend={}, model={}",
+                            runtime.backend.label(),
+                            runtime.model
                         );
                     }
                 }
@@ -1228,35 +1236,34 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         );
     }
 
-    let whisper = match build_whisper_stt(&whisper_cfg) {
-        Ok(w) => {
-            log_whisper_runtime("主转写运行时已启用", &w);
+    let whisper = match build_whisper_asr_engine(&whisper_cfg) {
+        Ok(engine) => {
+            log_asr_runtime("主转写运行时已启用", &engine);
             info!("Whisper 线程配置: {:?}", whisper_cfg.n_threads);
-            info!("Whisper 已初始化");
-            Some(w)
+            info!("ASR 运行时已初始化");
+            Some(Box::new(engine) as Box<dyn asr::AsrEngine>)
         }
         Err(e) => {
-            warn!("Whisper 初始化失败: {}，语音转写功能不可用", e);
+            warn!("ASR 初始化失败: {}，语音转写功能不可用", e);
             None
         }
     };
     // 使用 Mutex 包装，以便在回调中共享（transcribe 需要 &mut self）
     let whisper = Arc::new(Mutex::new(whisper));
     let preview_threads = whisper_cfg.resolved_n_threads().clamp(1, 2);
-    let whisper_callback = match build_preview_whisper_stt(&whisper_cfg) {
-        Ok(w) => {
-            let preview_model_name = Path::new(w.model_path())
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("unknown");
+    let whisper_callback = match build_preview_whisper_asr_engine(&whisper_cfg) {
+        Ok(engine) => {
+            let runtime = engine.runtime_info();
             info!(
-                "Whisper 预览运行时已启用: model={}, threads={}",
-                preview_model_name, preview_threads
+                "ASR 预览运行时已启用: backend={}, model={}, threads={}",
+                runtime.backend.label(),
+                runtime.model,
+                preview_threads
             );
-            Some(w)
+            Some(Box::new(engine) as Box<dyn asr::AsrEngine>)
         }
         Err(e) => {
-            warn!("Whisper 预览运行时初始化失败: {}，将禁用流式预览", e);
+            warn!("ASR 预览运行时初始化失败: {}，将禁用流式预览", e);
             None
         }
     };
@@ -1290,11 +1297,20 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         info!("谐音纠错未启用");
     }
 
-    let keyboard = Arc::new(Mutex::new(input::Keyboard::new().map_err(|e| {
-        error!("键盘输入初始化失败: {}", e);
-        e
-    })?));
-    info!("键盘输入已初始化: {}", keyboard.lock().backend_name());
+    let text_commit = Arc::new(Mutex::new(
+        Box::new(commit::InsertOnlyTextCommit::new().map_err(|e| {
+            error!("文本提交后端初始化失败: {}", e);
+            e
+        })?) as Box<dyn commit::TextCommitBackend>,
+    ));
+    {
+        let commit_guard = text_commit.lock();
+        info!(
+            "文本提交后端已初始化: backend={}, draft_replace_supported={}",
+            commit_guard.backend_name(),
+            commit_guard.supports_draft_replacement()
+        );
+    }
 
     let (desktop_notify_enabled, notify_desc) = detect_desktop_notify_capability();
     if desktop_notify_enabled {
@@ -1447,10 +1463,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                 {
                                     if let Some(ref mut whisper) = *whisper_guard {
                                         whisper
-                                            .transcribe_with_callback_abortable(
+                                            .transcribe_with_segment_callback(
                                                 &snapshot,
                                                 partial_stt_stop_callback.clone(),
-                                                move |segment| {
+                                                Box::new(move |segment: String| {
                                                     if partial_stt_stop_for_segment
                                                         .load(Ordering::SeqCst)
                                                     {
@@ -1475,7 +1491,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                                         &menu_snapshot_callback_inner,
                                                         format_partial_status(trimmed),
                                                     );
-                                                },
+                                                }),
                                             )
                                             .ok()
                                     } else {
@@ -1527,7 +1543,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let whisper_stop = whisper.clone();
     let llm_stop = llm.clone();
     let post_processor_stop = post_processor.clone();
-    let keyboard_stop = keyboard.clone();
+    let text_commit_stop = text_commit.clone();
     let is_recording_stop = is_recording.clone();
     let vad_triggered_stop = vad_triggered.clone();
     let recording_animation_stop = recording_animation.clone();
@@ -1581,7 +1597,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &whisper_stop,
                 &llm_stop,
                 &post_processor_stop,
-                &keyboard_stop,
+                &text_commit_stop,
                 is_vad,
                 e2e_start,
                 desktop_notify_on_stop,
@@ -1694,7 +1710,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let vad_whisper = whisper.clone();
         let vad_llm = llm.clone();
         let vad_post_processor = post_processor.clone();
-        let vad_keyboard = keyboard.clone();
+        let vad_text_commit = text_commit.clone();
         let vad_is_recording = is_recording.clone();
         let vad_triggered_callback = vad_triggered.clone();
         let vad_recording_animation = recording_animation.clone();
@@ -1751,7 +1767,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &vad_whisper,
                 &vad_llm,
                 &vad_post_processor,
-                &vad_keyboard,
+                &vad_text_commit,
                 true,
                 e2e_start,
                 desktop_notify_on_vad,
@@ -1894,7 +1910,7 @@ fn test_modules(config_path: &str) -> Result<()> {
 
     println!("\n[3/4] 测试 Whisper...");
     let whisper_cfg = config.whisper.effective();
-    match stt::WhisperSTT::new(&whisper_cfg.model_path) {
+    match build_whisper_asr_engine(&whisper_cfg) {
         Ok(w) => {
             if w.is_ready() {
                 println!("  ✓ Whisper 模型加载成功");
@@ -1905,14 +1921,17 @@ fn test_modules(config_path: &str) -> Result<()> {
         Err(e) => println!("  ~ Whisper: {}", e),
     }
 
-    println!("\n[4/4] 测试键盘输入...");
-    match input::Keyboard::new() {
-        Ok(mut k) => {
-            println!("  ✓ 键盘输入初始化成功");
-            k.type_text("Test")?;
+    println!("\n[4/4] 测试文本提交后端...");
+    match commit::InsertOnlyTextCommit::new() {
+        Ok(mut backend) => {
+            println!("  ✓ 文本提交后端初始化成功");
+            println!("    - 后端: {}", backend.backend_name());
+            backend.apply(commit::CommitAction::CommitFinal {
+                text: "Test".to_string(),
+            })?;
             println!("    - 测试文本已输入");
         }
-        Err(e) => println!("  ✗ 键盘输入初始化失败: {}", e),
+        Err(e) => println!("  ✗ 文本提交后端初始化失败: {}", e),
     }
 
     println!("\n=== 测试完成 ===");
