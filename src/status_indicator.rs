@@ -2615,24 +2615,24 @@ fn linux_pill_style(state: IndicatorState, phase: f32) -> Option<LinuxPillStyle>
     match state {
         IndicatorState::Idle => None,
         IndicatorState::RecordingStart | IndicatorState::Recording => Some(LinuxPillStyle {
-            fill: Some([245, 92, 52, (18.0 + 18.0 * wave) as u8]),
-            border: Some(([245, 92, 52, (130.0 + 90.0 * wave) as u8], 3.0 + 2.0 * wave)),
+            fill: Some([245, 92, 52, (120.0 + 60.0 * wave) as u8]),
+            border: Some(([245, 92, 52, (180.0 + 60.0 * wave) as u8], 3.0 + 2.0 * wave)),
             width_scale: (LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.03) + 0.03 * wave,
             height_scale: (LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO - 0.04) + 0.04 * wave,
         }),
         IndicatorState::Transcribing => Some(LinuxPillStyle {
-            fill: Some([250, 168, 39, (18.0 + 16.0 * wave) as u8]),
+            fill: Some([250, 168, 39, (120.0 + 60.0 * wave) as u8]),
             border: Some((
-                [250, 168, 39, (125.0 + 90.0 * wave) as u8],
+                [250, 168, 39, (180.0 + 60.0 * wave) as u8],
                 3.0 + 1.8 * wave,
             )),
             width_scale: (LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.03) + 0.02 * wave,
             height_scale: (LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO - 0.04) + 0.03 * wave,
         }),
         IndicatorState::Completed => Some(LinuxPillStyle {
-            fill: Some([66, 186, 101, (16.0 + 16.0 * wave) as u8]),
+            fill: Some([66, 186, 101, (120.0 + 60.0 * wave) as u8]),
             border: Some((
-                [66, 186, 101, (120.0 + 90.0 * wave) as u8],
+                [66, 186, 101, (180.0 + 60.0 * wave) as u8],
                 3.0 + 1.8 * wave,
             )),
             width_scale: (LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.03) + 0.02 * wave,
@@ -3865,6 +3865,7 @@ pub fn run_status_indicator_process() -> Result<()> {
         .with_menu(Box::new(menu))
         .with_icon(build_linux_icon(state, 0.0)?)
         .with_tooltip("EchoPup 状态栏")
+        .with_title(linux_status_text(&snapshot, state))
         .build()?;
 
     let mut pulse_phase = 0.0f32;
@@ -3922,6 +3923,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                             .auto_reset_duration()
                             .map(|duration| std::time::Instant::now() + duration);
                         let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
+                        let _ = tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
                         try_update_linux_tray_icon(
                             &tray_icon,
                             state,
