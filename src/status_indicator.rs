@@ -98,7 +98,7 @@ fn status_item_length_for_state(state: IndicatorState) -> f64 {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisualStyle {
     Idle,
@@ -108,14 +108,14 @@ enum VisualStyle {
     FailedSolid,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 impl VisualStyle {
     fn is_pulsing(self) -> bool {
         matches!(self, Self::RecordingPulse | Self::TranscribingPulse)
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 impl IndicatorState {
     fn visual_style(self) -> VisualStyle {
         match self {
@@ -126,7 +126,10 @@ impl IndicatorState {
             Self::Failed => VisualStyle::FailedSolid,
         }
     }
+}
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl IndicatorState {
     fn auto_reset_duration(self) -> Option<std::time::Duration> {
         match self {
             Self::Completed => Some(std::time::Duration::from_millis(1500)),
@@ -2439,13 +2442,23 @@ fn apply_linux_dialog_icon(dialog: &gtk::Dialog) {
 }
 
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SIZE: u32 = 64;
+const LINUX_TRAY_ICON_SIZE: u32 = 96;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_IDLE: f32 = 0.90;
+const LINUX_TRAY_IDLE_MAX_WIDTH_RATIO: f32 = 1.36;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_ICON_SCALE_ACTIVE: f32 = 0.80;
+const LINUX_TRAY_IDLE_MAX_HEIGHT_RATIO: f32 = 0.92;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_BACKGROUND_CORNER_RATIO: f32 = 0.34;
+const LINUX_TRAY_ACTIVE_MIC_MAX_WIDTH_RATIO: f32 = 0.46;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ACTIVE_MIC_MAX_HEIGHT_RATIO: f32 = 0.70;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO: f32 = 1.0;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO: f32 = 0.78;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_BACKGROUND_CORNER_RATIO: f32 = 0.50;
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ALPHA_TRIM_THRESHOLD: u8 = 8;
 
 #[cfg(target_os = "linux")]
 fn linux_foreground_png(state: IndicatorState) -> Option<&'static [u8]> {
@@ -2470,11 +2483,13 @@ fn build_linux_icon(state: IndicatorState, phase: f32) -> Result<tray_icon::Icon
         Rgba([0, 0, 0, 0]),
     );
 
-    if let Some((color, scale)) = linux_background_style(state, phase) {
-        fill_rounded_rect_linux(
+    if let Some(style) = linux_pill_style(state, phase) {
+        draw_rounded_rect_linux(
             &mut canvas,
-            Rgba(color),
-            scale,
+            style.fill.map(Rgba),
+            style.border.map(|(color, width)| (Rgba(color), width)),
+            style.width_scale,
+            style.height_scale,
             LINUX_TRAY_BACKGROUND_CORNER_RATIO,
         );
     }
@@ -2484,17 +2499,27 @@ fn build_linux_icon(state: IndicatorState, phase: f32) -> Result<tray_icon::Icon
             .map_err(|err| anyhow::anyhow!("解码 Linux 托盘 PNG 图标失败: {}", err))?
             .into_rgba8();
         let trimmed = trim_transparent_edges_linux(&image).unwrap_or(image);
-        let scale = if matches!(state, IndicatorState::Idle) {
-            LINUX_TRAY_ICON_SCALE_IDLE
+        let (target_width, target_height) = if matches!(state, IndicatorState::Idle) {
+            let max_width =
+                ((LINUX_TRAY_ICON_SIZE as f32 * LINUX_TRAY_IDLE_MAX_WIDTH_RATIO).round() as u32)
+                    .max(1);
+            let max_height = ((LINUX_TRAY_ICON_SIZE as f32 * LINUX_TRAY_IDLE_MAX_HEIGHT_RATIO)
+                .round() as u32)
+                .max(1);
+            fit_within_rect_linux(trimmed.width(), trimmed.height(), max_width, max_height)
         } else {
-            LINUX_TRAY_ICON_SCALE_ACTIVE
+            let max_width = ((LINUX_TRAY_ICON_SIZE as f32 * LINUX_TRAY_ACTIVE_MIC_MAX_WIDTH_RATIO)
+                .round() as u32)
+                .max(1);
+            let max_height =
+                ((LINUX_TRAY_ICON_SIZE as f32 * LINUX_TRAY_ACTIVE_MIC_MAX_HEIGHT_RATIO).round()
+                    as u32)
+                    .max(1);
+            fit_within_rect_linux(trimmed.width(), trimmed.height(), max_width, max_height)
         };
-        let max_side = ((LINUX_TRAY_ICON_SIZE as f32 * scale).round() as u32).max(1);
-        let (target_width, target_height) =
-            fit_within_square_linux(trimmed.width(), trimmed.height(), max_side);
         let resized = resize(&trimmed, target_width, target_height, FilterType::Lanczos3);
-        let offset_x = ((LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2).max(0);
-        let offset_y = ((LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2).max(0);
+        let offset_x = (LINUX_TRAY_ICON_SIZE as i32 - resized.width() as i32) / 2;
+        let offset_y = (LINUX_TRAY_ICON_SIZE as i32 - resized.height() as i32) / 2;
         overlay(
             &mut canvas,
             &resized,
@@ -2523,7 +2548,7 @@ fn trim_transparent_edges_linux(image: &image::RgbaImage) -> Option<image::RgbaI
     let mut found = false;
 
     for (x, y, pixel) in image.enumerate_pixels() {
-        if pixel[3] == 0 {
+        if pixel[3] < LINUX_TRAY_ALPHA_TRIM_THRESHOLD {
             continue;
         }
         found = true;
@@ -2545,79 +2570,202 @@ fn trim_transparent_edges_linux(image: &image::RgbaImage) -> Option<image::RgbaI
 }
 
 #[cfg(target_os = "linux")]
-fn fit_within_square_linux(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+fn fit_within_rect_linux(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
     if width == 0 || height == 0 {
-        return (max_side.max(1), max_side.max(1));
+        return (max_width.max(1), max_height.max(1));
     }
 
-    if width >= height {
-        let ratio = height as f32 / width as f32;
-        let target_width = max_side.max(1);
-        let target_height = ((target_width as f32 * ratio).round() as u32).max(1);
-        (target_width, target_height)
-    } else {
-        let ratio = width as f32 / height as f32;
-        let target_height = max_side.max(1);
-        let target_width = ((target_height as f32 * ratio).round() as u32).max(1);
-        (target_width, target_height)
-    }
+    let width_scale = max_width as f32 / width as f32;
+    let height_scale = max_height as f32 / height as f32;
+    let scale = width_scale.min(height_scale);
+    (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn linux_background_style(state: IndicatorState, phase: f32) -> Option<([u8; 4], f32)> {
-    let wave = if state.visual_style().is_pulsing() {
+#[derive(Debug, Clone, Copy)]
+struct LinuxPillStyle {
+    fill: Option<[u8; 4]>,
+    border: Option<([u8; 4], f32)>,
+    width_scale: f32,
+    height_scale: f32,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tray_state_pulses(state: IndicatorState) -> bool {
+    matches!(
+        state,
+        IndicatorState::RecordingStart
+            | IndicatorState::Recording
+            | IndicatorState::Transcribing
+            | IndicatorState::Completed
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pill_style(state: IndicatorState, phase: f32) -> Option<LinuxPillStyle> {
+    let wave = if linux_tray_state_pulses(state) {
         pulse_wave(phase)
     } else {
         1.0
     };
 
-    match state.visual_style() {
-        VisualStyle::Idle => None,
-        VisualStyle::RecordingPulse => Some((
-            [245, 92, 52, (165.0 + 55.0 * wave) as u8],
-            0.80 + 0.08 * wave,
-        )),
-        VisualStyle::TranscribingPulse => Some((
-            [250, 168, 39, (160.0 + 55.0 * wave) as u8],
-            0.80 + 0.06 * wave,
-        )),
-        VisualStyle::CompletedSolid => Some(([66, 186, 101, 228], 0.88)),
-        VisualStyle::FailedSolid => Some(([228, 87, 58, 228], 0.88)),
+    match state {
+        IndicatorState::Idle => None,
+        IndicatorState::RecordingStart | IndicatorState::Recording => Some(LinuxPillStyle {
+            fill: Some([245, 92, 52, (18.0 + 18.0 * wave) as u8]),
+            border: Some(([245, 92, 52, (130.0 + 90.0 * wave) as u8], 3.0 + 2.0 * wave)),
+            width_scale: (LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.03) + 0.03 * wave,
+            height_scale: (LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO - 0.04) + 0.04 * wave,
+        }),
+        IndicatorState::Transcribing => Some(LinuxPillStyle {
+            fill: Some([250, 168, 39, (18.0 + 16.0 * wave) as u8]),
+            border: Some((
+                [250, 168, 39, (125.0 + 90.0 * wave) as u8],
+                3.0 + 1.8 * wave,
+            )),
+            width_scale: (LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.03) + 0.02 * wave,
+            height_scale: (LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO - 0.04) + 0.03 * wave,
+        }),
+        IndicatorState::Completed => Some(LinuxPillStyle {
+            fill: Some([66, 186, 101, (16.0 + 16.0 * wave) as u8]),
+            border: Some((
+                [66, 186, 101, (120.0 + 90.0 * wave) as u8],
+                3.0 + 1.8 * wave,
+            )),
+            width_scale: (LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.03) + 0.02 * wave,
+            height_scale: (LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO - 0.04) + 0.03 * wave,
+        }),
+        IndicatorState::Failed => Some(LinuxPillStyle {
+            fill: None,
+            border: Some(([228, 87, 58, 224], 3.2)),
+            width_scale: LINUX_TRAY_ACTIVE_PILL_WIDTH_RATIO - 0.02,
+            height_scale: LINUX_TRAY_ACTIVE_PILL_HEIGHT_RATIO - 0.04,
+        }),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn fill_rounded_rect_linux(
+fn draw_rounded_rect_linux(
     canvas: &mut image::RgbaImage,
-    color: image::Rgba<u8>,
-    scale: f32,
+    fill: Option<image::Rgba<u8>>,
+    border: Option<(image::Rgba<u8>, f32)>,
+    width_scale: f32,
+    height_scale: f32,
     corner_ratio: f32,
 ) {
-    let Some(side) = i32::try_from(canvas.width().min(canvas.height())).ok() else {
+    let Some(geom) = linux_rounded_rect_geometry(canvas, width_scale, height_scale, corner_ratio)
+    else {
         return;
     };
-    let rect_side = ((side as f32 * scale).round() as i32).clamp(1, side);
-    let left = (side - rect_side) / 2;
-    let top = (side - rect_side) / 2;
-    let right = left + rect_side;
-    let bottom = top + rect_side;
-    let radius = (rect_side as f32 * corner_ratio).clamp(2.0, rect_side as f32 * 0.5);
-    let inner_left = left as f32 + radius;
-    let inner_right = right as f32 - radius;
-    let inner_top = top as f32 + radius;
-    let inner_bottom = bottom as f32 - radius;
 
     for (x, y, pixel) in canvas.enumerate_pixels_mut() {
         let px = x as f32 + 0.5;
         let py = y as f32 + 0.5;
-        let nearest_x = px.clamp(inner_left, inner_right);
-        let nearest_y = py.clamp(inner_top, inner_bottom);
-        let dx = px - nearest_x;
-        let dy = py - nearest_y;
-        if dx * dx + dy * dy <= radius * radius {
+
+        let in_outer = linux_point_in_rounded_rect(px, py, &geom);
+        if !in_outer {
+            continue;
+        }
+
+        let mut painted = false;
+        if let Some(color) = fill {
             *pixel = color;
+            painted = true;
+        }
+
+        if let Some((color, border_width)) = border {
+            let inner = geom.inset(border_width);
+            let in_inner = inner
+                .as_ref()
+                .map(|inner| linux_point_in_rounded_rect(px, py, inner))
+                .unwrap_or(false);
+            if !in_inner {
+                *pixel = color;
+                painted = true;
+            }
+        }
+
+        if !painted {
+            *pixel = image::Rgba([0, 0, 0, 0]);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct LinuxRoundedRectGeometry {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    radius: f32,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxRoundedRectGeometry {
+    fn inset(self, amount: f32) -> Option<Self> {
+        let inset_left = self.left + amount;
+        let inset_top = self.top + amount;
+        let inset_right = self.right - amount;
+        let inset_bottom = self.bottom - amount;
+        if inset_right <= inset_left || inset_bottom <= inset_top {
+            return None;
+        }
+
+        let width = inset_right - inset_left;
+        let height = inset_bottom - inset_top;
+        let max_radius = (width.min(height) * 0.5).max(0.0);
+        Some(Self {
+            left: inset_left,
+            top: inset_top,
+            right: inset_right,
+            bottom: inset_bottom,
+            radius: self.radius.min(max_radius),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_rounded_rect_geometry(
+    canvas: &image::RgbaImage,
+    width_scale: f32,
+    height_scale: f32,
+    corner_ratio: f32,
+) -> Option<LinuxRoundedRectGeometry> {
+    let Some(side) = i32::try_from(canvas.width().min(canvas.height())).ok() else {
+        return None;
+    };
+    let rect_width = ((side as f32 * width_scale).round() as i32).clamp(1, side);
+    let rect_height = ((side as f32 * height_scale).round() as i32).clamp(1, side);
+    let left = (side - rect_width) / 2;
+    let top = (side - rect_height) / 2;
+    let right = left + rect_width;
+    let bottom = top + rect_height;
+    let radius = (rect_height as f32 * corner_ratio).clamp(2.0, rect_height as f32 * 0.5);
+
+    Some(LinuxRoundedRectGeometry {
+        left: left as f32,
+        top: top as f32,
+        right: right as f32,
+        bottom: bottom as f32,
+        radius,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_point_in_rounded_rect(px: f32, py: f32, geom: &LinuxRoundedRectGeometry) -> bool {
+    let inner_left = geom.left + geom.radius;
+    let inner_right = geom.right - geom.radius;
+    let inner_top = geom.top + geom.radius;
+    let inner_bottom = geom.bottom - geom.radius;
+    let nearest_x = px.clamp(inner_left, inner_right);
+    let nearest_y = py.clamp(inner_top, inner_bottom);
+    let dx = px - nearest_x;
+    let dy = py - nearest_y;
+    dx * dx + dy * dy <= geom.radius * geom.radius
 }
 
 #[cfg(target_os = "linux")]
@@ -3599,6 +3747,30 @@ fn linux_status_text(snapshot: &MenuSnapshot, state: IndicatorState) -> String {
 }
 
 #[cfg(target_os = "linux")]
+fn linux_tooltip_text(snapshot: &MenuSnapshot, state: IndicatorState) -> String {
+    format!("EchoPup - {}", linux_status_text(snapshot, state))
+}
+
+#[cfg(target_os = "linux")]
+fn try_update_linux_tray_icon(
+    tray_icon: &tray_icon::TrayIcon,
+    state: IndicatorState,
+    phase: f32,
+    context: &str,
+) {
+    match build_linux_icon(state, phase) {
+        Ok(icon) => {
+            if let Err(err) = tray_icon.set_icon(Some(icon)) {
+                warn!("{}失败: {}", context, err);
+            }
+        }
+        Err(err) => {
+            warn!("{}失败: {}", context, err);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
     match id {
         MENU_ID_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
@@ -3693,7 +3865,6 @@ pub fn run_status_indicator_process() -> Result<()> {
         .with_menu(Box::new(menu))
         .with_icon(build_linux_icon(state, 0.0)?)
         .with_tooltip("EchoPup 状态栏")
-        .with_title(linux_status_text(&snapshot, state))
         .build()?;
 
     let mut pulse_phase = 0.0f32;
@@ -3750,12 +3921,13 @@ pub fn run_status_indicator_process() -> Result<()> {
                         auto_back_to_idle_deadline = state
                             .auto_reset_duration()
                             .map(|duration| std::time::Instant::now() + duration);
-                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
-                        if let Err(err) =
-                            tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?))
-                        {
-                            warn!("更新 Linux 托盘图标失败: {}", err);
-                        }
+                        let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
+                        try_update_linux_tray_icon(
+                            &tray_icon,
+                            state,
+                            pulse_phase,
+                            "更新 Linux 托盘图标",
+                        );
                         update_linux_menu(&handles, &snapshot, state);
                     }
                     ParentMessage::SetSnapshot {
@@ -3765,7 +3937,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                         if !hotkey_popup.is_editing {
                             hotkey_popup.current_hotkey = snapshot.hotkey.clone();
                         }
-                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
+                        let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
                         update_linux_menu(&handles, &snapshot, state);
                         sync_download_popup_linux(&snapshot, &mut download_popup);
                     }
@@ -3777,7 +3949,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                         if !hotkey_popup.is_editing {
                             hotkey_popup.current_hotkey = snapshot.hotkey.clone();
                         }
-                        tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
+                        let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
                         if !result.ok
                             && matches!(download_popup.phase, DownloadDialogPhaseLinux::Starting)
                             && (result.message.contains("下载") || snapshot.status.contains("下载"))
@@ -3814,15 +3986,13 @@ pub fn run_status_indicator_process() -> Result<()> {
             }
         }
 
-        if state.visual_style().is_pulsing() {
+        if linux_tray_state_pulses(state) {
             pulse_phase = (pulse_phase + 0.15) % std::f32::consts::TAU;
             // 使用 set_tooltip 来同步 GNOME AppIndicator 的内部状态
             // 这有助于减少 AppIndicator 的渲染问题
-            let tooltip_text = format!("EchoPup - {}", linux_status_text(&snapshot, state));
+            let tooltip_text = linux_tooltip_text(&snapshot, state);
             let _ = tray_icon.set_tooltip(Some(&tooltip_text));
-            if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?)) {
-                warn!("更新 Linux 托盘脉冲图标失败: {}", err);
-            }
+            try_update_linux_tray_icon(&tray_icon, state, pulse_phase, "更新 Linux 托盘脉冲图标");
         }
 
         if let Some(deadline) = auto_back_to_idle_deadline {
@@ -3830,10 +4000,8 @@ pub fn run_status_indicator_process() -> Result<()> {
                 state = IndicatorState::Idle;
                 pulse_phase = 0.0;
                 auto_back_to_idle_deadline = None;
-                tray_icon.set_title(Some(linux_status_text(&snapshot, state)));
-                if let Err(err) = tray_icon.set_icon(Some(build_linux_icon(state, pulse_phase)?)) {
-                    warn!("重置 Linux 托盘图标失败: {}", err);
-                }
+                let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
+                try_update_linux_tray_icon(&tray_icon, state, pulse_phase, "重置 Linux 托盘图标");
                 update_linux_menu(&handles, &snapshot, state);
             }
         }
@@ -3937,5 +4105,22 @@ mod tests {
             linux_foreground_png(IndicatorState::Failed),
             Some(STATUS_MICROPHONE_PNG)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_completed_state_uses_pulsing_capsule_outline() {
+        assert!(linux_tray_state_pulses(IndicatorState::Completed));
+
+        let first = linux_pill_style(IndicatorState::Completed, 0.0).expect("completed pill");
+        let second = linux_pill_style(IndicatorState::Completed, std::f32::consts::FRAC_PI_2)
+            .expect("completed pill pulse");
+
+        let (first_color, first_width) = first.border.expect("completed border");
+        let (second_color, second_width) = second.border.expect("completed border");
+        assert_ne!(first_color[3], second_color[3]);
+        assert_ne!(first_width.round() as i32, second_width.round() as i32);
+        assert!(first.fill.is_some());
+        assert!(second.fill.is_some());
     }
 }

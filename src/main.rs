@@ -277,6 +277,7 @@ fn join_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) 
 /// is_vad_triggered: 是否由 VAD 自动触发（用于日志区分）
 fn process_audio(
     audio_data: &[f32],
+    config_path: &str,
     asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
     llm: &Arc<Mutex<Option<llm::LLMRewrite>>>,
     post_processor: &Arc<stt::TextPostProcessor>,
@@ -314,6 +315,15 @@ fn process_audio(
     let mut stt_detail = "unknown".to_string();
     let mut stt_threads = 0;
 
+    if !ensure_main_asr_runtime_ready(config_path, asr_runtime) {
+        error!("ASR 运行时未就绪且按需初始化失败");
+        desktop_notify(
+            desktop_notify_enabled,
+            "EchoPup",
+            "语音识别引擎初始化失败，请查看日志",
+        );
+    }
+
     {
         let mut asr_guard = asr_runtime.lock();
         if let Some(ref mut asr_engine) = *asr_guard {
@@ -340,7 +350,7 @@ fn process_audio(
                 }
             }
         } else {
-            error!("ASR 运行时未初始化");
+            error!("ASR 运行时未就绪");
         }
     }
     let stt_ms = stt_start.elapsed().as_millis();
@@ -1056,6 +1066,74 @@ fn build_asr_engine_with_fallback(
     }
 }
 
+fn spawn_background_asr_runtime_init(
+    config: config::config::Config,
+    asr_runtime: Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
+    preview_asr_runtime: Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
+) {
+    std::thread::spawn(move || {
+        match build_asr_engine_with_fallback(&config, false) {
+            Ok(engine) => {
+                log_asr_runtime("主转写运行时已启用", engine.as_ref());
+                info!("ASR 运行时已初始化");
+                let mut guard = asr_runtime.lock();
+                if guard.is_none() {
+                    *guard = Some(engine);
+                }
+            }
+            Err(e) => {
+                warn!("ASR 初始化失败: {}，语音转写功能不可用", e);
+            }
+        }
+
+        match build_asr_engine_with_fallback(&config, true) {
+            Ok(engine) => {
+                log_asr_runtime("预览运行时已启用", engine.as_ref());
+                let mut guard = preview_asr_runtime.lock();
+                if guard.is_none() {
+                    *guard = Some(engine);
+                }
+            }
+            Err(e) => {
+                warn!("ASR 预览运行时初始化失败: {}，将禁用流式预览", e);
+            }
+        }
+    });
+}
+
+fn ensure_main_asr_runtime_ready(
+    config_path: &str,
+    asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
+) -> bool {
+    if asr_runtime.lock().is_some() {
+        return true;
+    }
+
+    info!("ASR 运行时未就绪，尝试按需初始化主转写引擎");
+    let cfg = match config::Config::load(config_path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            warn!("读取配置失败，无法按需初始化 ASR: {}", err);
+            return false;
+        }
+    };
+
+    match build_asr_engine_with_fallback(&cfg, false) {
+        Ok(engine) => {
+            log_asr_runtime("主转写运行时已按需初始化", engine.as_ref());
+            let mut guard = asr_runtime.lock();
+            if guard.is_none() {
+                *guard = Some(engine);
+            }
+            true
+        }
+        Err(err) => {
+            warn!("按需初始化 ASR 失败: {}", err);
+            false
+        }
+    }
+}
+
 fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewrite> {
     if !llm_cfg.enabled {
         return None;
@@ -1278,7 +1356,14 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         guard.is_enabled()
     };
     if status_indicator_enabled {
-        info!("状态栏反馈已启用: macOS 菜单栏");
+        let indicator_surface = if cfg!(target_os = "macos") {
+            "macOS 菜单栏"
+        } else if cfg!(target_os = "linux") {
+            "Linux 托盘"
+        } else {
+            "状态栏"
+        };
+        info!("状态栏反馈已启用: {}", indicator_surface);
         set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
         let snapshot = menu_snapshot_state.lock().clone();
         let mut guard = status_indicator.lock();
@@ -1325,29 +1410,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         }
     }
 
-    let asr_runtime = match build_asr_engine_with_fallback(&config, false) {
-        Ok(engine) => {
-            log_asr_runtime("主转写运行时已启用", engine.as_ref());
-            info!("ASR 运行时已初始化");
-            Some(engine)
-        }
-        Err(e) => {
-            warn!("ASR 初始化失败: {}，语音转写功能不可用", e);
-            None
-        }
-    };
-    let asr_runtime = Arc::new(Mutex::new(asr_runtime));
-    let preview_asr_runtime = match build_asr_engine_with_fallback(&config, true) {
-        Ok(engine) => {
-            log_asr_runtime("预览运行时已启用", engine.as_ref());
-            Some(engine)
-        }
-        Err(e) => {
-            warn!("ASR 预览运行时初始化失败: {}，将禁用流式预览", e);
-            None
-        }
-    };
-    let preview_asr_runtime = Arc::new(Mutex::new(preview_asr_runtime));
+    let asr_runtime = Arc::new(Mutex::new(None::<Box<dyn asr::AsrEngine>>));
+    let preview_asr_runtime = Arc::new(Mutex::new(None::<Box<dyn asr::AsrEngine>>));
+    info!("ASR 运行时将后台初始化，热键与录音会先启动");
 
     let llm = if config.llm.enabled {
         match build_llm_runtime(&config.llm) {
@@ -1477,17 +1542,13 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             info!("开始录音...");
             set_status_indicator_state(
                 &status_indicator_on_start,
-                status_indicator::IndicatorState::RecordingStart,
+                status_indicator::IndicatorState::Recording,
             );
             match recorder_start.start() {
                 Ok(_) => {
                     is_recording_start.store(true, Ordering::SeqCst);
                     *stop_debounce_on_start.lock() =
                         Some(Instant::now() + stop_press_debounce_window);
-                    set_status_indicator_state(
-                        &status_indicator_on_start,
-                        status_indicator::IndicatorState::Recording,
-                    );
                     play_feedback_sound(
                         sound_feedback_on_start,
                         FeedbackSoundEvent::RecordingStart,
@@ -1618,6 +1679,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let is_recording_stop = is_recording.clone();
     let vad_triggered_stop = vad_triggered.clone();
     let recording_animation_stop = recording_animation.clone();
+    let config_path_on_stop = config_path.to_string();
     let desktop_notify_on_stop = desktop_notify_enabled;
     let sound_feedback_on_stop = sound_feedback_enabled;
     let status_indicator_on_stop = status_indicator.clone();
@@ -1665,6 +1727,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
             let ok = process_audio(
                 &audio_data,
+                &config_path_on_stop,
                 &asr_runtime_on_stop,
                 &llm_stop,
                 &post_processor_stop,
@@ -1786,6 +1849,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let vad_is_recording = is_recording.clone();
         let vad_triggered_callback = vad_triggered.clone();
         let vad_recording_animation = recording_animation.clone();
+        let config_path_on_vad = config_path.to_string();
         let desktop_notify_on_vad = desktop_notify_enabled;
         let sound_feedback_on_vad = sound_feedback_enabled;
         let status_indicator_on_vad = status_indicator.clone();
@@ -1836,6 +1900,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             desktop_notify(desktop_notify_on_vad, "EchoPup", "识别中...");
             let ok = process_audio(
                 &audio_data,
+                &config_path_on_vad,
                 &vad_asr_runtime,
                 &vad_llm,
                 &vad_post_processor,
@@ -1876,6 +1941,11 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     hotkey.on_press(press_callback);
     hotkey.on_release(release_callback);
     hotkey.start()?;
+    spawn_background_asr_runtime_init(
+        config.clone(),
+        asr_runtime.clone(),
+        preview_asr_runtime.clone(),
+    );
 
     // ===== 设置 Ctrl+C 信号处理 =====
     let (tx, rx) = mpsc::channel::<()>();
