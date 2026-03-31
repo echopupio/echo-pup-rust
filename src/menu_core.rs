@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::config::Config;
@@ -248,8 +249,12 @@ impl MenuCore {
                     EditableField::LlmApiBase => self.config.llm.api_base = trimmed,
                     EditableField::LlmApiKeyEnv => self.config.llm.api_key_env = trimmed,
                     EditableField::WhisperModelPath => {
+                        if !Path::new(&trimmed).is_file() {
+                            return Err(anyhow!("Whisper 模型文件不存在: {}", trimmed));
+                        }
                         self.config.whisper.model_path = trimmed;
                         self.config.whisper.performance_profile = None;
+                        self.config.whisper.apply_model_path_defaults();
                     }
                 }
 
@@ -292,8 +297,12 @@ impl MenuCore {
                 if model_path.is_empty() {
                     return Err(anyhow!("Whisper 模型路径不能为空"));
                 }
+                if !Path::new(&model_path).is_file() {
+                    return Err(anyhow!("Whisper 模型文件不存在: {}", model_path));
+                }
                 self.config.whisper.model_path = model_path.clone();
                 self.config.whisper.performance_profile = None;
+                self.config.whisper.apply_model_path_defaults();
                 self.persist_config()?;
                 self.status = format!("Whisper 模型已切换到 {}（已自动保存）", model_path);
                 Ok(self.status.clone())
@@ -473,6 +482,18 @@ mod tests {
         std::env::temp_dir().join(file).display().to_string()
     }
 
+    fn temp_model_path(file_name: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("echopup-menu-core-model-{}", nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file_name);
+        std::fs::write(&path, b"test").unwrap();
+        path.display().to_string()
+    }
+
     #[test]
     fn test_menu_toggle_switches() {
         let mut core = MenuCore::new("/tmp/echopup-menu-core-toggle.toml").unwrap();
@@ -604,5 +625,46 @@ mod tests {
 
         assert!(r.ok);
         assert!(r.message.contains("已有下载任务进行中"));
+    }
+
+    #[test]
+    fn test_switch_whisper_model_requires_existing_file() {
+        let config_path = temp_config_path("switch-whisper-missing");
+        let mut core = MenuCore::new(&config_path).unwrap();
+
+        let missing_path = std::env::temp_dir()
+            .join("echopup-missing-medium.bin")
+            .display()
+            .to_string();
+        let r = core.execute(MenuAction::SwitchWhisperModel {
+            model_path: missing_path.clone(),
+        });
+        assert!(!r.ok);
+        assert!(r.message.contains("Whisper 模型文件不存在"));
+
+        let _ = std::fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn test_switch_whisper_model_applies_model_defaults() {
+        let config_path = temp_config_path("switch-whisper-medium");
+        let mut core = MenuCore::new(&config_path).unwrap();
+        let model_path = temp_model_path("ggml-medium.bin");
+
+        let r = core.execute(MenuAction::SwitchWhisperModel {
+            model_path: model_path.clone(),
+        });
+        assert!(r.ok);
+
+        let reloaded = Config::load(&config_path).unwrap();
+        assert_eq!(reloaded.whisper.model_path, model_path);
+        assert!(reloaded.whisper.performance_profile.is_none());
+        assert_eq!(
+            reloaded.whisper.decoding_strategy,
+            crate::config::WhisperDecodingStrategy::Greedy
+        );
+        assert_eq!(reloaded.whisper.greedy_best_of, 1);
+
+        let _ = std::fs::remove_file(&config_path);
     }
 }

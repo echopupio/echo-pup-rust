@@ -1,15 +1,67 @@
 //! 键盘输入模拟
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use enigo::Enigo;
 use tracing::{error, info, warn};
 
+enum KeyboardBackend {
+    Enigo(Enigo),
+    #[cfg(target_os = "linux")]
+    LinuxCommand(LinuxTypingBackend),
+    Unavailable(String),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+enum LinuxTypingBackend {
+    Xdotool,
+    Wtype,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxTypingBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Xdotool => "xdotool",
+            Self::Wtype => "wtype",
+        }
+    }
+
+    fn type_text(self, text: &str) -> Result<()> {
+        let mut command = match self {
+            Self::Xdotool => {
+                let mut command = std::process::Command::new("xdotool");
+                command
+                    .arg("type")
+                    .arg("--clearmodifiers")
+                    .arg("--delay")
+                    .arg("1")
+                    .arg("--")
+                    .arg(text);
+                command
+            }
+            Self::Wtype => {
+                let mut command = std::process::Command::new("wtype");
+                command.arg(text);
+                command
+            }
+        };
+        let status = command
+            .status()
+            .with_context(|| format!("执行 {} 失败", self.label()))?;
+        if !status.success() {
+            return Err(anyhow!("{} 返回非零状态: {}", self.label(), status));
+        }
+        Ok(())
+    }
+}
+
 pub struct Keyboard {
-    enigo: Enigo,
+    backend: KeyboardBackend,
 }
 
 impl Keyboard {
-    /// 创建新的键盘实例（带重试机制）
+    /// 创建新的键盘实例（优先 enigo，Linux 下自动回退 xdotool / wtype）
     pub fn new() -> Result<Self> {
         let max_retries = 3;
         let mut last_error = None;
@@ -18,7 +70,9 @@ impl Keyboard {
             match Enigo::new(&enigo::Settings::default()) {
                 Ok(enigo) => {
                     info!("键盘输入初始化成功 (尝试 {}/{})", attempt, max_retries);
-                    return Ok(Self { enigo });
+                    return Ok(Self {
+                        backend: KeyboardBackend::Enigo(enigo),
+                    });
                 }
                 Err(e) => {
                     last_error = Some(e);
@@ -33,15 +87,46 @@ impl Keyboard {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if let Some(backend) = detect_linux_command_backend() {
+            warn!(
+                "enigo 初始化失败，回退到 Linux 命令输入后端: {}",
+                backend.label()
+            );
+            return Ok(Self {
+                backend: KeyboardBackend::LinuxCommand(backend),
+            });
+        }
+
+        let reason = format!("键盘初始化失败: {:?}", last_error);
         error!("键盘输入初始化最终失败: {:?}", last_error);
-        Err(anyhow::anyhow!("键盘初始化失败: {:?}", last_error))
+        warn!("键盘输入将以禁用模式继续启动");
+        Ok(Self {
+            backend: KeyboardBackend::Unavailable(reason),
+        })
+    }
+
+    pub fn backend_name(&self) -> &str {
+        match &self.backend {
+            KeyboardBackend::Enigo(_) => "enigo",
+            #[cfg(target_os = "linux")]
+            KeyboardBackend::LinuxCommand(backend) => backend.label(),
+            KeyboardBackend::Unavailable(_) => "unavailable",
+        }
     }
 
     /// 输入文本
     pub fn type_text(&mut self, text: &str) -> Result<()> {
-        use enigo::Keyboard;
-        self.enigo.text(text)?;
-        Ok(())
+        match &mut self.backend {
+            KeyboardBackend::Enigo(enigo) => {
+                use enigo::Keyboard as _;
+                enigo.text(text)?;
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            KeyboardBackend::LinuxCommand(backend) => backend.type_text(text),
+            KeyboardBackend::Unavailable(reason) => Err(anyhow!("键盘输入不可用: {}", reason)),
+        }
     }
 }
 
@@ -49,4 +134,29 @@ impl Default for Keyboard {
     fn default() -> Self {
         Self::new().unwrap()
     }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_command_backend() -> Option<LinuxTypingBackend> {
+    if command_exists("xdotool") {
+        return Some(LinuxTypingBackend::Xdotool);
+    }
+    if command_exists("wtype") {
+        return Some(LinuxTypingBackend::Wtype);
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn command_exists(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.contains('/') {
+        return std::path::Path::new(name).is_file();
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| dir.join(name).is_file())
 }

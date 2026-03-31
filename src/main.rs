@@ -177,6 +177,84 @@ fn format_partial_status(text: &str) -> String {
     }
 }
 
+fn whisper_model_display_name(model_path: &str) -> String {
+    Path::new(model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(model_path)
+        .to_string()
+}
+
+fn whisper_strategy_label(strategy: stt::DecodingStrategy) -> &'static str {
+    match strategy {
+        stt::DecodingStrategy::Greedy { .. } => "greedy",
+        stt::DecodingStrategy::BeamSearch { .. } => "beam_search",
+    }
+}
+
+fn whisper_fallback_candidates(file_name: &str) -> Vec<&'static str> {
+    match file_name {
+        "ggml-medium.bin" => vec![
+            "ggml-medium.bin",
+            "ggml-large-v3-turbo.bin",
+            "ggml-large-v3.bin",
+        ],
+        "ggml-large-v3-turbo.bin" => vec![
+            "ggml-large-v3-turbo.bin",
+            "ggml-medium.bin",
+            "ggml-large-v3.bin",
+        ],
+        "ggml-large-v3.bin" => vec![
+            "ggml-large-v3.bin",
+            "ggml-large-v3-turbo.bin",
+            "ggml-medium.bin",
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_runtime_model_path(model_path: &str) -> Result<String> {
+    let requested_path = Path::new(model_path);
+    if requested_path.is_file() {
+        return Ok(model_path.to_string());
+    }
+
+    let requested_name = requested_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("未找到 Whisper 模型: {}", model_path))?;
+    let parent_dir = requested_path.parent();
+    for candidate in whisper_fallback_candidates(requested_name) {
+        if let Some(parent_dir) = parent_dir {
+            let candidate_path = parent_dir.join(candidate);
+            if candidate_path.is_file() {
+                return Ok(candidate_path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    if let Ok(model_dir) = runtime::model_dir() {
+        for candidate in whisper_fallback_candidates(requested_name) {
+            let candidate_path = model_dir.join(candidate);
+            if candidate_path.is_file() {
+                return Ok(candidate_path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("未找到 Whisper 模型: {}", model_path))
+}
+
+fn log_whisper_runtime(label: &str, whisper: &stt::WhisperSTT) {
+    info!(
+        "Whisper {}: model={}, strategy={}, threads={}",
+        label,
+        whisper_model_display_name(whisper.model_path()),
+        whisper_strategy_label(whisper.decoding_strategy()),
+        whisper.n_threads()
+    );
+}
+
 fn trim_audio_tail(mut audio: Vec<f32>, max_samples: usize) -> Vec<f32> {
     if audio.len() <= max_samples {
         return audio;
@@ -235,10 +313,16 @@ fn process_audio(
     let mut final_text = String::new();
     let mut transcribe_success = false;
     let stt_start = Instant::now();
+    let mut stt_model = "uninitialized".to_string();
+    let mut stt_strategy = "unknown".to_string();
+    let mut stt_threads = 0;
 
     {
         let mut whisper_guard = whisper.lock();
         if let Some(ref mut whisper) = *whisper_guard {
+            stt_model = whisper_model_display_name(whisper.model_path());
+            stt_strategy = whisper_strategy_label(whisper.decoding_strategy()).to_string();
+            stt_threads = whisper.n_threads();
             match whisper.transcribe(processed_audio) {
                 Ok(text) => {
                     // 过滤无效结果
@@ -269,8 +353,11 @@ fn process_audio(
             "语音识别失败，请查看日志",
         );
         info!(
-            "[{}] 性能埋点: stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
+            "[{}] 性能埋点: model={} strategy={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
             trigger_type,
+            stt_model,
+            stt_strategy,
+            stt_threads,
             stt_ms,
             llm_ms,
             postprocess_ms,
@@ -336,8 +423,11 @@ fn process_audio(
     type_ms = type_start.elapsed().as_millis();
 
     info!(
-        "[{}] 性能埋点: stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
+        "[{}] 性能埋点: model={} strategy={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
         trigger_type,
+        stt_model,
+        stt_strategy,
+        stt_threads,
         stt_ms,
         llm_ms,
         postprocess_ms,
@@ -807,27 +897,38 @@ fn run_ui_foreground(config_path: &str) -> Result<()> {
 }
 
 fn build_whisper_stt(whisper_cfg: &config::config::WhisperConfig) -> Result<stt::WhisperSTT> {
+    let mut runtime_cfg = whisper_cfg.clone();
+    let resolved_model_path = resolve_runtime_model_path(&runtime_cfg.model_path)?;
+    if resolved_model_path != runtime_cfg.model_path {
+        warn!(
+            "Whisper 模型 {} 不存在，自动回退到 {}",
+            runtime_cfg.model_path, resolved_model_path
+        );
+        runtime_cfg.model_path = resolved_model_path;
+    }
+    runtime_cfg.sync_model_path_defaults_if_generic();
+
     let mut w = stt::WhisperSTT::with_options(
-        &whisper_cfg.model_path,
-        whisper_cfg.language.clone(),
-        whisper_cfg.translate,
+        &runtime_cfg.model_path,
+        runtime_cfg.language.clone(),
+        runtime_cfg.translate,
     )?;
 
-    let strategy = match whisper_cfg.decoding_strategy.clone() {
+    let strategy = match runtime_cfg.decoding_strategy.clone() {
         config::WhisperDecodingStrategy::Greedy => stt::DecodingStrategy::Greedy {
-            best_of: whisper_cfg.greedy_best_of,
+            best_of: runtime_cfg.greedy_best_of,
         },
         config::WhisperDecodingStrategy::BeamSearch => stt::DecodingStrategy::BeamSearch {
-            beam_size: whisper_cfg.beam_size,
+            beam_size: runtime_cfg.beam_size,
         },
     };
     w.set_decoding_strategy(strategy);
-    w.set_temperature(whisper_cfg.temperature);
-    w.set_no_context(whisper_cfg.no_context);
-    w.set_suppress_nst(whisper_cfg.suppress_nst);
-    w.set_n_threads(whisper_cfg.resolved_n_threads());
-    w.set_initial_prompt(whisper_cfg.initial_prompt.clone());
-    w.set_hotwords(whisper_cfg.hotwords.clone());
+    w.set_temperature(runtime_cfg.temperature);
+    w.set_no_context(runtime_cfg.no_context);
+    w.set_suppress_nst(runtime_cfg.suppress_nst);
+    w.set_n_threads(runtime_cfg.resolved_n_threads());
+    w.set_initial_prompt(runtime_cfg.initial_prompt.clone());
+    w.set_hotwords(runtime_cfg.hotwords.clone());
     Ok(w)
 }
 
@@ -916,15 +1017,21 @@ fn apply_runtime_menu_action(
             let whisper_cfg = cfg.whisper.effective();
             match build_whisper_stt(&whisper_cfg) {
                 Ok(new_whisper) => {
+                    log_whisper_runtime("主转写运行时已热更新", &new_whisper);
                     let mut guard = whisper_runtime.lock();
                     *guard = Some(new_whisper);
                     drop(guard);
                     let mut callback_guard = whisper_callback_runtime.lock();
                     *callback_guard = build_preview_whisper_stt(&whisper_cfg).ok();
-                    info!("Whisper 模型已热更新: {}", whisper_cfg.model_path);
                 }
                 Err(err) => {
                     warn!("Whisper 热更新失败: {}", err);
+                    if let Some(current) = whisper_runtime.lock().as_ref() {
+                        warn!(
+                            "Whisper 热更新失败后继续使用当前模型: {}",
+                            whisper_model_display_name(current.model_path())
+                        );
+                    }
                 }
             }
         }
@@ -971,15 +1078,21 @@ fn apply_runtime_menu_action(
             let whisper_cfg = cfg.whisper.effective();
             match build_whisper_stt(&whisper_cfg) {
                 Ok(new_whisper) => {
+                    log_whisper_runtime("主转写运行时已重载", &new_whisper);
                     let mut guard = whisper_runtime.lock();
                     *guard = Some(new_whisper);
                     drop(guard);
                     let mut callback_guard = whisper_callback_runtime.lock();
                     *callback_guard = build_preview_whisper_stt(&whisper_cfg).ok();
-                    info!("Whisper 配置已重载: {}", whisper_cfg.model_path);
                 }
                 Err(err) => {
                     warn!("Whisper 重载失败: {}", err);
+                    if let Some(current) = whisper_runtime.lock().as_ref() {
+                        warn!(
+                            "Whisper 重载失败后继续使用当前模型: {}",
+                            whisper_model_display_name(current.model_path())
+                        );
+                    }
                 }
             }
 
@@ -1117,11 +1230,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     let whisper = match build_whisper_stt(&whisper_cfg) {
         Ok(w) => {
-            info!(
-                "Whisper 线程数: {} (配置: {:?})",
-                whisper_cfg.resolved_n_threads(),
-                whisper_cfg.n_threads
-            );
+            log_whisper_runtime("主转写运行时已启用", &w);
+            info!("Whisper 线程配置: {:?}", whisper_cfg.n_threads);
             info!("Whisper 已初始化");
             Some(w)
         }
@@ -1184,7 +1294,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         error!("键盘输入初始化失败: {}", e);
         e
     })?));
-    info!("键盘输入已初始化");
+    info!("键盘输入已初始化: {}", keyboard.lock().backend_name());
 
     let (desktop_notify_enabled, notify_desc) = detect_desktop_notify_capability();
     if desktop_notify_enabled {

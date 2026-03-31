@@ -406,6 +406,16 @@ impl WhisperSTT {
         &self.model_path
     }
 
+    /// 获取当前解码策略
+    pub fn decoding_strategy(&self) -> DecodingStrategy {
+        self.decoding_strategy
+    }
+
+    /// 获取当前线程数
+    pub fn n_threads(&self) -> i32 {
+        self.n_threads
+    }
+
     /// 设置语言
     pub fn set_language(&mut self, language: Option<String>) {
         self.language = language;

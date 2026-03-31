@@ -3,7 +3,7 @@
 use crate::hotkey;
 use crate::menu_core::{
     model_size_from_file_name, whisper_model_path_from_file_name, EditableField, MenuAction,
-    MenuCore, DOWNLOAD_MODEL_SIZES, MENU_ITEMS, WHISPER_MODEL_FILES,
+    MenuCore, DOWNLOAD_MODEL_SIZES, MENU_ITEMS,
 };
 use crate::model_download;
 use anyhow::{anyhow, Context, Result};
@@ -530,15 +530,10 @@ fn switch_whisper_model(app: &mut AppState) {
         .into_iter()
         .filter(|name| name.ends_with(".bin"))
         .collect::<Vec<_>>();
-    for model in WHISPER_MODEL_FILES {
-        if !options.iter().any(|m| m == model) {
-            options.push(model.to_string());
-        }
-    }
     options.sort();
     options.dedup();
     if options.is_empty() {
-        app.menu.set_status("未发现可切换的 Whisper 模型");
+        app.menu.set_status("未发现已下载的 Whisper 模型");
         return;
     }
 

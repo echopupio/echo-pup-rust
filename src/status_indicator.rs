@@ -1540,13 +1540,11 @@ mod menu_bridge {
             .filter(|name| name.ends_with(".bin"))
             .cloned()
             .collect::<Vec<_>>();
-        for model in WHISPER_MODEL_FILES {
-            if !options.iter().any(|m| m == model) {
-                options.push(model.to_string());
-            }
-        }
         options.sort();
         options.dedup();
+        if options.is_empty() {
+            return None;
+        }
 
         let current = current_whisper_model_name(snapshot);
         let default = if options.iter().any(|m| m == &current) {
@@ -3551,7 +3549,14 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         .file_name()
         .and_then(|v| v.to_str())
         .unwrap_or_default();
+    let available_models = snapshot
+        .local_models
+        .iter()
+        .filter(|name| name.ends_with(".bin"))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     for (model_file, item) in &handles.switch_model {
+        item.set_enabled(available_models.contains(model_file));
         item.set_checked(model_file == current_model);
     }
 

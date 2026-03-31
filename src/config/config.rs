@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 全局配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,7 +144,7 @@ pub struct WhisperConfig {
 }
 
 /// Whisper 解码策略
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WhisperDecodingStrategy {
     Greedy,
@@ -175,6 +175,17 @@ impl Default for WhisperThreadSetting {
 }
 
 impl WhisperThreadSetting {
+    fn auto_cap() -> i32 {
+        #[cfg(target_os = "linux")]
+        {
+            8
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            i32::MAX
+        }
+    }
+
     /// 解析最终线程数
     pub fn resolve(&self) -> i32 {
         match self {
@@ -184,11 +195,12 @@ impl WhisperThreadSetting {
                     std::thread::available_parallelism()
                         .map(|n| n.get() as i32)
                         .unwrap_or(4)
+                        .min(Self::auto_cap())
                         .max(1)
                 } else if let Ok(parsed) = mode.parse::<i32>() {
                     parsed.max(1)
                 } else {
-                    4
+                    4.min(Self::auto_cap()).max(1)
                 }
             }
         }
@@ -232,6 +244,46 @@ impl Default for WhisperConfig {
 }
 
 impl WhisperConfig {
+    fn model_file_name(&self) -> Option<&str> {
+        Path::new(&self.model_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+    }
+
+    fn has_generic_default_strategy(&self) -> bool {
+        self.decoding_strategy == WhisperDecodingStrategy::BeamSearch
+            && self.beam_size == 5
+            && self.greedy_best_of == 5
+    }
+
+    pub fn apply_model_path_defaults(&mut self) -> bool {
+        match self.model_file_name() {
+            Some("ggml-large-v3.bin") => {
+                self.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
+                self.beam_size = 5;
+                true
+            }
+            Some("ggml-large-v3-turbo.bin") => {
+                self.decoding_strategy = WhisperDecodingStrategy::Greedy;
+                self.greedy_best_of = 2;
+                true
+            }
+            Some("ggml-medium.bin") => {
+                self.decoding_strategy = WhisperDecodingStrategy::Greedy;
+                self.greedy_best_of = 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn sync_model_path_defaults_if_generic(&mut self) -> bool {
+        if !self.has_generic_default_strategy() {
+            return false;
+        }
+        self.apply_model_path_defaults()
+    }
+
     /// 根据性能档位生成生效配置
     pub fn effective(&self) -> Self {
         let mut effective = self.clone();
@@ -254,6 +306,8 @@ impl WhisperConfig {
                     effective.greedy_best_of = 1;
                 }
             }
+        } else {
+            effective.sync_model_path_defaults_if_generic();
         }
 
         effective
@@ -434,5 +488,40 @@ mod tests {
         whisper.performance_profile = Some(WhisperPerformanceProfile::Fast);
         let effective = whisper.effective();
         assert!(Path::new(&effective.model_path).ends_with(".echopup/models/ggml-medium.bin"));
+        assert_eq!(effective.decoding_strategy, WhisperDecodingStrategy::Greedy);
+        assert_eq!(effective.greedy_best_of, 1);
+    }
+
+    #[test]
+    fn test_effective_syncs_medium_defaults_when_strategy_is_legacy_default() {
+        let mut whisper = WhisperConfig::default();
+        whisper.model_path = default_whisper_model_path("ggml-medium.bin");
+        let effective = whisper.effective();
+        assert_eq!(effective.decoding_strategy, WhisperDecodingStrategy::Greedy);
+        assert_eq!(effective.greedy_best_of, 1);
+    }
+
+    #[test]
+    fn test_effective_preserves_custom_strategy_without_profile() {
+        let mut whisper = WhisperConfig::default();
+        whisper.model_path = default_whisper_model_path("ggml-medium.bin");
+        whisper.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
+        whisper.beam_size = 3;
+        whisper.greedy_best_of = 9;
+        let effective = whisper.effective();
+        assert_eq!(
+            effective.decoding_strategy,
+            WhisperDecodingStrategy::BeamSearch
+        );
+        assert_eq!(effective.beam_size, 3);
+        assert_eq!(effective.greedy_best_of, 9);
+    }
+
+    #[test]
+    fn test_auto_thread_setting_respects_platform_cap() {
+        let resolved = WhisperThreadSetting::Mode("auto".to_string()).resolve();
+        assert!(resolved >= 1);
+        #[cfg(target_os = "linux")]
+        assert!(resolved <= 8);
     }
 }
