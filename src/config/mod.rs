@@ -2,4 +2,6 @@
 
 pub mod config;
 
-pub use config::{Config, HotkeyTriggerMode, TextCorrectionConfig, WhisperDecodingStrategy};
+pub use config::{
+    AsrBackend, Config, HotkeyTriggerMode, TextCorrectionConfig, WhisperDecodingStrategy,
+};

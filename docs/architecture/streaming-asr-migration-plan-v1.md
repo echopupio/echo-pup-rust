@@ -2,6 +2,33 @@
 
 最后更新：2026-03-31
 
+## 实施进展（截至 2026-03-31）
+
+当前方案已从“纯规划”进入“代码实施中”：
+
+- 已完成：
+  - `AsrEngine` / `AsrSession` / `TextCommitBackend` 抽象落地。
+  - `RecognitionSession`、partial manager、final manager 落地。
+  - `AudioRecorder` 增加 recent buffer、增量读口与 preview 本地窗口推进。
+  - preview 识别链路改为增量音频喂 `AsrSession`。
+  - final 识别链路统一改为 `AsrSession::finalize()`。
+  - 配置新增 `asr.backend` 和 `asr.sherpa.*`，允许 sherpa 初始化失败时自动回退到 Whisper。
+  - `sherpa-onnx` crate 已接入，`SherpaSenseVoiceEngine` 已以 `OfflineRecognizer + incremental session` 形式实现第一版 backend 骨架。
+- 仍未完成：
+  - 真实 `SenseVoiceSmall` 模型与 `tokens.txt` 的本机冒烟。
+  - 固定 WAV 基线与手工口述回归。
+  - `first_partial_ms` / `final_after_silence_ms` / 热键释放到最终提交延迟的量化记录。
+  - `main.rs` 中 session orchestration 的独立模块化。
+  - 真正在线 SenseVoice 能力确认；当前 sherpa 方案仍属过渡实现。
+
+### 紧接着要做什么
+
+1. 准备并配置真实 `SenseVoiceSmall` 模型目录，完成 sherpa backend 首次本机录音验证。
+2. 增加固定 WAV 基线和手工录音回归，明确 Whisper 与 sherpa 的输出差异与时延。
+3. 把录音生命周期与 preview/final 编排从 `main.rs` 抽出为 `session_control`。
+4. 判断是否继续沿用当前 sherpa 过渡方案，还是切换到具备真在线能力的 backend / FFI 路径。
+5. 在识别链路稳定后，再推进宿主草稿替换和更丰富的 partial/final 交互策略。
+
 ## 1. 背景与目标
 
 当前项目的语音输入主链路已可用，但现状仍以 `Whisper` 停录后整段转写为主，主要瓶颈集中在：

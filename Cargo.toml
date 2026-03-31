@@ -55,6 +55,7 @@ dirs = "5.0"
 parking_lot = "0.12"
 ctrlc = "3.2"
 fs2 = "0.4"
+sherpa-onnx = "1.12.33"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 rdev = "0.5"

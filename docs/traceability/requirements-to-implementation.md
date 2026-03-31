@@ -18,7 +18,7 @@
 | R-012 | 录音过程中实时输出识别文本（流式转写预览） | `docs/changes/R-012-streaming-transcription.md` | `src/main.rs`, `src/stt/whisper.rs`, `src/audio/recorder.rs` | `cargo build` | 已实现 |
 | R-013 | Linux 状态栏菜单（GNOME/X11） | `docs/changes/R-013-Linux-vs-macOS-comparison.md` | `src/status_indicator.rs` | `review-20260323-01` | 已实现（含待修复项） |
 | R-014 | 模型下载 aria2 风格高速并发下载 | `docs/changes/R-014-aria2-style-model-download.md` | `src/model_download.rs`, `src/menu_core.rs`, `src/status_indicator.rs`, `src/ui.rs` | 待实现：`cargo test -q` + 下载回归（并发 / 降级 / 恢复） | 规划中 |
-| R-015 | 本地 STT 主链路迁移到 `sherpa-onnx + SenseVoiceSmall`，支持 partial / final 双阶段输出并优先优化中文实时性 | `docs/architecture/streaming-asr-migration-plan-v1.md`；`docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md` | 规划代码位置：`src/asr/*`, `src/session/*`, `src/commit/*`, `src/audio/*`, `src/vad/*`, `src/main.rs` | 待实现：固定 WAV 基线、手工口述回归、`first_partial_ms` / `final_after_silence_ms` 指标验证 | 规划中 |
+| R-015 | 本地 STT 主链路迁移到 `sherpa-onnx + SenseVoiceSmall`，支持 partial / final 双阶段输出并优先优化中文实时性 | `docs/architecture/streaming-asr-migration-plan-v1.md`；`docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`；`docs/architecture/technical-solution-v1.md` 第 5/7 节 | 已落地：`src/asr/*`, `src/session/*`, `src/commit/*`, `src/audio/*`, `src/main.rs`；待继续：`src/vad/*`, `session_control` 抽离 | 已有证据：`cargo test -q`（56 passed）；待补：真实 SenseVoice 模型冒烟、固定 WAV 基线、手工口述回归、`first_partial_ms` / `final_after_silence_ms` 指标验证 | 实施中 |
 
 ## 说明
 

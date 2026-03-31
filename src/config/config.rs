@@ -14,6 +14,8 @@ pub struct Config {
     pub hotkey: HotkeyConfig,
     /// 音频配置
     pub audio: AudioConfig,
+    /// ASR 后端选择与运行时配置
+    pub asr: AsrConfig,
     /// Whisper 配置
     pub whisper: WhisperConfig,
     /// LLM 配置
@@ -29,6 +31,7 @@ impl Default for Config {
         Self {
             hotkey: HotkeyConfig::default(),
             audio: AudioConfig::default(),
+            asr: AsrConfig::default(),
             whisper: WhisperConfig::default(),
             llm: LLMConfig::default(),
             text_correction: TextCorrectionConfig::default(),
@@ -107,6 +110,80 @@ impl Default for AudioConfig {
             channels: 1,
             vad_enabled: false, // 默认关闭 VAD
             vad_silence_threshold_ms: 1500,
+        }
+    }
+}
+
+/// ASR 后端类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrBackend {
+    Whisper,
+    SherpaSenseVoice,
+}
+
+impl Default for AsrBackend {
+    fn default() -> Self {
+        Self::Whisper
+    }
+}
+
+impl AsrBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Whisper => "Whisper",
+            Self::SherpaSenseVoice => "Sherpa SenseVoice",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AsrConfig {
+    /// 当前启用的本地 ASR 后端
+    pub backend: AsrBackend,
+    /// 选中 sherpa 失败时，是否自动回退到 whisper
+    pub allow_fallback_to_whisper: bool,
+    /// sherpa-onnx + SenseVoice 配置
+    pub sherpa: SherpaConfig,
+}
+
+impl Default for AsrConfig {
+    fn default() -> Self {
+        Self {
+            backend: AsrBackend::Whisper,
+            allow_fallback_to_whisper: true,
+            sherpa: SherpaConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SherpaConfig {
+    /// SenseVoiceSmall 模型文件
+    pub model_path: String,
+    /// tokens 文件
+    pub tokens_path: String,
+    /// 语言，None 表示 auto
+    pub language: Option<String>,
+    /// 是否启用 ITN
+    pub use_itn: bool,
+    /// 推理 provider，默认 cpu
+    pub provider: Option<String>,
+    /// 推理线程数
+    pub num_threads: i32,
+}
+
+impl Default for SherpaConfig {
+    fn default() -> Self {
+        Self {
+            model_path: default_sensevoice_model_path("model.onnx"),
+            tokens_path: default_sensevoice_model_path("tokens.txt"),
+            language: Some("zh".to_string()),
+            use_itn: true,
+            provider: Some("cpu".to_string()),
+            num_threads: default_asr_num_threads(),
         }
     }
 }
@@ -221,6 +298,25 @@ fn default_whisper_model_path(file_name: &str) -> String {
         .join(file_name)
         .to_string_lossy()
         .into_owned()
+}
+
+fn default_sensevoice_model_path(file_name: &str) -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".echopup")
+        .join("models")
+        .join("asr")
+        .join("sensevoice-small")
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn default_asr_num_threads() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4)
+        .clamp(1, 8)
 }
 
 impl Default for WhisperConfig {
@@ -474,12 +570,16 @@ mod tests {
         assert_eq!(config.hotkey.key, "ctrl+space");
         assert_eq!(config.hotkey.trigger_mode, HotkeyTriggerMode::PressToToggle);
         assert_eq!(config.audio.sample_rate, 16000);
+        assert_eq!(config.asr.backend, AsrBackend::Whisper);
+        assert!(config.asr.allow_fallback_to_whisper);
         assert!(config.feedback.status_bar_enabled);
         assert!(config.feedback.sound_enabled);
         assert!(config.feedback.notify_tip_on_start);
         assert!(
             Path::new(&config.whisper.model_path).ends_with(".echopup/models/ggml-large-v3.bin")
         );
+        assert!(Path::new(&config.asr.sherpa.model_path)
+            .ends_with(".echopup/models/asr/sensevoice-small/model.onnx"));
     }
 
     #[test]

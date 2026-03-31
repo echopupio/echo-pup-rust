@@ -8,6 +8,7 @@
 
 - 沉淀“Whisper -> sherpa-onnx + SenseVoiceSmall”流式迁移方案，作为下一阶段语音输入主链路重构基线。
 - 将迁移方向正式纳入 ADR、PRD、技术方案、性能路线图、追踪矩阵与治理台账。
+- 启动代码实施：抽象 ASR/session 边界、重构 partial/final 状态、引入增量音频读口、接入可配置的 sherpa backend 骨架。
 
 ## 文档变化
 
@@ -26,6 +27,12 @@
   - `docs/adr/README.md`
   - `docs/reports/project-court-ledger.md`
   - `docs/human-doc/TECH.md`
+- 本次继续更新实施进度与后续动作：
+  - `docs/architecture/streaming-asr-migration-plan-v1.md`
+  - `docs/architecture/technical-solution-v1.md`
+  - `docs/traceability/requirements-to-implementation.md`
+  - `docs/reports/project-court-ledger.md`
+  - `docs/human-doc/TECH.md`
 
 ## 方案要点
 
@@ -36,13 +43,25 @@
 
 ## 当前状态说明
 
-- 本轮变更为“文档与架构决策沉淀”，尚未完成代码实现切换。
-- 现态代码仍以当前 Whisper 链路为准。
+- 当前已进入代码实施阶段，但仍处于“Whisper 主链路可用 + sherpa backend 已接骨架”的过渡期。
+- 已落地内容：
+  - `AsrEngine` / `AsrSession` / `TextCommitBackend` 抽象已从 `main.rs` 中剥离。
+  - `RecognitionSession`、`PartialResultManager`、`FinalResultManager` 已建立，partial/final 不再完全散落在主流程字符串变量中。
+  - `AudioRecorder` 已具备 recent buffer 与增量读口，preview 线程改为按增量音频块推进。
+  - preview 识别链路已切到 `AsrSession`，不再直接按定时 batch API 调 Whisper。
+  - final 路径已统一到 `AsrSession::finalize()`。
+  - 配置新增 `asr.backend` 与 `asr.sherpa.*`，并支持 sherpa 初始化失败时回退 Whisper。
+- 当前仍未完成的部分：
+  - sherpa SenseVoice 仅接入了 `OfflineRecognizer + incremental session` 包装，尚未验证真实模型文件与口述延迟指标。
+  - `main.rs` 仍承担较多 session orchestration，`session_control` 尚未独立模块化。
+  - 宿主侧仍以 insert-only 为主，尚未进入草稿替换阶段。
 
 ## 风险与后续动作
 
 - 风险：流式识别、partial/final 状态机与宿主输入兼容性会显著增加实现复杂度。
 - 后续动作：
-  - 先抽象 `AsrEngine` / `AsrSession` / `TextCommitBackend`
-  - 再重构音频帧流与 session 控制
-  - 随后接入 sherpa + SenseVoiceSmall 并做 shadow mode 验证
+  - 准备真实 SenseVoiceSmall 模型目录与 tokens，完成 sherpa backend 首次本机实测。
+  - 将 `main.rs` 中录音生命周期与 preview/final 编排抽出为独立 `session_control`。
+  - 为 sherpa 链路补充固定 WAV 冒烟、手工短句/长句回归与 `first_partial_ms` / `final_after_silence_ms` 指标记录。
+  - 明确当前 sherpa Rust API 是否支持在线 SenseVoice；若不支持，决定继续用 offline wrapper 过渡，还是切到其他可流式 backend。
+  - 在验证 sherpa 稳定前，保留配置化 Whisper 回退与对照能力。

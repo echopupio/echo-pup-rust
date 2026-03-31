@@ -16,7 +16,6 @@ mod stt;
 mod ui;
 mod vad;
 
-use crate::asr::AsrEngine as _;
 use crate::commit::TextCommitBackend as _;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -235,6 +234,31 @@ fn log_asr_runtime(label: &str, engine: &dyn asr::AsrEngine) {
     );
 }
 
+fn transcribe_final_with_session(
+    asr_engine: &mut dyn asr::AsrEngine,
+    audio: &[f32],
+) -> Result<String> {
+    let session_config = asr::AsrSessionConfig {
+        min_partial_samples: audio.len().max(1),
+        max_partial_window_samples: audio.len().max(1),
+    };
+
+    match asr_engine.start_session(session_config) {
+        Ok(mut session) => {
+            session.accept_audio(audio)?;
+            session.finalize(Arc::new(AtomicBool::new(false)))
+        }
+        Err(err) => {
+            warn!(
+                "ASR backend {} 不支持 final session，回退到整段转写: {}",
+                asr_engine.backend_kind().label(),
+                err
+            );
+            asr_engine.transcribe(audio)
+        }
+    }
+}
+
 fn detach_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) {
     if let Some(join_handle) = handle.lock().take() {
         std::thread::spawn(move || {
@@ -298,7 +322,7 @@ fn process_audio(
             stt_model = runtime.model;
             stt_detail = runtime.detail.unwrap_or_else(|| "n/a".to_string());
             stt_threads = runtime.threads.unwrap_or_default();
-            match asr_engine.transcribe(processed_audio) {
+            match transcribe_final_with_session(asr_engine.as_mut(), processed_audio) {
                 Ok(text) => {
                     // 过滤无效结果
                     let trimmed = text.trim();
@@ -960,6 +984,78 @@ fn build_preview_whisper_asr_engine(
     build_whisper_asr_engine(&preview_cfg)
 }
 
+fn build_sherpa_sensevoice_asr_engine(
+    config: &config::config::Config,
+    preview: bool,
+) -> Result<asr::sherpa_onnx::SherpaSenseVoiceEngine> {
+    if config.audio.sample_rate != 16000 {
+        anyhow::bail!(
+            "sherpa SenseVoice 当前要求 audio.sample_rate=16000，当前为 {}",
+            config.audio.sample_rate
+        );
+    }
+
+    let mut num_threads = config.asr.sherpa.num_threads.max(1);
+    if preview {
+        num_threads = num_threads.clamp(1, 2);
+    }
+
+    asr::sherpa_onnx::SherpaSenseVoiceEngine::new(asr::sherpa_onnx::SherpaSenseVoiceConfig {
+        model_path: config.asr.sherpa.model_path.clone(),
+        tokens_path: config.asr.sherpa.tokens_path.clone(),
+        language: config.asr.sherpa.language.clone(),
+        use_itn: config.asr.sherpa.use_itn,
+        provider: config.asr.sherpa.provider.clone(),
+        num_threads,
+        sample_rate: config.audio.sample_rate as i32,
+    })
+}
+
+fn build_selected_asr_engine(
+    config: &config::config::Config,
+    preview: bool,
+) -> Result<Box<dyn asr::AsrEngine>> {
+    match config.asr.backend {
+        config::AsrBackend::Whisper => {
+            let whisper_cfg = config.whisper.effective();
+            if preview {
+                Ok(Box::new(build_preview_whisper_asr_engine(&whisper_cfg)?))
+            } else {
+                Ok(Box::new(build_whisper_asr_engine(&whisper_cfg)?))
+            }
+        }
+        config::AsrBackend::SherpaSenseVoice => Ok(Box::new(build_sherpa_sensevoice_asr_engine(
+            config, preview,
+        )?)),
+    }
+}
+
+fn build_asr_engine_with_fallback(
+    config: &config::config::Config,
+    preview: bool,
+) -> Result<Box<dyn asr::AsrEngine>> {
+    match build_selected_asr_engine(config, preview) {
+        Ok(engine) => Ok(engine),
+        Err(err)
+            if config.asr.backend != config::AsrBackend::Whisper
+                && config.asr.allow_fallback_to_whisper =>
+        {
+            warn!(
+                "ASR 后端 {} 初始化失败: {}，自动回退到 Whisper",
+                config.asr.backend.label(),
+                err
+            );
+            let whisper_cfg = config.whisper.effective();
+            if preview {
+                Ok(Box::new(build_preview_whisper_asr_engine(&whisper_cfg)?))
+            } else {
+                Ok(Box::new(build_whisper_asr_engine(&whisper_cfg)?))
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewrite> {
     if !llm_cfg.enabled {
         return None;
@@ -1002,17 +1098,14 @@ fn apply_runtime_menu_action(
         }
         | menu_core::MenuAction::SwitchWhisperModel { .. } => {
             let cfg = config::Config::load(&snapshot.config_path)?;
-            let whisper_cfg = cfg.whisper.effective();
-            match build_whisper_asr_engine(&whisper_cfg) {
+            match build_asr_engine_with_fallback(&cfg, false) {
                 Ok(new_asr) => {
-                    log_asr_runtime("主转写运行时已热更新", &new_asr);
+                    log_asr_runtime("主转写运行时已热更新", new_asr.as_ref());
                     let mut guard = asr_runtime.lock();
-                    *guard = Some(Box::new(new_asr));
+                    *guard = Some(new_asr);
                     drop(guard);
                     let mut callback_guard = preview_asr_runtime.lock();
-                    *callback_guard = build_preview_whisper_asr_engine(&whisper_cfg)
-                        .ok()
-                        .map(|engine| Box::new(engine) as Box<dyn asr::AsrEngine>);
+                    *callback_guard = build_asr_engine_with_fallback(&cfg, true).ok();
                 }
                 Err(err) => {
                     warn!("ASR 热更新失败: {}", err);
@@ -1067,17 +1160,14 @@ fn apply_runtime_menu_action(
             hotkey_listener.start()?;
             *hotkey_trigger_mode_runtime.lock() = cfg.hotkey.trigger_mode;
 
-            let whisper_cfg = cfg.whisper.effective();
-            match build_whisper_asr_engine(&whisper_cfg) {
+            match build_asr_engine_with_fallback(&cfg, false) {
                 Ok(new_asr) => {
-                    log_asr_runtime("主转写运行时已重载", &new_asr);
+                    log_asr_runtime("主转写运行时已重载", new_asr.as_ref());
                     let mut guard = asr_runtime.lock();
-                    *guard = Some(Box::new(new_asr));
+                    *guard = Some(new_asr);
                     drop(guard);
                     let mut callback_guard = preview_asr_runtime.lock();
-                    *callback_guard = build_preview_whisper_asr_engine(&whisper_cfg)
-                        .ok()
-                        .map(|engine| Box::new(engine) as Box<dyn asr::AsrEngine>);
+                    *callback_guard = build_asr_engine_with_fallback(&cfg, true).ok();
                 }
                 Err(err) => {
                     warn!("ASR 重载失败: {}", err);
@@ -1208,8 +1298,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         }
     };
 
-    let whisper_cfg = config.whisper.effective();
-
     // ===== 初始化模块 =====
     let recorder = Arc::new(audio::AudioRecorder::new(
         config.audio.sample_rate,
@@ -1217,45 +1305,49 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     )?);
     info!("音频录制器已初始化");
 
-    if let Some(profile) = config.whisper.performance_profile {
-        info!(
-            "Whisper 性能档位: {:?}，模型: {}，策略: {:?}",
-            profile, whisper_cfg.model_path, whisper_cfg.decoding_strategy
-        );
+    match config.asr.backend {
+        config::AsrBackend::Whisper => {
+            let whisper_cfg = config.whisper.effective();
+            if let Some(profile) = config.whisper.performance_profile {
+                info!(
+                    "Whisper 性能档位: {:?}，模型: {}，策略: {:?}",
+                    profile, whisper_cfg.model_path, whisper_cfg.decoding_strategy
+                );
+            }
+        }
+        config::AsrBackend::SherpaSenseVoice => {
+            info!(
+                "Sherpa SenseVoice 已选中: model={}, tokens={}, provider={}",
+                config.asr.sherpa.model_path,
+                config.asr.sherpa.tokens_path,
+                config.asr.sherpa.provider.as_deref().unwrap_or("cpu")
+            );
+        }
     }
 
-    let whisper = match build_whisper_asr_engine(&whisper_cfg) {
+    let asr_runtime = match build_asr_engine_with_fallback(&config, false) {
         Ok(engine) => {
-            log_asr_runtime("主转写运行时已启用", &engine);
-            info!("Whisper 线程配置: {:?}", whisper_cfg.n_threads);
+            log_asr_runtime("主转写运行时已启用", engine.as_ref());
             info!("ASR 运行时已初始化");
-            Some(Box::new(engine) as Box<dyn asr::AsrEngine>)
+            Some(engine)
         }
         Err(e) => {
             warn!("ASR 初始化失败: {}，语音转写功能不可用", e);
             None
         }
     };
-    // 使用 Mutex 包装，以便在回调中共享（transcribe 需要 &mut self）
-    let whisper = Arc::new(Mutex::new(whisper));
-    let preview_threads = whisper_cfg.resolved_n_threads().clamp(1, 2);
-    let whisper_callback = match build_preview_whisper_asr_engine(&whisper_cfg) {
+    let asr_runtime = Arc::new(Mutex::new(asr_runtime));
+    let preview_asr_runtime = match build_asr_engine_with_fallback(&config, true) {
         Ok(engine) => {
-            let runtime = engine.runtime_info();
-            info!(
-                "ASR 预览运行时已启用: backend={}, model={}, threads={}",
-                runtime.backend.label(),
-                runtime.model,
-                preview_threads
-            );
-            Some(Box::new(engine) as Box<dyn asr::AsrEngine>)
+            log_asr_runtime("预览运行时已启用", engine.as_ref());
+            Some(engine)
         }
         Err(e) => {
             warn!("ASR 预览运行时初始化失败: {}，将禁用流式预览", e);
             None
         }
     };
-    let whisper_callback = Arc::new(Mutex::new(whisper_callback));
+    let preview_asr_runtime = Arc::new(Mutex::new(preview_asr_runtime));
 
     let llm = if config.llm.enabled {
         match build_llm_runtime(&config.llm) {
@@ -1366,7 +1458,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let hotkey_trigger_mode = Arc::new(Mutex::new(config.hotkey.trigger_mode));
 
     let recorder_start = recorder.clone();
-    let whisper_for_callback_start = whisper_callback.clone();
+    let preview_asr_runtime_on_start = preview_asr_runtime.clone();
     let is_recording_start = is_recording.clone();
     let recording_animation_start = recording_animation.clone();
     let desktop_notify_on_start = desktop_notify_enabled;
@@ -1408,23 +1500,47 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     detach_thread_handle(&partial_stt_callback_handle_on_start);
 
                     let recorder_callback = recorder_start.clone();
-                    let whisper_callback_runtime = whisper_for_callback_start.clone();
+                    let preview_asr_runtime_for_callback = preview_asr_runtime_on_start.clone();
                     let status_indicator_callback = status_indicator_on_start.clone();
                     let menu_snapshot_callback = menu_snapshot_on_start.clone();
                     let is_recording_callback = is_recording_start.clone();
                     let partial_stt_stop_callback = partial_stt_stop_on_start.clone();
                     let recognition_session_for_callback = recognition_session_on_start.clone();
+                    let poll_interval = Duration::from_millis(500);
+                    let min_samples = (recorder_callback.target_sample_rate() as usize)
+                        .saturating_mul(800)
+                        / 1000;
+                    let max_preview_samples =
+                        (recorder_callback.target_sample_rate() as usize).saturating_mul(3);
                     let callback_handle = std::thread::spawn(move || {
-                        let poll_interval = Duration::from_millis(500);
-                        let min_samples = (recorder_callback.target_sample_rate() as usize)
-                            .saturating_mul(800)
-                            / 1000;
-                        let max_preview_samples =
-                            (recorder_callback.target_sample_rate() as usize).saturating_mul(3);
+                        let mut preview_session: Box<dyn asr::AsrSession> = {
+                            let asr_guard = preview_asr_runtime_for_callback.lock();
+                            let Some(ref asr_engine) = *asr_guard else {
+                                return;
+                            };
+
+                            match asr_engine.start_session(asr::AsrSessionConfig {
+                                min_partial_samples: min_samples,
+                                max_partial_window_samples: max_preview_samples,
+                            }) {
+                                Ok(session) => {
+                                    info!(
+                                        "ASR 预览会话已启动: backend={}, min_samples={}, window_samples={}",
+                                        session.backend_kind().label(),
+                                        min_samples,
+                                        max_preview_samples
+                                    );
+                                    session
+                                }
+                                Err(err) => {
+                                    warn!("创建 ASR 预览会话失败: {}", err);
+                                    return;
+                                }
+                            }
+                        };
+
                         let mut preview_cursor: audio::AudioChunkCursor =
                             recorder_callback.incremental_cursor();
-                        let mut preview_window =
-                            audio::buffer::AudioRingBuffer::with_capacity(max_preview_samples);
 
                         while is_recording_callback.load(Ordering::SeqCst)
                             && !partial_stt_stop_callback.load(Ordering::SeqCst)
@@ -1442,71 +1558,21 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                 continue;
                             }
 
-                            preview_window.push_samples(&new_samples);
-                            if preview_window.len() < min_samples {
-                                continue;
+                            if let Err(err) = preview_session.accept_audio(&new_samples) {
+                                warn!("ASR 预览会话接收音频失败: {}", err);
+                                break;
                             }
-                            let snapshot = preview_window.snapshot();
 
-                            let callback_text_shared = recognition_session_for_callback.clone();
-                            let status_indicator_callback_inner = status_indicator_callback.clone();
-                            let menu_snapshot_callback_inner = menu_snapshot_callback.clone();
-                            let partial_stt_stop_for_segment = partial_stt_stop_callback.clone();
-                            let callback_result = {
-                                if let Some(mut whisper_guard) = whisper_callback_runtime.try_lock()
-                                {
-                                    if let Some(ref mut whisper) = *whisper_guard {
-                                        whisper
-                                            .transcribe_with_segment_callback(
-                                                &snapshot,
-                                                partial_stt_stop_callback.clone(),
-                                                Box::new(move |segment: String| {
-                                                    if partial_stt_stop_for_segment
-                                                        .load(Ordering::SeqCst)
-                                                    {
-                                                        return;
-                                                    }
-                                                    let trimmed = segment.trim();
-                                                    if trimmed.is_empty()
-                                                        || trimmed == "[BLANK_AUDIO]"
-                                                    {
-                                                        return;
-                                                    }
-
-                                                    let update = {
-                                                        let mut session_guard =
-                                                            callback_text_shared.lock();
-                                                        session_guard.update_partial(trimmed)
-                                                    };
-
-                                                    if let Some(update) = update {
-                                                        send_status_snapshot(
-                                                            &status_indicator_callback_inner,
-                                                            &menu_snapshot_callback_inner,
-                                                            update.status_text,
-                                                        );
-                                                    }
-                                                }),
-                                            )
-                                            .ok()
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            };
-
-                            if let Some(callback_result) = callback_result {
-                                let trimmed = callback_result.trim();
-                                if !trimmed.is_empty() && trimmed != "[BLANK_AUDIO]" {
+                            match preview_session.poll_partial(partial_stt_stop_callback.clone()) {
+                                Ok(Some(text)) => {
                                     if partial_stt_stop_callback.load(Ordering::SeqCst) {
                                         break;
                                     }
+
                                     let update = {
                                         let mut session_guard =
                                             recognition_session_for_callback.lock();
-                                        session_guard.update_partial(trimmed)
+                                        session_guard.update_partial(&text)
                                     };
 
                                     if let Some(update) = update {
@@ -1516,6 +1582,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                             update.status_text,
                                         );
                                     }
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    warn!(
+                                        "ASR 预览会话 partial 识别失败: backend={}, buffered_samples={}, err={}",
+                                        preview_session.backend_kind().label(),
+                                        preview_session.buffered_samples(),
+                                        err
+                                    );
                                 }
                             }
                         }
@@ -1536,7 +1611,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     });
 
     let recorder_stop = recorder.clone();
-    let whisper_stop = whisper.clone();
+    let asr_runtime_on_stop = asr_runtime.clone();
     let llm_stop = llm.clone();
     let post_processor_stop = post_processor.clone();
     let text_commit_stop = text_commit.clone();
@@ -1590,7 +1665,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
             let ok = process_audio(
                 &audio_data,
-                &whisper_stop,
+                &asr_runtime_on_stop,
                 &llm_stop,
                 &post_processor_stop,
                 &text_commit_stop,
@@ -1704,7 +1779,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         info!("端点检测已启用");
 
         let vad_recorder = recorder.clone();
-        let vad_whisper = whisper.clone();
+        let vad_asr_runtime = asr_runtime.clone();
         let vad_llm = llm.clone();
         let vad_post_processor = post_processor.clone();
         let vad_text_commit = text_commit.clone();
@@ -1761,7 +1836,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             desktop_notify(desktop_notify_on_vad, "EchoPup", "识别中...");
             let ok = process_audio(
                 &audio_data,
-                &vad_whisper,
+                &vad_asr_runtime,
                 &vad_llm,
                 &vad_post_processor,
                 &vad_text_commit,
@@ -1840,8 +1915,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         &result.snapshot,
                         &mut hotkey,
                         &hotkey_trigger_mode,
-                        &whisper,
-                        &whisper_callback,
+                        &asr_runtime,
+                        &preview_asr_runtime,
                         &llm,
                     ) {
                         warn!("菜单动作热更新失败: {}", err);
@@ -1906,17 +1981,17 @@ fn test_modules(config_path: &str) -> Result<()> {
         Err(e) => println!("  ✗ 音频录制器创建失败: {}", e),
     }
 
-    println!("\n[3/4] 测试 Whisper...");
-    let whisper_cfg = config.whisper.effective();
-    match build_whisper_asr_engine(&whisper_cfg) {
-        Ok(w) => {
-            if w.is_ready() {
-                println!("  ✓ Whisper 模型加载成功");
-            } else {
-                println!("  ~ Whisper 模型未找到");
-            }
+    println!("\n[3/4] 测试当前 ASR 后端...");
+    match build_asr_engine_with_fallback(&config, false) {
+        Ok(engine) => {
+            let runtime = engine.runtime_info();
+            println!(
+                "  ✓ ASR 运行时已就绪: backend={}, model={}",
+                runtime.backend.label(),
+                runtime.model
+            );
         }
-        Err(e) => println!("  ~ Whisper: {}", e),
+        Err(e) => println!("  ~ ASR: {}", e),
     }
 
     println!("\n[4/4] 测试文本提交后端...");

@@ -5,7 +5,7 @@
 ## 1. 背景与约束
 
 - 业务约束：后台运行时必须保证用户能感知录音/识别状态。
-- 技术约束：核心链路本地优先；当前仍使用 Whisper，下一阶段规划迁移至 `sherpa-onnx + SenseVoiceSmall`。
+- 技术约束：核心链路本地优先；当前主链路处于“Whisper 可用 + sherpa backend 已接入骨架”的过渡阶段，目标后端仍为 `sherpa-onnx + SenseVoiceSmall`。
 - 平台约束：状态栏能力支持 macOS 与 Linux (GNOME/X11)。
 - 工程约束：TUI 与状态栏不能维护两套独立业务逻辑。
 - 实时性约束：中文实时输入需优先降低首字延迟、句末 final 延迟和热键释放后的等待感。
@@ -22,6 +22,12 @@
 - 状态栏通信已升级为双向 IPC，状态栏只负责展示/交互，主进程负责动作执行与状态回传。
 - 热键触发链路已升级为“双模式状态机”（长按模式 / 按压切换模式），并将触发模式纳入配置热更新。
 - 状态栏占位已升级为“空闲窄宽度 + 激活宽宽度”自适应策略，兼顾紧凑布局与激活态可视化表达。
+- STT 迁移已进入代码实施：
+  - `AsrEngine` / `AsrSession` / `TextCommitBackend` 已建立。
+  - `RecognitionSession`、partial manager、final manager 已建立。
+  - `AudioRecorder` 已具备 recent buffer 与增量读口。
+  - preview 与 final 识别路径已统一走 session。
+  - 配置已支持 `asr.backend` 与 `asr.sherpa.*`，并支持 sherpa 失败时回退 Whisper。
 
 ## 3. 技术选型
 
@@ -65,6 +71,19 @@
 2. 先把 partial 显示稳定在状态栏或浮层，再逐步增强宿主输入体验。
 3. 所有性能收益必须通过结构化指标验证，而不是仅靠主观体感。
 
+当前实现状态补充：
+
+- 已完成：
+  - 运行时 backend 选择与 Whisper 回退。
+  - partial 预览从 batch 调用切到 `AsrSession`。
+  - final 结果统一走 `AsrSession::finalize()`。
+  - sherpa backend 骨架与 `sherpa-onnx` 依赖已接入。
+- 未完成：
+  - sherpa 真实模型文件的本机验证。
+  - 真正在线 SenseVoice 能力确认。
+  - `session_control` 模块化抽离。
+  - 固定 WAV / 手工录音 / 指标采集闭环。
+
 详细方案见：
 
 - `docs/architecture/streaming-asr-migration-plan-v1.md`
@@ -98,7 +117,9 @@
 - 里程碑 2（状态栏双向 IPC 与菜单动作打通）：已完成。
 - 里程碑 3（下载进度可视化与回归验收）：已完成（`./scripts/run_acceptance.sh`）。
 - 里程碑 4（触发模式状态机 + 状态栏视觉收敛）：已完成。
-- 里程碑 5（流式 ASR 迁移方案、ADR 与追踪基线）：已完成文档沉淀，待进入代码实施。
+- 里程碑 5（流式 ASR 迁移方案、ADR 与追踪基线）：已完成。
+- 里程碑 6（ASR/session 边界与增量音频入口）：已完成。
+- 里程碑 7（backend 选择、sherpa backend 骨架、统一 final session）：已完成第一阶段，待真实模型与指标验证。
 
 ## 8. 运维影响
 

@@ -16,6 +16,22 @@
   - partial 草稿与 final 最终结果拆开管理。
   - 首轮先保证 final 稳定插入，复杂草稿替换后续增强。
 
+## 当前实施进展
+
+- 已完成的代码级边界：
+  - `AsrEngine` / `AsrSession` 抽象已建立。
+  - `TextCommitBackend` 已建立，当前仍以 insert-only 为基线。
+  - `RecognitionSession`、partial manager、final manager 已落地。
+  - `AudioRecorder` 已支持 recent buffer 与增量读口，preview 不再依赖整段快照重复裁剪。
+- 已完成的识别链路变化：
+  - preview 路径已改为“增量音频块 -> `AsrSession` -> partial”。
+  - final 路径已改为“统一 session -> `finalize()` -> 后处理 -> 提交”。
+  - 配置已支持 `asr.backend = whisper | sherpa_sensevoice`，并支持 sherpa 初始化失败时自动回退到 Whisper。
+- 当前 sherpa 状态：
+  - 已接入 `sherpa-onnx` crate。
+  - 已新增 `SherpaSenseVoiceEngine` 骨架。
+  - 目前采用 `OfflineRecognizer + incremental session` 过渡实现，尚未证明等价于真流式 SenseVoice。
+
 ## 关键改动
 
 - 设计/技术文档统一为版本化文件（`system-design-v1`、`technical-solution-v1`）。
@@ -33,3 +49,14 @@
   - 应对：保留续传、无进度超时、自动重试机制。
 - 风险：流式 ASR 迁移涉及音频热路径、识别状态机与宿主输入兼容性。
   - 应对：先抽象接口与 insert-only 基线，再分阶段替换后端。
+- 风险：当前 sherpa 只完成过渡型 session 包装，真实模型效果和延迟收益尚未实测。
+  - 应对：先完成本机模型冒烟与固定 WAV/手工录音回归，再决定默认后端切换。
+
+## 后续实施顺序
+
+1. 准备真实 `SenseVoiceSmall` 模型目录与 `tokens.txt`，切配置跑通 sherpa 冒烟。
+2. 补固定 WAV 基线脚本或样例集，记录 Whisper 与 sherpa 的输出和耗时。
+3. 做手工短句/长句录音回归，记录 `first_partial_ms`、`final_after_silence_ms`、热键释放到最终提交延迟。
+4. 将 `main.rs` 中录音生命周期和 session orchestration 下沉到独立 `session_control` 模块。
+5. 核验 sherpa Rust API 是否存在可用在线 SenseVoice 能力；若没有，明确继续过渡方案还是切换实现路径。
+6. 在 sherpa 稳定后，再推进宿主草稿替换与更强的 partial/final 交互体验。
