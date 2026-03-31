@@ -1,13 +1,14 @@
 # 技术方案文档 v1 - echo-pup-rust
 
-最后更新：2026-03-19
+最后更新：2026-03-31
 
 ## 1. 背景与约束
 
 - 业务约束：后台运行时必须保证用户能感知录音/识别状态。
-- 技术约束：核心链路本地优先，Whisper 模型位于 `~/.echopup/models`。
+- 技术约束：核心链路本地优先；当前仍使用 Whisper，下一阶段规划迁移至 `sherpa-onnx + SenseVoiceSmall`。
 - 平台约束：状态栏能力支持 macOS 与 Linux (GNOME/X11)。
 - 工程约束：TUI 与状态栏不能维护两套独立业务逻辑。
+- 实时性约束：中文实时输入需优先降低首字延迟、句末 final 延迟和热键释放后的等待感。
 
 ## 2. 架构总览
 
@@ -30,7 +31,7 @@
 | 配置 | `serde + toml` | 配置结构化、可读性高 | JSON / YAML |
 | 热键 | `global-hotkey` + `rdev` | 跨平台兼容与低层监听补充 | 平台专用 API |
 | 音频 | `cpal`（项目内封装） | 跨平台音频采集 | 平台专用库 |
-| STT | `whisper-rs` | 本地推理、离线可用 | 远程 STT API |
+| STT | 当前：`whisper-rs`；规划：`sherpa-onnx + SenseVoiceSmall` | 保持本地离线前提下，逐步从整段识别迁移到更适合中文实时输入的流式链路 | 远程 STT API |
 | HTTP 下载 | `reqwest` blocking | 简化下载与重试逻辑 | 外部脚本调用 |
 | TUI | `ratatui + crossterm` | 终端 UI 生态成熟 | 自绘终端控件 |
 | 状态栏 | Cocoa / ObjC FFI (macOS) / tray-icon + muda + gtk (Linux) | 原生 macOS 菜单栏能力 / Linux GNOME 托盘 | - |
@@ -42,7 +43,34 @@
 > 注：Linux 状态栏实现使用 tray-icon + muda 库，支持 GNOME/X11 环境的系统托盘。需要系统依赖：libx11-dev, libgtk-3-dev, libayatana-appindicator3-dev, libglib2.0-dev。
 
 
-## 5. 数据与接口契约
+## 5. 下一阶段 STT 演进（R-015）
+
+目标演进：
+
+- 将识别主链路从“停录后整段转写”演进为“常驻引擎 + streaming session + partial/final 双阶段输出”。
+- 保留 Whisper 作为过渡期回退与对照路径。
+- 将第三方识别后端隔离在 `src/asr/backends/*`，业务层统一依赖项目内 trait。
+
+核心边界：
+
+- `audio_capture` / `audio_resample`：只处理音频，不感知识别模型。
+- `vad`：负责语音边界与 endpoint 候选，不直接决定文本提交。
+- `asr_engine`：只产出统一 `RecognitionEvent`，不直接操作 UI 或输入法宿主。
+- `partial_result_manager` / `final_result_manager`：分别处理草稿与最终文本状态。
+- `text_commit`：提供 insert-only 基线与后续 draft-replace 扩展点。
+
+实施原则：
+
+1. 先抽象接口与状态机，再替换引擎。
+2. 先把 partial 显示稳定在状态栏或浮层，再逐步增强宿主输入体验。
+3. 所有性能收益必须通过结构化指标验证，而不是仅靠主观体感。
+
+详细方案见：
+
+- `docs/architecture/streaming-asr-migration-plan-v1.md`
+- `docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`
+
+## 6. 数据与接口契约
 
 关键契约：
 - 配置契约：`src/config/config.rs`（`Config` 及子结构）。
@@ -64,14 +92,15 @@
 - 检测到代理连接失败时自动回退直连请求（no-proxy 客户端）。
 - 下载失败后自动清理 0B 临时文件，避免后续重试污染。
 
-## 5. 实施里程碑状态（截至 2026-03-19）
+## 7. 实施里程碑状态（截至 2026-03-31）
 
 - 里程碑 1（共享菜单内核重构）：已完成。
 - 里程碑 2（状态栏双向 IPC 与菜单动作打通）：已完成。
 - 里程碑 3（下载进度可视化与回归验收）：已完成（`./scripts/run_acceptance.sh`）。
 - 里程碑 4（触发模式状态机 + 状态栏视觉收敛）：已完成。
+- 里程碑 5（流式 ASR 迁移方案、ADR 与追踪基线）：已完成文档沉淀，待进入代码实施。
 
-## 6. 运维影响
+## 8. 运维影响
 
 - 发布：
   - 常规发布采用 `cargo build --release`
@@ -82,16 +111,19 @@
   - 以日志观察为主，重点关注热键、录音、识别、下载、IPC 错误
   - 下载异常排查时优先检查代理环境变量（`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`）及直连回退日志
 
-## 7. 安全与合规
+## 9. 安全与合规
 
 - API Key 通过环境变量读取，不写入仓库。
 - 热键策略限制过宽配置，避免吞键影响正常输入。
 - 本地模型与本地推理优先，减少外发数据依赖。
+- 新增 ASR 后端时需同步审查模型文件来源、校验信息和运行时 provider 配置。
 
-## 8. 关联文档
+## 10. 关联文档
 
 - `docs/design/system-design-v1.md`
+- `docs/architecture/streaming-asr-migration-plan-v1.md`
 - `docs/architecture/status-bar-menu-sync-plan-v1.md`
 - `docs/architecture/performance-optimization-roadmap-v1.md`
+- `docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`
 - `docs/requirements/PRD.md`
 - `docs/operations/runbook.md`
