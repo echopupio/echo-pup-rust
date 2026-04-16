@@ -12,10 +12,6 @@ pub struct PartialResultManager {
 }
 
 impl PartialResultManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn clear(&mut self) {
         self.latest_text.clear();
     }
@@ -55,20 +51,20 @@ mod tests {
 
     #[test]
     fn update_ignores_blank_text() {
-        let mut manager = PartialResultManager::new();
+        let mut manager = PartialResultManager::default();
         assert!(manager.update("   ").is_none());
     }
 
     #[test]
     fn update_deduplicates_same_text() {
-        let mut manager = PartialResultManager::new();
+        let mut manager = PartialResultManager::default();
         assert!(manager.update("你好").is_some());
         assert!(manager.update("你好").is_none());
     }
 
     #[test]
     fn update_formats_status() {
-        let mut manager = PartialResultManager::new();
+        let mut manager = PartialResultManager::default();
         let update = manager.update("第一行\n第二行").unwrap();
         assert_eq!(update.text, "第一行 第二行");
         assert!(update.status_text.starts_with("识别中: "));

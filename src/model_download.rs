@@ -1,5 +1,7 @@
 //! 共享模型下载能力（TUI / 状态栏菜单复用）
 
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Context, Result};
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
@@ -1039,6 +1041,220 @@ pub fn model_download_url(model_file_name: &str) -> String {
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
         model_file_name
     )
+}
+
+pub fn paraformer_model_files() -> &'static [&'static str] {
+    &["encoder.onnx", "decoder.onnx", "tokens.txt"]
+}
+
+pub fn paraformer_model_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".echopup")
+        .join("models")
+        .join("asr")
+        .join("sherpa-onnx-streaming-paraformer-bilingual-zh-en")
+}
+
+pub fn paraformer_model_download_url(file_name: &str) -> String {
+    format!(
+        "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en/resolve/main/{}",
+        file_name
+    )
+}
+
+pub fn start_paraformer_model_download() -> Result<DownloadStart> {
+    let model_dir = paraformer_model_dir();
+    let (tx, rx) = mpsc::channel();
+
+    let initial_logs = vec![
+        "[start] 准备下载 Sherpa Paraformer 模型".to_string(),
+        format!("[dir] 模型目录: {}", model_dir.display()),
+        "[info] 将下载以下文件: encoder.onnx, decoder.onnx, tokens.txt".to_string(),
+    ];
+
+    let state = DownloadState {
+        model_size: "paraformer".to_string(),
+        model_file_name: "encoder.onnx".to_string(),
+        downloaded: 0,
+        total: None,
+        in_progress: true,
+    };
+
+    std::thread::spawn(move || {
+        if let Err(err) = download_paraformer_model_files(&model_dir, tx.clone()) {
+            let _ = tx.send(DownloadEvent::Failed(err.to_string()));
+        }
+    });
+
+    Ok(DownloadStart {
+        state,
+        rx,
+        initial_logs,
+    })
+}
+
+fn download_paraformer_model_files(
+    model_dir: &Path,
+    tx: mpsc::Sender<DownloadEvent>,
+) -> Result<()> {
+    // Create directory
+    fs::create_dir_all(model_dir).context("创建模型目录失败")?;
+
+    let files = paraformer_model_files();
+    let total_files = files.len() as u32;
+
+    for (index, file_name) in files.iter().enumerate() {
+        let file_path = model_dir.join(file_name);
+        let url = paraformer_model_download_url(file_name);
+
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[{}/{}] 准备下载: {}",
+            index + 1,
+            total_files,
+            file_name
+        )));
+
+        // Check if file already exists
+        if file_path.exists() {
+            let metadata = fs::metadata(&file_path)?;
+            if metadata.len() > 0 {
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[skip] 文件已存在: {} ({})",
+                    file_name,
+                    format_bytes(metadata.len())
+                )));
+                continue;
+            }
+        }
+
+        // Download the file
+        match download_single_file(&url, &file_path, tx.clone()) {
+            Ok(()) => {
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[done] 下载完成: {}",
+                    file_name
+                )));
+            }
+            Err(err) => {
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[error] 下载失败: {} - {}",
+                    file_name, err
+                )));
+                return Err(err);
+            }
+        }
+    }
+
+    let _ = tx.send(DownloadEvent::Finished);
+    Ok(())
+}
+
+fn download_single_file(
+    url: &str,
+    dest_path: &Path,
+    tx: mpsc::Sender<DownloadEvent>,
+) -> Result<()> {
+    let mut client = build_http_client(false)?;
+    let mut using_direct_client = false;
+
+    // Probe for file size
+    let mut total_size = None;
+    match client.head(url).send() {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                total_size = normalize_content_length(resp.content_length());
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[head] {} - size: {}",
+                    url,
+                    total_size
+                        .map(|s| format_bytes(s))
+                        .unwrap_or_else(|| "未知".to_string())
+                )));
+            }
+        }
+        Err(err) => {
+            if is_likely_proxy_error(&err) {
+                client = build_http_client(true)?;
+                using_direct_client = true;
+            }
+            let _ = tx.send(DownloadEvent::Log(format!("[head] 探测失败: {}", err)));
+        }
+    }
+
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(dest_path)
+        .context("打开目标文件失败")?;
+
+    let mut downloaded: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    let mut last_emit = Instant::now();
+
+    loop {
+        let chunk_end = downloaded
+            .saturating_add(DOWNLOAD_CHUNK_SIZE)
+            .saturating_sub(1);
+        let range_end = total_size
+            .map(|t| chunk_end.min(t.saturating_sub(1)))
+            .unwrap_or(chunk_end);
+        let range_text = format!("bytes={}-{}", downloaded, range_end);
+
+        let mut response = match client.get(url).header(RANGE, range_text.clone()).send() {
+            Ok(resp) => resp,
+            Err(err) => {
+                if !using_direct_client && is_likely_proxy_error(&err) {
+                    client = build_http_client(true)?;
+                    using_direct_client = true;
+                    continue;
+                }
+                return Err(anyhow!("下载请求失败: {}", err));
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+            return Err(anyhow!("HTTP 错误: {}", status));
+        }
+
+        if total_size.is_none() {
+            total_size = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_total_from_content_range)
+                .or_else(|| normalize_content_length(response.content_length()));
+        }
+
+        loop {
+            let n = match response.read(&mut buf) {
+                Ok(n) => n,
+                Err(err) => return Err(anyhow!("读取失败: {}", err)),
+            };
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n])?;
+            downloaded += n as u64;
+        }
+        writer.flush()?;
+
+        if last_emit.elapsed() >= Duration::from_millis(120) {
+            let _ = tx.send(DownloadEvent::Progress {
+                downloaded,
+                total: total_size,
+            });
+            last_emit = Instant::now();
+        }
+
+        if total_size.is_some_and(|t| downloaded >= t) {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn parse_total_from_content_range(content_range: &str) -> Option<u64> {

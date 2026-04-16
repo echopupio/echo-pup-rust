@@ -6,10 +6,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::HotkeyTriggerMode;
-use crate::menu_core::{
-    whisper_model_path_from_file_name, EditableField, MenuAction, MenuActionResult, MenuSnapshot,
-    DOWNLOAD_MODEL_SIZES, WHISPER_MODEL_FILES,
-};
+use crate::menu_core::{EditableField, MenuAction, MenuActionResult, MenuSnapshot};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -918,8 +915,8 @@ mod menu_bridge {
                 mode: HotkeyTriggerMode::PressToToggle,
             }),
             TAG_EDIT_LLM_FORM => None,
-            TAG_SWITCH_WHISPER_MODEL => prompt_switch_whisper_model(snapshot),
-            TAG_DOWNLOAD_MODEL => None,
+            TAG_SWITCH_WHISPER_MODEL => Some(MenuAction::DownloadModel),
+            TAG_DOWNLOAD_MODEL => Some(MenuAction::DownloadModel),
             TAG_RELOAD_CONFIG => Some(MenuAction::ReloadConfig),
             TAG_QUIT_UI => Some(MenuAction::QuitUi),
             _ => None,
@@ -1726,7 +1723,6 @@ fn empty_snapshot() -> MenuSnapshot {
         llm_model: "gpt-4o-mini".to_string(),
         llm_api_base: "https://api.openai.com/v1".to_string(),
         llm_api_key_env: "OPENAI_API_KEY".to_string(),
-        whisper_model_path: String::new(),
         local_models: vec![],
         download: None,
         download_logs: vec![],
@@ -2195,9 +2191,9 @@ pub fn run_status_indicator_process() -> Result<()> {
                     menu_bridge::TAG_DOWNLOAD_DIALOG_START => {
                         if let Some(dialog) = download_popup.dialog {
                             if matches!(download_popup.phase, DownloadDialogPhase::Selecting) {
-                                let size = menu_bridge::selected_download_size(&dialog);
                                 download_popup.phase = DownloadDialogPhase::Starting;
-                                let logs = vec![format!("[start] 已请求下载 {}", size)];
+                                let logs =
+                                    vec!["[start] 已请求下载 Sherpa Paraformer 模型".to_string()];
                                 menu_bridge::update_download_dialog(
                                     &dialog,
                                     "正在创建下载任务...",
@@ -2209,7 +2205,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                                     false,
                                 );
                                 send_child_message(&ChildMessage::ActionRequest {
-                                    action: MenuAction::DownloadModel { size },
+                                    action: MenuAction::DownloadModel,
                                 });
                             }
                         }
@@ -2791,8 +2787,6 @@ const MENU_ID_OPEN_MODEL_FOLDER: &str = "open_model_folder";
 #[cfg(target_os = "linux")]
 const MENU_ID_QUIT_UI: &str = "quit_ui";
 #[cfg(target_os = "linux")]
-const MENU_ID_SWITCH_MODEL_PREFIX: &str = "switch_model:";
-#[cfg(target_os = "linux")]
 const MENU_ID_DOWNLOAD_MODEL_LINUX: &str = "download_model_linux";
 
 #[cfg(target_os = "linux")]
@@ -2800,13 +2794,11 @@ struct LinuxMenuHandles {
     status_line: muda::MenuItem,
     hotkey_line: muda::MenuItem,
     edit_llm_form: muda::MenuItem,
-    download_model: muda::MenuItem,
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
     vad_enabled: muda::CheckMenuItem,
     mode_hold: muda::CheckMenuItem,
     mode_toggle: muda::CheckMenuItem,
-    switch_model: Vec<(String, muda::CheckMenuItem)>,
 }
 
 #[cfg(target_os = "linux")]
@@ -2824,6 +2816,7 @@ struct LlmFormPopupLinux {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 enum DownloadDialogPhaseLinux {
     #[default]
     Selecting,
@@ -2858,21 +2851,6 @@ impl Default for DownloadPopupLinux {
             response: std::rc::Rc::new(std::cell::RefCell::new(None)),
             phase: DownloadDialogPhaseLinux::Selecting,
         }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn preferred_download_size_linux(snapshot: &MenuSnapshot) -> &'static str {
-    let model_name = std::path::Path::new(&snapshot.whisper_model_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if model_name.contains("turbo") {
-        "turbo"
-    } else if model_name.contains("medium") {
-        "medium"
-    } else {
-        "large-v3"
     }
 }
 
@@ -3043,105 +3021,6 @@ fn sync_download_popup_linux(snapshot: &MenuSnapshot, popup: &mut DownloadPopupL
 }
 
 #[cfg(target_os = "linux")]
-fn download_model_popup_linux(snapshot: &MenuSnapshot, popup: &mut DownloadPopupLinux) {
-    use gtk::prelude::*;
-
-    if popup.dialog.is_none() {
-        let dialog = gtk::Dialog::with_buttons(
-            Some("下载 Whisper 模型"),
-            None::<&gtk::Window>,
-            gtk::DialogFlags::MODAL,
-            &[
-                ("取消", gtk::ResponseType::Cancel),
-                ("确认", gtk::ResponseType::Ok),
-            ],
-        );
-        apply_linux_dialog_icon(&dialog);
-        dialog.set_default_size(620, 440);
-
-        let content = dialog.content_area();
-        content.set_spacing(8);
-        content.set_margin_top(10);
-        content.set_margin_bottom(10);
-        content.set_margin_start(10);
-        content.set_margin_end(10);
-
-        let model_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let model_label = gtk::Label::new(Some("模型大小"));
-        model_label.set_xalign(0.0);
-        let model_combo = gtk::ComboBoxText::new();
-        for size in DOWNLOAD_MODEL_SIZES {
-            model_combo.append(Some(size), size);
-        }
-        model_combo.set_active_id(Some(preferred_download_size_linux(snapshot)));
-        model_row.pack_start(&model_label, false, false, 0);
-        model_row.pack_start(&model_combo, true, true, 0);
-
-        let status_label = gtk::Label::new(Some("请选择模型并点击下载"));
-        status_label.set_xalign(0.0);
-
-        let progress_bar = gtk::ProgressBar::new();
-        progress_bar.set_show_text(false);
-        progress_bar.set_fraction(0.0);
-
-        let ratio_label = gtk::Label::new(Some("尚未开始"));
-        ratio_label.set_xalign(0.0);
-
-        let log_label = gtk::Label::new(Some("下载日志"));
-        log_label.set_xalign(0.0);
-
-        let log_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-        let log_view = gtk::TextView::with_buffer(&log_buffer);
-        log_view.set_editable(false);
-        log_view.set_cursor_visible(false);
-        log_view.set_monospace(true);
-        log_view.set_wrap_mode(gtk::WrapMode::WordChar);
-        let scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        scroll.set_min_content_height(220);
-        scroll.add(&log_view);
-
-        content.pack_start(&model_row, false, false, 0);
-        content.pack_start(&status_label, false, false, 0);
-        content.pack_start(&progress_bar, false, false, 0);
-        content.pack_start(&ratio_label, false, false, 0);
-        content.pack_start(&log_label, false, false, 0);
-        content.pack_start(&scroll, true, true, 0);
-
-        let response_cell = popup.response.clone();
-        dialog.connect_response(move |_, response| {
-            *response_cell.borrow_mut() = Some(response);
-        });
-
-        popup.dialog = Some(dialog);
-        popup.model_combo = Some(model_combo);
-        popup.status_label = Some(status_label);
-        popup.progress_bar = Some(progress_bar);
-        popup.ratio_label = Some(ratio_label);
-        popup.log_buffer = Some(log_buffer);
-    }
-
-    popup.phase = if snapshot
-        .download
-        .as_ref()
-        .map(|d| d.in_progress)
-        .unwrap_or(false)
-    {
-        DownloadDialogPhaseLinux::Downloading
-    } else {
-        DownloadDialogPhaseLinux::Selecting
-    };
-    if let Some(combo) = popup.model_combo.as_ref() {
-        combo.set_active_id(Some(preferred_download_size_linux(snapshot)));
-    }
-    if let Some(dialog) = popup.dialog.as_ref() {
-        dialog.show_all();
-        dialog.present();
-    }
-    sync_download_popup_linux(snapshot, popup);
-}
-
-#[cfg(target_os = "linux")]
 fn close_download_popup_linux(popup: &mut DownloadPopupLinux) {
     use gtk::prelude::*;
 
@@ -3159,51 +3038,11 @@ fn close_download_popup_linux(popup: &mut DownloadPopupLinux) {
 
 #[cfg(target_os = "linux")]
 fn handle_download_popup_response_linux(
-    snapshot: &MenuSnapshot,
-    popup: &mut DownloadPopupLinux,
+    _snapshot: &MenuSnapshot,
+    _popup: &mut DownloadPopupLinux,
 ) -> Option<MenuAction> {
-    use gtk::prelude::*;
-
-    let response = popup.response.borrow_mut().take();
-    match response {
-        Some(gtk::ResponseType::Ok)
-            if matches!(popup.phase, DownloadDialogPhaseLinux::Selecting) =>
-        {
-            let size = popup
-                .model_combo
-                .as_ref()
-                .and_then(|combo| combo.active_id())
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| preferred_download_size_linux(snapshot).to_string());
-            popup.phase = DownloadDialogPhaseLinux::Starting;
-            let logs = vec![format!("[start] 已请求下载 {}", size)];
-            update_download_popup_view_linux(
-                popup,
-                "正在创建下载任务...",
-                None,
-                "等待下载线程启动...",
-                &logs,
-                false,
-                false,
-                false,
-            );
-            Some(MenuAction::DownloadModel { size })
-        }
-        Some(gtk::ResponseType::Cancel) | Some(gtk::ResponseType::DeleteEvent) => {
-            close_download_popup_linux(popup);
-            None
-        }
-        Some(gtk::ResponseType::Ok)
-            if matches!(
-                popup.phase,
-                DownloadDialogPhaseLinux::Finished | DownloadDialogPhaseLinux::Failed
-            ) =>
-        {
-            close_download_popup_linux(popup);
-            None
-        }
-        Some(_) | None => None,
-    }
+    // Whisper 模型下载已移除，返回 None
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -3608,19 +3447,12 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     mode_submenu.append(&mode_toggle)?;
     menu.append(&mode_submenu)?;
 
-    let switch_submenu = muda::Submenu::new("切换 Whisper 模型", true);
-    let mut switch_model = Vec::new();
-    for file in WHISPER_MODEL_FILES {
-        let id = format!("{MENU_ID_SWITCH_MODEL_PREFIX}{file}");
-        let item = muda::CheckMenuItem::with_id(id, file, true, false, None);
-        switch_submenu.append(&item)?;
-        switch_model.push((file.to_string(), item));
-    }
-    menu.append(&switch_submenu)?;
-
-    let download_model =
-        muda::MenuItem::with_id(MENU_ID_DOWNLOAD_MODEL_LINUX, "下载模型...", true, None);
-    menu.append(&download_model)?;
+    menu.append(&muda::MenuItem::with_id(
+        MENU_ID_DOWNLOAD_MODEL_LINUX,
+        "下载 ASR 模型",
+        true,
+        None,
+    ))?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
     menu.append(&muda::MenuItem::with_id(
         MENU_ID_OPEN_CONFIG_FOLDER,
@@ -3653,13 +3485,11 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
             status_line,
             hotkey_line,
             edit_llm_form,
-            download_model,
             llm_enabled,
             correction_enabled,
             vad_enabled,
             mode_hold,
             mode_toggle,
-            switch_model,
         },
     ))
 }
@@ -3693,32 +3523,7 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         .mode_toggle
         .set_checked(snapshot.hotkey_trigger_mode == HotkeyTriggerMode::PressToToggle);
 
-    let current_model = std::path::Path::new(&snapshot.whisper_model_path)
-        .file_name()
-        .and_then(|v| v.to_str())
-        .unwrap_or_default();
-    let available_models = snapshot
-        .local_models
-        .iter()
-        .filter(|name| name.ends_with(".bin"))
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    for (model_file, item) in &handles.switch_model {
-        item.set_enabled(available_models.contains(model_file));
-        item.set_checked(model_file == current_model);
-    }
-
-    let active_download = snapshot
-        .download
-        .as_ref()
-        .filter(|download| download.in_progress)
-        .map(|download| download.model_size.as_str());
-    let download_title = if let Some(size) = active_download {
-        format!("下载模型...（{} 进行中）", size)
-    } else {
-        "下载模型...".to_string()
-    };
-    handles.download_model.set_text(download_title);
+    // Whisper 模型切换和下载相关代码已移除
 }
 
 #[cfg(target_os = "linux")]
@@ -3786,15 +3591,7 @@ fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
         }),
         MENU_ID_RELOAD_CONFIG => Some(MenuAction::ReloadConfig),
         MENU_ID_QUIT_UI => Some(MenuAction::QuitUi),
-        _ => {
-            if let Some(model_file) = id.strip_prefix(MENU_ID_SWITCH_MODEL_PREFIX) {
-                if let Ok(model_path) = whisper_model_path_from_file_name(model_file) {
-                    return Some(MenuAction::SwitchWhisperModel { model_path });
-                }
-                return None;
-            }
-            None
-        }
+        _ => None,
     }
 }
 
@@ -3904,7 +3701,9 @@ pub fn run_status_indicator_process() -> Result<()> {
                 continue;
             }
             if event.id.as_ref() == MENU_ID_DOWNLOAD_MODEL_LINUX {
-                download_model_popup_linux(&snapshot, &mut download_popup);
+                send_child_message(&ChildMessage::ActionRequest {
+                    action: MenuAction::DownloadModel,
+                });
                 continue;
             }
 

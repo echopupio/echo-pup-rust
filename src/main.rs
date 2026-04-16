@@ -12,7 +12,7 @@ mod model_download;
 mod runtime;
 mod session;
 mod status_indicator;
-mod stt;
+mod text_processor;
 mod ui;
 mod vad;
 
@@ -23,7 +23,6 @@ use parking_lot::Mutex;
 use std::io::{IsTerminal, Write};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -66,9 +65,7 @@ enum Commands {
         show: bool,
         init: bool,
     },
-    DownloadModel {
-        size: String,
-    },
+    DownloadModel,
     #[command(hide = true)]
     StatusIndicator,
 }
@@ -169,59 +166,6 @@ fn send_status_snapshot(
     guard.send_snapshot(&snapshot);
 }
 
-fn whisper_fallback_candidates(file_name: &str) -> Vec<&'static str> {
-    match file_name {
-        "ggml-medium.bin" => vec![
-            "ggml-medium.bin",
-            "ggml-large-v3-turbo.bin",
-            "ggml-large-v3.bin",
-        ],
-        "ggml-large-v3-turbo.bin" => vec![
-            "ggml-large-v3-turbo.bin",
-            "ggml-medium.bin",
-            "ggml-large-v3.bin",
-        ],
-        "ggml-large-v3.bin" => vec![
-            "ggml-large-v3.bin",
-            "ggml-large-v3-turbo.bin",
-            "ggml-medium.bin",
-        ],
-        _ => Vec::new(),
-    }
-}
-
-fn resolve_runtime_model_path(model_path: &str) -> Result<String> {
-    let requested_path = Path::new(model_path);
-    if requested_path.is_file() {
-        return Ok(model_path.to_string());
-    }
-
-    let requested_name = requested_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("未找到 Whisper 模型: {}", model_path))?;
-    let parent_dir = requested_path.parent();
-    for candidate in whisper_fallback_candidates(requested_name) {
-        if let Some(parent_dir) = parent_dir {
-            let candidate_path = parent_dir.join(candidate);
-            if candidate_path.is_file() {
-                return Ok(candidate_path.to_string_lossy().into_owned());
-            }
-        }
-    }
-
-    if let Ok(model_dir) = runtime::model_dir() {
-        for candidate in whisper_fallback_candidates(requested_name) {
-            let candidate_path = model_dir.join(candidate);
-            if candidate_path.is_file() {
-                return Ok(candidate_path.to_string_lossy().into_owned());
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!("未找到 Whisper 模型: {}", model_path))
-}
-
 fn log_asr_runtime(label: &str, engine: &dyn asr::AsrEngine) {
     let runtime = engine.runtime_info();
     info!(
@@ -280,7 +224,7 @@ fn process_audio(
     config_path: &str,
     asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
     llm: &Arc<Mutex<Option<llm::LLMRewrite>>>,
-    post_processor: &Arc<stt::TextPostProcessor>,
+    post_processor: &Arc<text_processor::TextPostProcessor>,
     text_commit: &Arc<Mutex<Box<dyn commit::TextCommitBackend>>>,
     recognition_session: &Arc<Mutex<session::RecognitionSession>>,
     is_vad_triggered: bool,
@@ -681,6 +625,91 @@ fn send_desktop_notify(title: &str, body: &str) -> Result<()> {
     }
 }
 
+fn download_paraformer_model_cli() -> Result<()> {
+    use model_download::{start_paraformer_model_download, DownloadEvent, DownloadStart};
+
+    info!("开始下载 Sherpa Paraformer 模型...");
+
+    let DownloadStart {
+        rx, initial_logs, ..
+    } = start_paraformer_model_download()?;
+
+    for line in initial_logs {
+        println!("{}", line);
+    }
+
+    let mut latest_total = None::<u64>;
+    let mut progress_active = false;
+
+    loop {
+        match rx.recv() {
+            Ok(DownloadEvent::Started {
+                downloaded, total, ..
+            }) => {
+                latest_total = total;
+                if progress_active {
+                    println!();
+                    progress_active = false;
+                }
+                println!(
+                    "[started] 已下载 {}，总大小 {}",
+                    model_download::format_bytes(downloaded),
+                    total
+                        .map(model_download::format_bytes)
+                        .unwrap_or_else(|| "未知".to_string())
+                );
+            }
+            Ok(DownloadEvent::Progress { downloaded, total }) => {
+                if total.is_some() {
+                    latest_total = total;
+                }
+                let progress_text = match latest_total {
+                    Some(total) if total > 0 => {
+                        let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                        format!(
+                            "{} / {} ({:.1}%)",
+                            model_download::format_bytes(downloaded),
+                            model_download::format_bytes(total),
+                            ratio * 100.0
+                        )
+                    }
+                    _ => format!("已下载 {}", model_download::format_bytes(downloaded)),
+                };
+                print!("\r[progress] {}", progress_text);
+                let _ = std::io::stdout().flush();
+                progress_active = true;
+            }
+            Ok(DownloadEvent::Finished) => {
+                if progress_active {
+                    println!();
+                }
+                println!("[finished] 下载完成！");
+                println!("模型已保存到 ~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/");
+                return Ok(());
+            }
+            Ok(DownloadEvent::Failed(err)) => {
+                if progress_active {
+                    println!();
+                }
+                return Err(anyhow::anyhow!("下载失败: {}", err));
+            }
+            Ok(DownloadEvent::Log(line)) => {
+                if progress_active {
+                    println!();
+                    progress_active = false;
+                }
+                println!("{}", line);
+            }
+            Err(_) => {
+                if progress_active {
+                    println!();
+                }
+                return Err(anyhow::anyhow!("下载线程已断开"));
+            }
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -712,98 +741,12 @@ fn main() -> anyhow::Result<()> {
                 println!("{:#?}", config);
             }
         }
-        Some(Commands::DownloadModel { size }) => download_model_via_shared_runtime(&size)?,
         Some(Commands::StatusIndicator) => status_indicator::run_status_indicator_process()?,
+        Some(Commands::DownloadModel) => download_paraformer_model_cli()?,
         None => start_background_mode(&cli.config)?,
     }
 
     Ok(())
-}
-
-fn download_model_via_shared_runtime(size: &str) -> Result<()> {
-    use model_download::{DownloadEvent, DownloadStart};
-
-    info!("下载 Whisper {} 模型", size);
-
-    let DownloadStart {
-        rx, initial_logs, ..
-    } = model_download::start_model_download(size)?;
-
-    for line in initial_logs {
-        println!("{}", line);
-    }
-
-    let mut latest_total = None::<u64>;
-    let mut progress_active = false;
-
-    loop {
-        match rx.recv() {
-            Ok(DownloadEvent::Started {
-                downloaded, total, ..
-            }) => {
-                latest_total = total;
-                if progress_active {
-                    println!();
-                    progress_active = false;
-                }
-                println!(
-                    "[started] 已下载 {}，总大小 {}",
-                    model_download::format_bytes(downloaded),
-                    total
-                        .map(model_download::format_bytes)
-                        .unwrap_or_else(|| "未知".to_string())
-                );
-            }
-            Ok(DownloadEvent::Progress { downloaded, total }) => {
-                if total.is_some() {
-                    latest_total = total;
-                }
-
-                let progress_text = match latest_total {
-                    Some(total) if total > 0 => {
-                        let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
-                        format!(
-                            "{} / {} ({:.1}%)",
-                            model_download::format_bytes(downloaded),
-                            model_download::format_bytes(total),
-                            ratio * 100.0
-                        )
-                    }
-                    _ => format!("已下载 {}", model_download::format_bytes(downloaded)),
-                };
-
-                print!("\r[progress] {}", progress_text);
-                let _ = std::io::stdout().flush();
-                progress_active = true;
-            }
-            Ok(DownloadEvent::Finished) => {
-                if progress_active {
-                    println!();
-                }
-                println!("[finished] 下载完成");
-                return Ok(());
-            }
-            Ok(DownloadEvent::Failed(err)) => {
-                if progress_active {
-                    println!();
-                }
-                return Err(anyhow::anyhow!("下载失败: {}", err));
-            }
-            Ok(DownloadEvent::Log(line)) => {
-                if progress_active {
-                    println!();
-                    progress_active = false;
-                }
-                println!("{}", line);
-            }
-            Err(_) => {
-                if progress_active {
-                    println!();
-                }
-                return Err(anyhow::anyhow!("下载线程已断开"));
-            }
-        }
-    }
 }
 
 fn start_background_mode(config_path: &str) -> Result<()> {
@@ -916,109 +859,24 @@ fn run_ui_foreground(config_path: &str) -> Result<()> {
     ui_result
 }
 
-fn build_whisper_asr_engine(
-    whisper_cfg: &config::config::WhisperConfig,
-) -> Result<asr::WhisperAsrEngine> {
-    let mut runtime_cfg = whisper_cfg.clone();
-    let resolved_model_path = resolve_runtime_model_path(&runtime_cfg.model_path)?;
-    if resolved_model_path != runtime_cfg.model_path {
-        warn!(
-            "Whisper 模型 {} 不存在，自动回退到 {}",
-            runtime_cfg.model_path, resolved_model_path
-        );
-        runtime_cfg.model_path = resolved_model_path;
-    }
-    runtime_cfg.sync_model_path_defaults_if_generic();
-
-    let mut w = stt::WhisperSTT::with_options(
-        &runtime_cfg.model_path,
-        runtime_cfg.language.clone(),
-        runtime_cfg.translate,
-    )?;
-
-    let strategy = match runtime_cfg.decoding_strategy.clone() {
-        config::WhisperDecodingStrategy::Greedy => stt::DecodingStrategy::Greedy {
-            best_of: runtime_cfg.greedy_best_of,
-        },
-        config::WhisperDecodingStrategy::BeamSearch => stt::DecodingStrategy::BeamSearch {
-            beam_size: runtime_cfg.beam_size,
-        },
-    };
-    w.set_decoding_strategy(strategy);
-    w.set_temperature(runtime_cfg.temperature);
-    w.set_no_context(runtime_cfg.no_context);
-    w.set_suppress_nst(runtime_cfg.suppress_nst);
-    w.set_n_threads(runtime_cfg.resolved_n_threads());
-    w.set_initial_prompt(runtime_cfg.initial_prompt.clone());
-    w.set_hotwords(runtime_cfg.hotwords.clone());
-    Ok(asr::WhisperAsrEngine::new(w))
-}
-
-fn resolve_preview_model_path(whisper_cfg: &config::config::WhisperConfig) -> Option<String> {
-    let current_path = Path::new(&whisper_cfg.model_path);
-    let model_dir = current_path.parent()?;
-    let file_name = current_path.file_name()?.to_str()?;
-    let candidates: &[&str] = match file_name {
-        "ggml-large-v3.bin" => &["ggml-large-v3-turbo.bin", "ggml-medium.bin"],
-        "ggml-large-v3-turbo.bin" => &["ggml-medium.bin"],
-        _ => &[],
-    };
-
-    for candidate in candidates {
-        let candidate_path = model_dir.join(candidate);
-        if candidate_path.is_file() {
-            return Some(candidate_path.to_string_lossy().into_owned());
-        }
-    }
-
-    None
-}
-
-fn build_preview_whisper_asr_engine(
-    whisper_cfg: &config::config::WhisperConfig,
-) -> Result<asr::WhisperAsrEngine> {
-    let mut preview_cfg = whisper_cfg.clone();
-    let current_model_name = Path::new(&whisper_cfg.model_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if let Some(preview_model_path) = resolve_preview_model_path(whisper_cfg) {
-        preview_cfg.model_path = preview_model_path;
-    } else if current_model_name == "ggml-large-v3.bin" {
-        anyhow::bail!("large-v3 预览需要已下载 turbo 或 medium 模型");
-    }
-    preview_cfg.n_threads =
-        config::config::WhisperThreadSetting::Fixed(whisper_cfg.resolved_n_threads().clamp(1, 2));
-    preview_cfg.decoding_strategy = config::WhisperDecodingStrategy::Greedy;
-    preview_cfg.greedy_best_of = 1;
-    build_whisper_asr_engine(&preview_cfg)
-}
-
-fn build_sherpa_sensevoice_asr_engine(
+fn build_sherpa_paraformer_asr_engine(
     config: &config::config::Config,
     preview: bool,
-) -> Result<asr::sherpa_onnx::SherpaSenseVoiceEngine> {
-    if config.audio.sample_rate != 16000 {
-        anyhow::bail!(
-            "sherpa SenseVoice 当前要求 audio.sample_rate=16000，当前为 {}",
-            config.audio.sample_rate
-        );
-    }
-
-    let mut num_threads = config.asr.sherpa.num_threads.max(1);
+) -> Result<asr::sherpa_paraformer::SherpaParaformerEngine> {
+    let mut num_threads = config.asr.sherpa_paraformer.num_threads.max(1);
     if preview {
         num_threads = num_threads.clamp(1, 2);
     }
 
-    asr::sherpa_onnx::SherpaSenseVoiceEngine::new(asr::sherpa_onnx::SherpaSenseVoiceConfig {
-        model_path: config.asr.sherpa.model_path.clone(),
-        tokens_path: config.asr.sherpa.tokens_path.clone(),
-        language: config.asr.sherpa.language.clone(),
-        use_itn: config.asr.sherpa.use_itn,
-        provider: config.asr.sherpa.provider.clone(),
+    let cfg = config::SherpaParaformerConfig {
+        encoder_path: config.asr.sherpa_paraformer.encoder_path.clone(),
+        decoder_path: config.asr.sherpa_paraformer.decoder_path.clone(),
+        tokens_path: config.asr.sherpa_paraformer.tokens_path.clone(),
+        provider: config.asr.sherpa_paraformer.provider.clone(),
         num_threads,
-        sample_rate: config.audio.sample_rate as i32,
-    })
+    };
+
+    asr::sherpa_paraformer::SherpaParaformerEngine::new(cfg)
 }
 
 fn build_selected_asr_engine(
@@ -1026,15 +884,7 @@ fn build_selected_asr_engine(
     preview: bool,
 ) -> Result<Box<dyn asr::AsrEngine>> {
     match config.asr.backend {
-        config::AsrBackend::Whisper => {
-            let whisper_cfg = config.whisper.effective();
-            if preview {
-                Ok(Box::new(build_preview_whisper_asr_engine(&whisper_cfg)?))
-            } else {
-                Ok(Box::new(build_whisper_asr_engine(&whisper_cfg)?))
-            }
-        }
-        config::AsrBackend::SherpaSenseVoice => Ok(Box::new(build_sherpa_sensevoice_asr_engine(
+        config::AsrBackend::SherpaParaformer => Ok(Box::new(build_sherpa_paraformer_asr_engine(
             config, preview,
         )?)),
     }
@@ -1044,26 +894,7 @@ fn build_asr_engine_with_fallback(
     config: &config::config::Config,
     preview: bool,
 ) -> Result<Box<dyn asr::AsrEngine>> {
-    match build_selected_asr_engine(config, preview) {
-        Ok(engine) => Ok(engine),
-        Err(err)
-            if config.asr.backend != config::AsrBackend::Whisper
-                && config.asr.allow_fallback_to_whisper =>
-        {
-            warn!(
-                "ASR 后端 {} 初始化失败: {}，自动回退到 Whisper",
-                config.asr.backend.label(),
-                err
-            );
-            let whisper_cfg = config.whisper.effective();
-            if preview {
-                Ok(Box::new(build_preview_whisper_asr_engine(&whisper_cfg)?))
-            } else {
-                Ok(Box::new(build_whisper_asr_engine(&whisper_cfg)?))
-            }
-        }
-        Err(err) => Err(err),
-    }
+    build_selected_asr_engine(config, preview)
 }
 
 fn spawn_background_asr_runtime_init(
@@ -1169,34 +1000,6 @@ fn apply_runtime_menu_action(
             hotkey_listener.set_hotkey(&snapshot.hotkey)?;
             hotkey_listener.start()?;
             info!("热键已热更新为 {}", snapshot.hotkey);
-        }
-        menu_core::MenuAction::SetField {
-            field: menu_core::EditableField::WhisperModelPath,
-            ..
-        }
-        | menu_core::MenuAction::SwitchWhisperModel { .. } => {
-            let cfg = config::Config::load(&snapshot.config_path)?;
-            match build_asr_engine_with_fallback(&cfg, false) {
-                Ok(new_asr) => {
-                    log_asr_runtime("主转写运行时已热更新", new_asr.as_ref());
-                    let mut guard = asr_runtime.lock();
-                    *guard = Some(new_asr);
-                    drop(guard);
-                    let mut callback_guard = preview_asr_runtime.lock();
-                    *callback_guard = build_asr_engine_with_fallback(&cfg, true).ok();
-                }
-                Err(err) => {
-                    warn!("ASR 热更新失败: {}", err);
-                    if let Some(current) = asr_runtime.lock().as_ref() {
-                        let runtime = current.runtime_info();
-                        warn!(
-                            "ASR 热更新失败后继续使用当前运行时: backend={}, model={}",
-                            runtime.backend.label(),
-                            runtime.model
-                        );
-                    }
-                }
-            }
         }
         menu_core::MenuAction::SetHotkeyTriggerMode { mode } => {
             *hotkey_trigger_mode_runtime.lock() = *mode;
@@ -1391,21 +1194,18 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     info!("音频录制器已初始化");
 
     match config.asr.backend {
-        config::AsrBackend::Whisper => {
-            let whisper_cfg = config.whisper.effective();
-            if let Some(profile) = config.whisper.performance_profile {
-                info!(
-                    "Whisper 性能档位: {:?}，模型: {}，策略: {:?}",
-                    profile, whisper_cfg.model_path, whisper_cfg.decoding_strategy
-                );
-            }
-        }
-        config::AsrBackend::SherpaSenseVoice => {
+        config::AsrBackend::SherpaParaformer => {
             info!(
-                "Sherpa SenseVoice 已选中: model={}, tokens={}, provider={}",
-                config.asr.sherpa.model_path,
-                config.asr.sherpa.tokens_path,
-                config.asr.sherpa.provider.as_deref().unwrap_or("cpu")
+                "Sherpa Paraformer 已选中: encoder={}, decoder={}, tokens={}, provider={}",
+                config.asr.sherpa_paraformer.encoder_path,
+                config.asr.sherpa_paraformer.decoder_path,
+                config.asr.sherpa_paraformer.tokens_path,
+                config
+                    .asr
+                    .sherpa_paraformer
+                    .provider
+                    .as_deref()
+                    .unwrap_or("cpu")
             );
         }
     }
@@ -1432,7 +1232,9 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     // 使用 Mutex 包装，以便在回调中共享
     let llm = Arc::new(Mutex::new(llm));
 
-    let post_processor = Arc::new(stt::TextPostProcessor::new(&config.text_correction));
+    let post_processor = Arc::new(text_processor::TextPostProcessor::new(
+        &config.text_correction,
+    ));
     if config.text_correction.enabled {
         info!(
             "谐音纠错已启用，规则数: {}",

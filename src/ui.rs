@@ -1,10 +1,7 @@
 //! 终端管理界面（TUI）
 
 use crate::hotkey;
-use crate::menu_core::{
-    model_size_from_file_name, whisper_model_path_from_file_name, EditableField, MenuAction,
-    MenuCore, DOWNLOAD_MODEL_SIZES, MENU_ITEMS,
-};
+use crate::menu_core::{EditableField, MenuAction, MenuCore, MENU_ITEMS};
 use crate::model_download;
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{
@@ -212,7 +209,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     };
 
     let summary = format!(
-        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\naudio.vad_enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\nwhisper.model_path: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
+        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\naudio.vad_enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
         snapshot.hotkey,
         snapshot.llm_enabled,
         snapshot.text_correction_enabled,
@@ -221,7 +218,6 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
         snapshot.llm_model,
         snapshot.llm_api_base,
         snapshot.llm_api_key_env,
-        snapshot.whisper_model_path,
         snapshot.dirty,
         models,
         download_logs
@@ -477,9 +473,10 @@ fn execute_menu_action(app: &mut AppState) {
         }
         3 => start_input(app, EditableField::Hotkey),
         4 => start_llm_form(app),
-        5 => switch_whisper_model(app),
-        6 => start_download_model(app),
-        7 => {
+        5 => {
+            app.menu.execute(MenuAction::DownloadModel);
+        }
+        6 => {
             let result = app.menu.execute(MenuAction::QuitUi);
             if result.quit_ui {
                 app.should_quit = true;
@@ -517,51 +514,6 @@ fn start_llm_form(app: &mut AppState) {
     app.input_buffer = form.current_value();
     app.menu
         .set_status("LLM 配置表单（1/4）：编辑 llm.provider");
-}
-
-fn switch_whisper_model(app: &mut AppState) {
-    let snapshot = app.menu.snapshot();
-    let current_file = std::path::Path::new(&snapshot.whisper_model_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let mut options = snapshot
-        .local_models
-        .into_iter()
-        .filter(|name| name.ends_with(".bin"))
-        .collect::<Vec<_>>();
-    options.sort();
-    options.dedup();
-    if options.is_empty() {
-        app.menu.set_status("未发现已下载的 Whisper 模型");
-        return;
-    }
-
-    let current_index = options.iter().position(|m| m == current_file).unwrap_or(0);
-    let next_file = options[(current_index + 1) % options.len()].clone();
-    match whisper_model_path_from_file_name(&next_file) {
-        Ok(model_path) => {
-            app.menu
-                .execute(MenuAction::SwitchWhisperModel { model_path });
-        }
-        Err(err) => {
-            app.menu
-                .set_status(format!("切换 Whisper 模型失败: {}", err));
-        }
-    }
-}
-
-fn start_download_model(app: &mut AppState) {
-    let snapshot = app.menu.snapshot();
-    let current_file = std::path::Path::new(&snapshot.whisper_model_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let preferred = model_size_from_file_name(current_file)
-        .unwrap_or(DOWNLOAD_MODEL_SIZES[0])
-        .to_string();
-    app.menu
-        .execute(MenuAction::DownloadModel { size: preferred });
 }
 
 fn apply_input(app: &mut AppState) -> Result<()> {
@@ -622,7 +574,6 @@ fn input_target_label(target: EditableField) -> &'static str {
         EditableField::LlmModel => "llm.model",
         EditableField::LlmApiBase => "llm.api_base",
         EditableField::LlmApiKeyEnv => "llm.api_key_env",
-        EditableField::WhisperModelPath => "whisper.model_path",
     }
 }
 

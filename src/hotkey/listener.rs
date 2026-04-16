@@ -1,11 +1,13 @@
-//! 热键监听器 - 默认使用 global-hotkey，右 Ctrl 使用低层键盘事件监听
+//! 热键监听器 - X11/macOS 默认使用 global-hotkey，Linux Wayland 当前不支持全局热键
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyEventReceiver, GlobalHotKeyManager};
 use parking_lot::Mutex;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
+use rdev::{EventType, Key};
+#[cfg(target_os = "macos")]
 use rdev::{EventType, Key};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -51,12 +53,20 @@ pub struct HotkeyListener {
 impl HotkeyListener {
     /// 创建新的热键监听器
     pub fn new() -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        let manager = if is_wayland_session() {
+            None
+        } else {
+            Some(GlobalHotKeyManager::new().map_err(|e| anyhow!("无法创建热键管理器: {:?}", e))?)
+        };
+
+        #[cfg(not(target_os = "linux"))]
         let manager =
-            GlobalHotKeyManager::new().map_err(|e| anyhow!("无法创建热键管理器: {:?}", e))?;
+            Some(GlobalHotKeyManager::new().map_err(|e| anyhow!("无法创建热键管理器: {:?}", e))?);
 
         Ok(Self {
             hotkey: None,
-            manager: Some(manager),
+            manager,
             callback: None,
             press_callback: None,
             release_callback: None,
@@ -71,6 +81,11 @@ impl HotkeyListener {
     pub fn set_hotkey(&mut self, key: &str) -> Result<()> {
         self.stop_listener_thread();
         validate_hotkey_config(key)?;
+
+        #[cfg(target_os = "linux")]
+        if is_wayland_session() {
+            return Err(anyhow!(linux_wayland_hotkey_unsupported_message()));
+        }
 
         if is_right_ctrl_alias(key) {
             self.unregister_global_hotkey();
@@ -369,7 +384,6 @@ impl HotkeyListener {
 
         Ok(())
     }
-
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn start_right_ctrl_listener(&mut self) -> Result<()> {
         Err(anyhow!(
@@ -417,7 +431,16 @@ pub fn hotkey_policy_hint() -> &'static str {
     "建议使用 ctrl/right_ctrl、单独 F1-F24，或至少包含 ctrl/alt/super 的组合键（最多3键，不支持仅 Shift 组合）"
 }
 
+#[cfg(target_os = "linux")]
+fn linux_wayland_hotkey_unsupported_message() -> &'static str {
+    "当前 Linux Wayland 会话暂不支持 EchoPup 全局热键监听；请切换到 X11 会话运行。为避免静默失效，当前版本会直接报错。"
+}
+
 pub fn validate_hotkey_config(key: &str) -> Result<()> {
+    validate_hotkey_config_for_session(key, is_wayland_session())
+}
+
+fn validate_hotkey_config_for_session(key: &str, is_wayland: bool) -> Result<()> {
     let key_count = hotkey_key_count(key);
     if key_count == 0 {
         return Err(anyhow!("热键不能为空"));
@@ -428,6 +451,11 @@ pub fn validate_hotkey_config(key: &str) -> Result<()> {
             MAX_HOTKEY_KEYS,
             key_count
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    if is_wayland {
+        return Err(anyhow!(linux_wayland_hotkey_unsupported_message()));
     }
 
     if is_right_ctrl_alias(key) {
@@ -497,15 +525,37 @@ fn is_plain_f1_to_f12(hotkey: &HotKey) -> bool {
         )
 }
 
+fn is_wayland_session() -> bool {
+    std::env::var("XDG_SESSION_TYPE")
+        .map(|v| v.to_lowercase() == "wayland")
+        .unwrap_or(false)
+}
+
 fn should_use_low_level_function_key_listener(hotkey: &HotKey) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        return is_plain_f1_to_f12(hotkey);
+        should_use_low_level_function_key_listener_for_session(hotkey, is_wayland_session())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = hotkey;
         false
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn should_use_low_level_function_key_listener_for_session(
+    hotkey: &HotKey,
+    is_wayland: bool,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        !is_wayland && is_plain_f1_to_f12(hotkey)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = is_wayland;
+        is_plain_f1_to_f12(hotkey)
     }
 }
 
@@ -634,10 +684,11 @@ impl Drop for HotkeyListener {
 mod tests {
     #[cfg(target_os = "macos")]
     use super::parse_macos_fn_state_output;
-    use super::{
-        is_right_ctrl_alias, should_use_low_level_function_key_listener, validate_hotkey_config,
-    };
+    use super::{is_right_ctrl_alias, validate_hotkey_config_for_session};
     use global_hotkey::hotkey::HotKey;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use super::should_use_low_level_function_key_listener_for_session;
 
     #[test]
     fn test_right_ctrl_aliases() {
@@ -654,19 +705,23 @@ mod tests {
 
     #[test]
     fn test_validate_hotkey_rejects_single_char() {
-        let err = validate_hotkey_config("z").unwrap_err().to_string();
+        let err = validate_hotkey_config_for_session("z", false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("会吞掉常用输入键"));
     }
 
     #[test]
     fn test_validate_hotkey_accepts_modifier_combo() {
-        validate_hotkey_config("ctrl+space").unwrap();
-        validate_hotkey_config("ctrl+shift+a").unwrap();
+        validate_hotkey_config_for_session("ctrl+space", false).unwrap();
+        validate_hotkey_config_for_session("ctrl+shift+a", false).unwrap();
     }
 
     #[test]
     fn test_validate_hotkey_rejects_shift_only_combo() {
-        let err = validate_hotkey_config("shift+z").unwrap_err().to_string();
+        let err = validate_hotkey_config_for_session("shift+z", false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("不支持仅使用 Shift"));
     }
 
@@ -680,12 +735,12 @@ mod tests {
 
     #[test]
     fn test_validate_hotkey_accepts_function_key() {
-        validate_hotkey_config("f12").unwrap();
+        validate_hotkey_config_for_session("f12", false).unwrap();
     }
 
     #[test]
     fn test_validate_hotkey_limits_key_count() {
-        let err = validate_hotkey_config("ctrl+alt+shift+f12")
+        let err = validate_hotkey_config_for_session("ctrl+alt+shift+f12", false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("最多支持"));
@@ -693,15 +748,42 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn test_plain_f1_uses_low_level_listener() {
+    fn test_plain_f1_uses_low_level_listener_on_x11() {
         let hotkey: HotKey = "f1".parse().unwrap();
-        assert!(should_use_low_level_function_key_listener(&hotkey));
+        assert!(should_use_low_level_function_key_listener_for_session(
+            &hotkey, false
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_plain_f1_does_not_use_x11_listener_on_wayland() {
+        let hotkey: HotKey = "f1".parse().unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(!should_use_low_level_function_key_listener_for_session(
+            &hotkey, true
+        ));
+        #[cfg(target_os = "macos")]
+        assert!(should_use_low_level_function_key_listener_for_session(
+            &hotkey, true
+        ));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn test_ctrl_f1_does_not_use_low_level_listener() {
         let hotkey: HotKey = "ctrl+f1".parse().unwrap();
-        assert!(!should_use_low_level_function_key_listener(&hotkey));
+        assert!(!should_use_low_level_function_key_listener_for_session(
+            &hotkey, false
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_hotkey_rejects_linux_wayland_session() {
+        let err = validate_hotkey_config_for_session("f2", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Wayland"));
     }
 }

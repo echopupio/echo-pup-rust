@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// 全局配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,8 +16,6 @@ pub struct Config {
     pub audio: AudioConfig,
     /// ASR 后端选择与运行时配置
     pub asr: AsrConfig,
-    /// Whisper 配置
-    pub whisper: WhisperConfig,
     /// LLM 配置
     pub llm: LLMConfig,
     /// 文本纠错配置
@@ -32,7 +30,6 @@ impl Default for Config {
             hotkey: HotkeyConfig::default(),
             audio: AudioConfig::default(),
             asr: AsrConfig::default(),
-            whisper: WhisperConfig::default(),
             llm: LLMConfig::default(),
             text_correction: TextCorrectionConfig::default(),
             feedback: FeedbackConfig::default(),
@@ -118,22 +115,12 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AsrBackend {
-    Whisper,
-    SherpaSenseVoice,
+    SherpaParaformer,
 }
 
 impl Default for AsrBackend {
     fn default() -> Self {
-        Self::Whisper
-    }
-}
-
-impl AsrBackend {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Whisper => "Whisper",
-            Self::SherpaSenseVoice => "Sherpa SenseVoice",
-        }
+        Self::SherpaParaformer
     }
 }
 
@@ -142,171 +129,53 @@ impl AsrBackend {
 pub struct AsrConfig {
     /// 当前启用的本地 ASR 后端
     pub backend: AsrBackend,
-    /// 选中 sherpa 失败时，是否自动回退到 whisper
-    pub allow_fallback_to_whisper: bool,
-    /// sherpa-onnx + SenseVoice 配置
-    pub sherpa: SherpaConfig,
+    /// sherpa-onnx + Paraformer 配置
+    pub sherpa_paraformer: SherpaParaformerConfig,
 }
 
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
-            backend: AsrBackend::Whisper,
-            allow_fallback_to_whisper: true,
-            sherpa: SherpaConfig::default(),
+            backend: AsrBackend::SherpaParaformer,
+            sherpa_paraformer: SherpaParaformerConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SherpaConfig {
-    /// SenseVoiceSmall 模型文件
-    pub model_path: String,
-    /// tokens 文件
+pub struct SherpaParaformerConfig {
+    /// encoder.onnx 模型文件路径
+    pub encoder_path: String,
+    /// decoder.onnx 模型文件路径
+    pub decoder_path: String,
+    /// tokens 文件路径
     pub tokens_path: String,
-    /// 语言，None 表示 auto
-    pub language: Option<String>,
-    /// 是否启用 ITN
-    pub use_itn: bool,
     /// 推理 provider，默认 cpu
     pub provider: Option<String>,
     /// 推理线程数
     pub num_threads: i32,
 }
 
-impl Default for SherpaConfig {
+impl Default for SherpaParaformerConfig {
     fn default() -> Self {
         Self {
-            model_path: default_sensevoice_model_path("model.onnx"),
-            tokens_path: default_sensevoice_model_path("tokens.txt"),
-            language: Some("zh".to_string()),
-            use_itn: true,
+            encoder_path: default_paraformer_model_path("encoder.onnx"),
+            decoder_path: default_paraformer_model_path("decoder.onnx"),
+            tokens_path: default_paraformer_model_path("tokens.txt"),
             provider: Some("cpu".to_string()),
             num_threads: default_asr_num_threads(),
         }
     }
 }
 
-/// Whisper 配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WhisperConfig {
-    /// 性能档位（accurate / balanced / fast）
-    pub performance_profile: Option<WhisperPerformanceProfile>,
-    /// 模型路径
-    pub model_path: String,
-    /// 是否翻译
-    pub translate: bool,
-    /// 语言，null 表示自动检测
-    pub language: Option<String>,
-    /// 解码策略（beam_search 或 greedy）
-    pub decoding_strategy: WhisperDecodingStrategy,
-    /// Greedy 模式下的 best_of
-    pub greedy_best_of: i32,
-    /// BeamSearch 模式下的 beam_size
-    pub beam_size: i32,
-    /// 解码温度
-    pub temperature: f32,
-    /// 禁用跨段上下文，避免上一次话语影响本次识别
-    pub no_context: bool,
-    /// 抑制非语音标记 token
-    pub suppress_nst: bool,
-    /// 解码线程数，支持整数或 "auto"
-    pub n_threads: WhisperThreadSetting,
-    /// 可选初始提示词（可放业务热词）
-    pub initial_prompt: Option<String>,
-    /// 热词列表（用于增强特定词汇的识别优先级）
-    pub hotwords: Vec<String>,
-}
-
-/// Whisper 解码策略
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WhisperDecodingStrategy {
-    Greedy,
-    BeamSearch,
-}
-
-/// Whisper 性能档位
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WhisperPerformanceProfile {
-    Accurate,
-    Balanced,
-    Fast,
-}
-
-/// Whisper 线程配置，支持固定值和自动模式
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum WhisperThreadSetting {
-    Fixed(i32),
-    Mode(String),
-}
-
-impl Default for WhisperThreadSetting {
-    fn default() -> Self {
-        Self::Mode("auto".to_string())
-    }
-}
-
-impl WhisperThreadSetting {
-    fn auto_cap() -> i32 {
-        #[cfg(target_os = "linux")]
-        {
-            8
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            i32::MAX
-        }
-    }
-
-    /// 解析最终线程数
-    pub fn resolve(&self) -> i32 {
-        match self {
-            WhisperThreadSetting::Fixed(n) => (*n).max(1),
-            WhisperThreadSetting::Mode(mode) => {
-                if mode.eq_ignore_ascii_case("auto") {
-                    std::thread::available_parallelism()
-                        .map(|n| n.get() as i32)
-                        .unwrap_or(4)
-                        .min(Self::auto_cap())
-                        .max(1)
-                } else if let Ok(parsed) = mode.parse::<i32>() {
-                    parsed.max(1)
-                } else {
-                    4.min(Self::auto_cap()).max(1)
-                }
-            }
-        }
-    }
-}
-
-impl Default for WhisperDecodingStrategy {
-    fn default() -> Self {
-        Self::BeamSearch
-    }
-}
-
-fn default_whisper_model_path(file_name: &str) -> String {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".echopup")
-        .join("models")
-        .join(file_name)
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn default_sensevoice_model_path(file_name: &str) -> String {
+fn default_paraformer_model_path(file_name: &str) -> String {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".echopup")
         .join("models")
         .join("asr")
-        .join("sensevoice-small")
+        .join("sherpa-onnx-streaming-paraformer-bilingual-zh-en")
         .join(file_name)
         .to_string_lossy()
         .into_owned()
@@ -317,102 +186,6 @@ fn default_asr_num_threads() -> i32 {
         .map(|n| n.get() as i32)
         .unwrap_or(4)
         .clamp(1, 8)
-}
-
-impl Default for WhisperConfig {
-    fn default() -> Self {
-        Self {
-            performance_profile: None,
-            model_path: default_whisper_model_path("ggml-large-v3.bin"),
-            translate: false,
-            language: Some("zh".to_string()),
-            decoding_strategy: WhisperDecodingStrategy::BeamSearch,
-            greedy_best_of: 5,
-            beam_size: 5,
-            temperature: 0.0,
-            no_context: true,
-            suppress_nst: true,
-            n_threads: WhisperThreadSetting::default(),
-            initial_prompt: None,
-            hotwords: Vec::new(),
-        }
-    }
-}
-
-impl WhisperConfig {
-    fn model_file_name(&self) -> Option<&str> {
-        Path::new(&self.model_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-    }
-
-    fn has_generic_default_strategy(&self) -> bool {
-        self.decoding_strategy == WhisperDecodingStrategy::BeamSearch
-            && self.beam_size == 5
-            && self.greedy_best_of == 5
-    }
-
-    pub fn apply_model_path_defaults(&mut self) -> bool {
-        match self.model_file_name() {
-            Some("ggml-large-v3.bin") => {
-                self.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
-                self.beam_size = 5;
-                true
-            }
-            Some("ggml-large-v3-turbo.bin") => {
-                self.decoding_strategy = WhisperDecodingStrategy::Greedy;
-                self.greedy_best_of = 2;
-                true
-            }
-            Some("ggml-medium.bin") => {
-                self.decoding_strategy = WhisperDecodingStrategy::Greedy;
-                self.greedy_best_of = 1;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub fn sync_model_path_defaults_if_generic(&mut self) -> bool {
-        if !self.has_generic_default_strategy() {
-            return false;
-        }
-        self.apply_model_path_defaults()
-    }
-
-    /// 根据性能档位生成生效配置
-    pub fn effective(&self) -> Self {
-        let mut effective = self.clone();
-
-        if let Some(profile) = self.performance_profile {
-            match profile {
-                WhisperPerformanceProfile::Accurate => {
-                    effective.model_path = default_whisper_model_path("ggml-large-v3.bin");
-                    effective.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
-                    effective.beam_size = 5;
-                }
-                WhisperPerformanceProfile::Balanced => {
-                    effective.model_path = default_whisper_model_path("ggml-large-v3-turbo.bin");
-                    effective.decoding_strategy = WhisperDecodingStrategy::Greedy;
-                    effective.greedy_best_of = 2;
-                }
-                WhisperPerformanceProfile::Fast => {
-                    effective.model_path = default_whisper_model_path("ggml-medium.bin");
-                    effective.decoding_strategy = WhisperDecodingStrategy::Greedy;
-                    effective.greedy_best_of = 1;
-                }
-            }
-        } else {
-            effective.sync_model_path_defaults_if_generic();
-        }
-
-        effective
-    }
-
-    /// 解析生效线程数
-    pub fn resolved_n_threads(&self) -> i32 {
-        self.n_threads.resolve()
-    }
 }
 
 /// 文本纠错配置
@@ -570,58 +343,31 @@ mod tests {
         assert_eq!(config.hotkey.key, "ctrl+space");
         assert_eq!(config.hotkey.trigger_mode, HotkeyTriggerMode::PressToToggle);
         assert_eq!(config.audio.sample_rate, 16000);
-        assert_eq!(config.asr.backend, AsrBackend::Whisper);
-        assert!(config.asr.allow_fallback_to_whisper);
+        assert_eq!(config.asr.backend, AsrBackend::SherpaParaformer);
         assert!(config.feedback.status_bar_enabled);
         assert!(config.feedback.sound_enabled);
         assert!(config.feedback.notify_tip_on_start);
         assert!(
-            Path::new(&config.whisper.model_path).ends_with(".echopup/models/ggml-large-v3.bin")
+            Path::new(&config.asr.sherpa_paraformer.encoder_path).ends_with(
+                ".echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/encoder.onnx"
+            )
         );
-        assert!(Path::new(&config.asr.sherpa.model_path)
-            .ends_with(".echopup/models/asr/sensevoice-small/model.onnx"));
-    }
-
-    #[test]
-    fn test_effective_profile_model_path() {
-        let mut whisper = WhisperConfig::default();
-        whisper.performance_profile = Some(WhisperPerformanceProfile::Fast);
-        let effective = whisper.effective();
-        assert!(Path::new(&effective.model_path).ends_with(".echopup/models/ggml-medium.bin"));
-        assert_eq!(effective.decoding_strategy, WhisperDecodingStrategy::Greedy);
-        assert_eq!(effective.greedy_best_of, 1);
-    }
-
-    #[test]
-    fn test_effective_syncs_medium_defaults_when_strategy_is_legacy_default() {
-        let mut whisper = WhisperConfig::default();
-        whisper.model_path = default_whisper_model_path("ggml-medium.bin");
-        let effective = whisper.effective();
-        assert_eq!(effective.decoding_strategy, WhisperDecodingStrategy::Greedy);
-        assert_eq!(effective.greedy_best_of, 1);
-    }
-
-    #[test]
-    fn test_effective_preserves_custom_strategy_without_profile() {
-        let mut whisper = WhisperConfig::default();
-        whisper.model_path = default_whisper_model_path("ggml-medium.bin");
-        whisper.decoding_strategy = WhisperDecodingStrategy::BeamSearch;
-        whisper.beam_size = 3;
-        whisper.greedy_best_of = 9;
-        let effective = whisper.effective();
-        assert_eq!(
-            effective.decoding_strategy,
-            WhisperDecodingStrategy::BeamSearch
+        assert!(
+            Path::new(&config.asr.sherpa_paraformer.decoder_path).ends_with(
+                ".echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/decoder.onnx"
+            )
         );
-        assert_eq!(effective.beam_size, 3);
-        assert_eq!(effective.greedy_best_of, 9);
+        assert!(
+            Path::new(&config.asr.sherpa_paraformer.tokens_path).ends_with(
+                ".echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/tokens.txt"
+            )
+        );
     }
 
     #[test]
-    fn test_auto_thread_setting_respects_platform_cap() {
-        let resolved = WhisperThreadSetting::Mode("auto".to_string()).resolve();
-        assert!(resolved >= 1);
-        #[cfg(target_os = "linux")]
-        assert!(resolved <= 8);
+    fn test_default_asr_num_threads() {
+        let num_threads = default_asr_num_threads();
+        assert!(num_threads >= 1);
+        assert!(num_threads <= 8);
     }
 }

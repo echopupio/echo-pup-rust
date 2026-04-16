@@ -2,40 +2,20 @@
 
 use crate::asr::types::{AsrBackendKind, AsrEngine, AsrRuntimeInfo, AsrSession, AsrSessionConfig};
 use crate::audio::buffer::AudioRingBuffer;
+use crate::config::SherpaParaformerConfig;
 use anyhow::{Context, Result};
-use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig};
+use sherpa_onnx::{
+    OnlineModelConfig, OnlineParaformerModelConfig, OnlineRecognizer, OnlineRecognizerConfig,
+};
 use std::path::Path;
 use std::sync::{atomic::AtomicBool, Arc};
 
-#[derive(Debug, Clone)]
-pub struct SherpaSenseVoiceConfig {
-    pub model_path: String,
-    pub tokens_path: String,
-    pub language: Option<String>,
-    pub use_itn: bool,
-    pub provider: Option<String>,
-    pub num_threads: i32,
-    pub sample_rate: i32,
+pub struct SherpaParaformerEngine {
+    cfg: SherpaParaformerConfig,
 }
 
-impl SherpaSenseVoiceConfig {
-    pub fn validate(&self) -> Result<()> {
-        if !Path::new(&self.model_path).exists() {
-            anyhow::bail!("未找到 SenseVoice 模型文件: {}", self.model_path);
-        }
-        if !Path::new(&self.tokens_path).exists() {
-            anyhow::bail!("未找到 SenseVoice tokens 文件: {}", self.tokens_path);
-        }
-        Ok(())
-    }
-}
-
-pub struct SherpaSenseVoiceEngine {
-    cfg: SherpaSenseVoiceConfig,
-}
-
-struct SherpaSenseVoiceSession {
-    recognizer: OfflineRecognizer,
+struct SherpaParaformerSession {
+    recognizer: OnlineRecognizer,
     sample_rate: i32,
     full_audio: Vec<f32>,
     partial_window: AudioRingBuffer,
@@ -43,27 +23,28 @@ struct SherpaSenseVoiceSession {
     has_pending_audio: bool,
 }
 
-impl SherpaSenseVoiceEngine {
-    pub fn new(cfg: SherpaSenseVoiceConfig) -> Result<Self> {
-        cfg.validate()?;
-        build_offline_recognizer(&cfg)
-            .with_context(|| format!("创建 sherpa SenseVoice 识别器失败: {}", cfg.model_path))?;
+impl SherpaParaformerEngine {
+    pub fn new(cfg: SherpaParaformerConfig) -> Result<Self> {
+        validate_config(&cfg)?;
+        // Create recognizer to verify it works
+        build_online_recognizer(&cfg)
+            .with_context(|| format!("创建 sherpa Paraformer 识别器失败"))?;
 
         Ok(Self { cfg })
     }
 
     fn model_display_name(&self) -> String {
-        Path::new(&self.cfg.model_path)
+        Path::new(&self.cfg.encoder_path)
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or(self.cfg.model_path.as_str())
+            .unwrap_or("paraformer")
             .to_string()
     }
 }
 
-impl AsrEngine for SherpaSenseVoiceEngine {
+impl AsrEngine for SherpaParaformerEngine {
     fn backend_kind(&self) -> AsrBackendKind {
-        AsrBackendKind::SherpaSenseVoice
+        AsrBackendKind::SherpaParaformer
     }
 
     fn runtime_info(&self) -> AsrRuntimeInfo {
@@ -72,18 +53,16 @@ impl AsrEngine for SherpaSenseVoiceEngine {
             model: self.model_display_name(),
             threads: Some(self.cfg.num_threads),
             detail: Some(format!(
-                "provider={} language={} itn={}",
+                "provider={}",
                 self.cfg.provider.as_deref().unwrap_or("cpu"),
-                self.cfg.language.as_deref().unwrap_or("auto"),
-                self.cfg.use_itn
             )),
         }
     }
 
     fn start_session(&self, config: AsrSessionConfig) -> Result<Box<dyn AsrSession>> {
-        Ok(Box::new(SherpaSenseVoiceSession {
-            recognizer: build_offline_recognizer(&self.cfg)?,
-            sample_rate: self.cfg.sample_rate,
+        Ok(Box::new(SherpaParaformerSession {
+            recognizer: build_online_recognizer(&self.cfg)?,
+            sample_rate: 16000, // Paraformer expects 16kHz
             full_audio: Vec::new(),
             partial_window: AudioRingBuffer::with_capacity(config.max_partial_window_samples),
             min_partial_samples: config.min_partial_samples,
@@ -92,14 +71,14 @@ impl AsrEngine for SherpaSenseVoiceEngine {
     }
 
     fn transcribe(&mut self, audio: &[f32]) -> Result<String> {
-        let recognizer = build_offline_recognizer(&self.cfg)?;
-        decode_audio(&recognizer, self.cfg.sample_rate, audio)
+        let recognizer = build_online_recognizer(&self.cfg)?;
+        decode_audio(&recognizer, 16000, audio)
     }
 }
 
-impl AsrSession for SherpaSenseVoiceSession {
+impl AsrSession for SherpaParaformerSession {
     fn backend_kind(&self) -> AsrBackendKind {
-        AsrBackendKind::SherpaSenseVoice
+        AsrBackendKind::SherpaParaformer
     }
 
     fn accept_audio(&mut self, audio: &[f32]) -> Result<()> {
@@ -126,7 +105,7 @@ impl AsrSession for SherpaSenseVoiceSession {
         self.has_pending_audio = false;
         let text = decode_audio(&self.recognizer, self.sample_rate, &preview_audio)?;
         let trimmed = text.trim();
-        if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
+        if trimmed.is_empty() {
             return Ok(None);
         }
 
@@ -146,22 +125,47 @@ impl AsrSession for SherpaSenseVoiceSession {
     }
 }
 
-fn build_offline_recognizer(cfg: &SherpaSenseVoiceConfig) -> Result<OfflineRecognizer> {
-    let mut recognizer_cfg = OfflineRecognizerConfig::default();
-    recognizer_cfg.model_config.sense_voice = OfflineSenseVoiceModelConfig {
-        model: Some(cfg.model_path.clone()),
-        language: cfg.language.clone(),
-        use_itn: cfg.use_itn,
-    };
-    recognizer_cfg.model_config.tokens = Some(cfg.tokens_path.clone());
-    recognizer_cfg.model_config.num_threads = cfg.num_threads.max(1);
-    recognizer_cfg.model_config.provider = cfg.provider.clone();
-
-    OfflineRecognizer::create(&recognizer_cfg)
-        .context("sherpa-onnx OfflineRecognizer::create 返回空指针")
+fn validate_config(cfg: &SherpaParaformerConfig) -> Result<()> {
+    if !Path::new(&cfg.encoder_path).exists() {
+        anyhow::bail!("未找到 Paraformer encoder 模型文件: {}", cfg.encoder_path);
+    }
+    if !Path::new(&cfg.decoder_path).exists() {
+        anyhow::bail!("未找到 Paraformer decoder 模型文件: {}", cfg.decoder_path);
+    }
+    if !Path::new(&cfg.tokens_path).exists() {
+        anyhow::bail!("未找到 Paraformer tokens 文件: {}", cfg.tokens_path);
+    }
+    Ok(())
 }
 
-fn decode_audio(recognizer: &OfflineRecognizer, sample_rate: i32, audio: &[f32]) -> Result<String> {
+fn build_online_recognizer(cfg: &SherpaParaformerConfig) -> Result<OnlineRecognizer> {
+    let paraformer_model = OnlineParaformerModelConfig {
+        encoder: Some(cfg.encoder_path.clone()),
+        decoder: Some(cfg.decoder_path.clone()),
+    };
+
+    let model_config = OnlineModelConfig {
+        paraformer: paraformer_model,
+        tokens: Some(cfg.tokens_path.clone()),
+        num_threads: cfg.num_threads.max(1),
+        provider: cfg.provider.clone(),
+        ..Default::default()
+    };
+
+    let recognizer_cfg = OnlineRecognizerConfig {
+        model_config,
+        enable_endpoint: false,
+        rule1_min_trailing_silence: 2.4,
+        rule2_min_trailing_silence: 1.2,
+        rule3_min_utterance_length: 300.0,
+        ..Default::default()
+    };
+
+    OnlineRecognizer::create(&recognizer_cfg)
+        .context("sherpa-onnx OnlineRecognizer::create 返回空指针")
+}
+
+fn decode_audio(recognizer: &OnlineRecognizer, sample_rate: i32, audio: &[f32]) -> Result<String> {
     if audio.is_empty() {
         return Ok(String::new());
     }
@@ -169,6 +173,8 @@ fn decode_audio(recognizer: &OfflineRecognizer, sample_rate: i32, audio: &[f32])
     let stream = recognizer.create_stream();
     stream.accept_waveform(sample_rate, audio);
     recognizer.decode(&stream);
-    let result = stream.get_result().context("sherpa-onnx 未返回识别结果")?;
+    let result = recognizer
+        .get_result(&stream)
+        .context("sherpa-onnx 未返回识别结果")?;
     Ok(result.text)
 }

@@ -12,7 +12,7 @@ pub struct TextPostProcessor {
 impl TextPostProcessor {
     /// 根据配置构建后处理器
     pub fn new(config: &TextCorrectionConfig) -> Self {
-        // 长词优先替换，避免“北京大学”先被“北京”截断
+        // 长词优先替换，避免"北京大学"先被"北京"截断
         let mut replacement_rules: Vec<(String, String)> = config
             .homophone_map
             .iter()

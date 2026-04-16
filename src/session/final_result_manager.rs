@@ -7,10 +7,6 @@ pub struct FinalResultManager {
 }
 
 impl FinalResultManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn clear(&mut self) {
         self.latest_final_text.clear();
     }
@@ -32,13 +28,13 @@ mod tests {
 
     #[test]
     fn prepare_commit_ignores_blank_text() {
-        let mut manager = FinalResultManager::new();
+        let mut manager = FinalResultManager::default();
         assert!(manager.prepare_commit("   ").is_none());
     }
 
     #[test]
     fn prepare_commit_deduplicates_latest_final() {
-        let mut manager = FinalResultManager::new();
+        let mut manager = FinalResultManager::default();
         assert!(manager.prepare_commit("你好").is_some());
         assert!(manager.prepare_commit("你好").is_none());
     }

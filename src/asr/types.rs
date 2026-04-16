@@ -4,16 +4,13 @@ use std::sync::{atomic::AtomicBool, Arc};
 /// 识别后端类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrBackendKind {
-    Whisper,
-    #[allow(dead_code)]
-    SherpaSenseVoice,
+    SherpaParaformer,
 }
 
 impl AsrBackendKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Whisper => "whisper",
-            Self::SherpaSenseVoice => "sherpa_sensevoice",
+            Self::SherpaParaformer => "sherpa_paraformer",
         }
     }
 }

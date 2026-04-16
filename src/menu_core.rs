@@ -2,33 +2,21 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::config::Config;
 use crate::config::HotkeyTriggerMode;
 use crate::hotkey;
-use crate::model_download::{
-    self, DownloadEvent, DownloadStart, DownloadState, DOWNLOAD_LOG_MAX_LINES,
-};
-use crate::runtime;
+use crate::model_download::{self, DownloadEvent, DownloadState, DOWNLOAD_LOG_MAX_LINES};
 
-pub const MENU_ITEMS: [&str; 8] = [
+pub const MENU_ITEMS: [&str; 7] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
     "切换 VAD 开关",
     "编辑热键（按键捕获）",
     "编辑 LLM 配置",
-    "切换 Whisper 模型",
-    "下载模型",
+    "下载 ASR 模型",
     "退出",
-];
-
-pub const DOWNLOAD_MODEL_SIZES: [&str; 3] = ["large-v3", "turbo", "medium"];
-pub const WHISPER_MODEL_FILES: [&str; 3] = [
-    "ggml-large-v3.bin",
-    "ggml-large-v3-turbo.bin",
-    "ggml-medium.bin",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +27,6 @@ pub enum EditableField {
     LlmModel,
     LlmApiBase,
     LlmApiKeyEnv,
-    WhisperModelPath,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +50,7 @@ pub enum MenuAction {
     SetHotkeyTriggerMode {
         mode: HotkeyTriggerMode,
     },
-    SwitchWhisperModel {
-        model_path: String,
-    },
-    DownloadModel {
-        size: String,
-    },
+    DownloadModel,
     ReloadConfig,
     QuitUi,
 }
@@ -89,7 +71,6 @@ pub struct MenuSnapshot {
     pub llm_model: String,
     pub llm_api_base: String,
     pub llm_api_key_env: String,
-    pub whisper_model_path: String,
 
     pub local_models: Vec<String>,
     pub download: Option<DownloadState>,
@@ -148,7 +129,6 @@ impl MenuCore {
             llm_model: self.config.llm.model.clone(),
             llm_api_base: self.config.llm.api_base.clone(),
             llm_api_key_env: self.config.llm.api_key_env.clone(),
-            whisper_model_path: self.config.whisper.model_path.clone(),
 
             local_models: self.local_models.clone(),
             download: self.download.clone(),
@@ -163,7 +143,6 @@ impl MenuCore {
             EditableField::LlmModel => self.config.llm.model.clone(),
             EditableField::LlmApiBase => self.config.llm.api_base.clone(),
             EditableField::LlmApiKeyEnv => self.config.llm.api_key_env.clone(),
-            EditableField::WhisperModelPath => self.config.whisper.model_path.clone(),
         }
     }
 
@@ -248,14 +227,6 @@ impl MenuCore {
                     EditableField::LlmModel => self.config.llm.model = trimmed,
                     EditableField::LlmApiBase => self.config.llm.api_base = trimmed,
                     EditableField::LlmApiKeyEnv => self.config.llm.api_key_env = trimmed,
-                    EditableField::WhisperModelPath => {
-                        if !Path::new(&trimmed).is_file() {
-                            return Err(anyhow!("Whisper 模型文件不存在: {}", trimmed));
-                        }
-                        self.config.whisper.model_path = trimmed;
-                        self.config.whisper.performance_profile = None;
-                        self.config.whisper.apply_model_path_defaults();
-                    }
                 }
 
                 self.persist_config()?;
@@ -292,44 +263,22 @@ impl MenuCore {
                 self.status = format!("热键触发模式已切换为 {}（已自动保存）", mode.label());
                 Ok(self.status.clone())
             }
-            MenuAction::SwitchWhisperModel { model_path } => {
-                let model_path = model_path.trim().to_string();
-                if model_path.is_empty() {
-                    return Err(anyhow!("Whisper 模型路径不能为空"));
+            MenuAction::DownloadModel => {
+                use model_download::start_paraformer_model_download;
+                match start_paraformer_model_download() {
+                    Ok(start) => {
+                        self.download = Some(start.state);
+                        self.download_rx = Some(start.rx);
+                        self.download_logs.clear();
+                        self.download_logs.extend(start.initial_logs);
+                        self.status = "正在下载 Sherpa Paraformer 模型...".to_string();
+                        Ok(self.status.clone())
+                    }
+                    Err(err) => {
+                        self.status = format!("启动下载失败: {}", err);
+                        Err(anyhow!("启动下载失败: {}", err))
+                    }
                 }
-                if !Path::new(&model_path).is_file() {
-                    return Err(anyhow!("Whisper 模型文件不存在: {}", model_path));
-                }
-                self.config.whisper.model_path = model_path.clone();
-                self.config.whisper.performance_profile = None;
-                self.config.whisper.apply_model_path_defaults();
-                self.persist_config()?;
-                self.status = format!("Whisper 模型已切换到 {}（已自动保存）", model_path);
-                Ok(self.status.clone())
-            }
-            MenuAction::DownloadModel { size } => {
-                if self
-                    .download
-                    .as_ref()
-                    .map(|d| d.in_progress)
-                    .unwrap_or(false)
-                {
-                    self.status = "已有下载任务进行中，请等待完成".to_string();
-                    return Ok(self.status.clone());
-                }
-
-                let DownloadStart {
-                    state,
-                    rx,
-                    initial_logs,
-                } = model_download::start_model_download(&size)?;
-
-                self.download = Some(state);
-                self.download_logs.clear();
-                self.download_logs.extend(initial_logs);
-                self.download_rx = Some(rx);
-                self.status = format!("正在下载模型 {} ...", size);
-                Ok(self.status.clone())
             }
             MenuAction::ReloadConfig => {
                 self.config = Config::load(&self.config_path)?;
@@ -452,22 +401,6 @@ impl MenuCore {
     }
 }
 
-pub fn whisper_model_path_from_file_name(model_file_name: &str) -> Result<String> {
-    Ok(runtime::model_dir()?
-        .join(model_file_name)
-        .to_string_lossy()
-        .into_owned())
-}
-
-pub fn model_size_from_file_name(file_name: &str) -> Option<&'static str> {
-    match file_name {
-        "ggml-large-v3.bin" => Some("large-v3"),
-        "ggml-large-v3-turbo.bin" => Some("turbo"),
-        "ggml-medium.bin" => Some("medium"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,10 +470,10 @@ mod tests {
 
     #[test]
     fn test_phase_e_menu_contract_order() {
-        assert_eq!(MENU_ITEMS.len(), 8);
+        assert_eq!(MENU_ITEMS.len(), 7);
         assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
-        assert_eq!(MENU_ITEMS[5], "切换 Whisper 模型");
-        assert_eq!(MENU_ITEMS[7], "退出");
+        assert_eq!(MENU_ITEMS[5], "下载 ASR 模型");
+        assert_eq!(MENU_ITEMS[6], "退出");
     }
 
     #[test]
@@ -604,66 +537,6 @@ mod tests {
             reloaded.hotkey.trigger_mode,
             HotkeyTriggerMode::HoldToRecord
         );
-
-        let _ = std::fs::remove_file(&config_path);
-    }
-
-    #[test]
-    fn test_phase_e_download_singleton_guard() {
-        let mut core = MenuCore::new("/tmp/echopup-menu-core-guard.toml").unwrap();
-        core.download = Some(DownloadState {
-            model_size: "large-v3".to_string(),
-            model_file_name: "ggml-large-v3.bin".to_string(),
-            downloaded: 1024,
-            total: Some(2048),
-            in_progress: true,
-        });
-
-        let r = core.execute(MenuAction::DownloadModel {
-            size: "turbo".to_string(),
-        });
-
-        assert!(r.ok);
-        assert!(r.message.contains("已有下载任务进行中"));
-    }
-
-    #[test]
-    fn test_switch_whisper_model_requires_existing_file() {
-        let config_path = temp_config_path("switch-whisper-missing");
-        let mut core = MenuCore::new(&config_path).unwrap();
-
-        let missing_path = std::env::temp_dir()
-            .join("echopup-missing-medium.bin")
-            .display()
-            .to_string();
-        let r = core.execute(MenuAction::SwitchWhisperModel {
-            model_path: missing_path.clone(),
-        });
-        assert!(!r.ok);
-        assert!(r.message.contains("Whisper 模型文件不存在"));
-
-        let _ = std::fs::remove_file(&config_path);
-    }
-
-    #[test]
-    fn test_switch_whisper_model_applies_model_defaults() {
-        let config_path = temp_config_path("switch-whisper-medium");
-        let mut core = MenuCore::new(&config_path).unwrap();
-        let model_path = temp_model_path("ggml-medium.bin");
-
-        let r = core.execute(MenuAction::SwitchWhisperModel {
-            model_path: model_path.clone(),
-        });
-        assert!(r.ok);
-
-        let reloaded = Config::load(&config_path).unwrap();
-        assert_eq!(reloaded.whisper.model_path, model_path);
-        assert!(reloaded.whisper.performance_profile.is_none());
-        assert_eq!(
-            reloaded.whisper.decoding_strategy,
-            crate::config::WhisperDecodingStrategy::Greedy
-        );
-        assert_eq!(reloaded.whisper.greedy_best_of, 1);
 
         let _ = std::fs::remove_file(&config_path);
     }
