@@ -1,6 +1,6 @@
 # 需求文档（PRD）- echo-pup-rust
 
-最后更新：2026-03-31
+最后更新：2026-04-17
 
 ## 1. 背景
 
@@ -13,6 +13,7 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
 - 目标：
   - 在后台运行场景下，用户可通过状态栏完成与 TUI 等价的管理操作
   - 保持配置、下载、热键策略在多入口下行为一致
+  - 在 Linux/Wayland 下提供不依赖应用内全局监听的稳定触发路径
   - 保持模型下载稳定性（断点续传、超时失败自动重试）
   - 将中文语音输入主链路迁移为更低延迟的本地流式识别架构
   - 支持 partial 草稿与 final 最终结果的双阶段输出
@@ -61,6 +62,10 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
 | R-013.5 | Linux 查看模型文件 | 低 | 提升可用性 |
 | R-014 | 模型下载需支持 aria2 风格高速并发下载，在大模型场景显著缩短首次下载耗时，并在不支持多连接时自动降级 | 中 | 下载体验优化 |
 | R-015 | 将本地 STT 主链路从 Whisper 平滑迁移到 `sherpa-onnx + SenseVoiceSmall`，优先优化中文实时识别，并支持 partial / final 双阶段输出 | 高 | 中文实时输入体验升级 |
+| R-016 | 在 Linux/Wayland 下提供可解释的热键触发与文本提交兼容路径，避免继续将 X11 假设作为默认前提 | 高 | 用户实际使用反馈 + 平台约束 |
+| R-016.1 | 运行时需识别会话类型（X11 / Wayland）及关键能力（portal / 命令后端）并输出可排障日志 | 高 | 平台兼容性 |
+| R-016.2 | Wayland 下需支持桌面快捷键绑定到 EchoPup CLI / IPC 触发接口（如 `press/release/toggle`） | 高 | Wayland 主路径 |
+| R-016.3 | Wayland 文本提交需显式采用 Wayland 兼容后端优先级，而非仅作为 X11 路径失败后的隐式 fallback | 中 | 稳定性与可解释性 |
 
 ## 6. 非功能需求
 
@@ -91,6 +96,10 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
 | R-013.5 | 点击可打开模型文件夹 | Linux 手工验收 |
 | R-014 | 在支持 `Range` 的服务端上可自动启用多连接并发下载；下载中断后支持分片级恢复或明确降级；下载过程中的进度与错误在 UI / 状态栏中可见 | `cargo test -q` + 大模型下载手工回归 + 中断恢复验证 |
 | R-015 | 中文普通话短句首个 partial 延迟与 final 延迟显著优于当前 Whisper 路径；支持热键结束或静音结束后的 final 稳定提交；过渡期保留 Whisper 回退能力 | 固定 WAV 基线 + 手工口述回归 + 指标日志聚合 |
+| R-016 | Wayland 会话下存在明确、可文档化的主触发路径；README、runbook 与架构文档对该路径表述一致 | Wayland 环境手工回归 + 文档 review |
+| R-016.1 | 启动日志能输出会话类型、portal 能力、trigger backend 与 text commit backend | 手工运行 + 日志检查 |
+| R-016.2 | 用户可通过桌面环境快捷键绑定到 EchoPup 外部触发接口，稳定启动/停止录音状态机 | GNOME / 其他 compositor 手工回归 |
+| R-016.3 | Wayland 文本提交能明确使用 `wtype` 或后续指定 backend，并在失败时提供清晰说明 | 手工回归 + 日志检查 |
 
 ## 8. 风险与待确认问题
 
@@ -99,22 +108,28 @@ EchoPup 是本地优先的语音输入工具，核心场景是用户按住热键
   - 菜单交互与主进程通信失败时可能出现“点击无响应”
   - aria2 风格下载若引入 piece map / 随机写入，需重点关注恢复语义与文件一致性
   - 流式 ASR 迁移会同时触及音频链路、识别状态机和宿主提交链路，回归面较大
+  - Wayland 兼容若继续围绕应用内全局监听修补，可能持续与平台边界冲突
 - 待确认问题：
   - 状态栏菜单中下载日志展示采用“最近 N 条文本”还是“独立详情窗”形式
   - Linux 状态栏菜单已实现全部功能 (tray-icon + muda + gtk)，与 macOS 等效
   - insert-only 宿主与支持草稿替换的宿主，是否采用统一提交策略还是双策略并行
+  - 目标 Wayland 桌面中，哪些环境暴露 `GlobalShortcuts` portal，哪些只能依赖外部触发路径
 
 ## 9. 关联文档
 
 - 业务需求：`docs/requirements/BRD.md`
 - 设计文档：`docs/design/system-design-v1.md`
 - 技术方案：`docs/architecture/technical-solution-v1.md`
+- Wayland 兼容方案：`docs/architecture/wayland-compatibility-plan-v1.md`
 - 流式迁移方案：`docs/architecture/streaming-asr-migration-plan-v1.md`
 - 专项方案：`docs/architecture/status-bar-menu-sync-plan-v1.md`
 - 性能路线图：`docs/architecture/performance-optimization-roadmap-v1.md`
 - 专项需求：`docs/changes/R-014-aria2-style-model-download.md`
+- 专项需求：`docs/changes/R-016-wayland-trigger-and-text-commit-compatibility.md`
 - ADR：`docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`
+- ADR：`docs/adr/0005-wayland-trigger-and-text-commit-strategy.md`
 - 变更日志：`docs/changes/changelog-20260331.md`
+- 变更日志：`docs/changes/changelog-20260417.md`
 
 ## 10. 历史兼容说明
 

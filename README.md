@@ -95,6 +95,15 @@ cargo build --release
    - 长按模式：松开热键即结束并输入
    - 按压切换模式（默认）：松开后继续录音，下次按下结束并输入
 
+### Linux / Wayland 说明
+
+- 当前仓库中的应用内热键实现主要面向 macOS 与 X11 兼容路径。
+- 在 Wayland 桌面中，不应默认假设应用可以像 X11 一样直接全局监听按键。
+- 当前 Linux 文本输入在失败时会回退到 `wtype`，这是 Wayland 路径下更现实的文本提交方式之一。
+- 关于 Wayland 下更优雅的热键与文本提交方案，请参考：
+  - `docs/architecture/wayland-compatibility-plan-v1.md`
+  - `docs/adr/0005-wayland-trigger-and-text-commit-strategy.md`
+
 ### 配置
 
 默认配置文件：`~/.echopup/config.toml`

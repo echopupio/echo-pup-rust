@@ -14,8 +14,8 @@
 
 - 进展摘要：`AsrEngine` / `AsrSession` / `TextCommitBackend` 已落地；`RecognitionSession` 已落地；音频热路径已具备增量读口；preview 与 final 都已切到统一 session 边界；配置已支持 `asr.backend = whisper | sherpa_sensevoice`，且 sherpa 失败可回退 Whisper。
 - 主要风险：当前 sherpa SenseVoice 仍是 `OfflineRecognizer + incremental session` 过渡实现，尚未用真实模型与真实口述回归证明“明显快于 Whisper”。
-- 主要阻塞：仓库尚未完成 sherpa 模型文件与 tokens 的真实接线验证；`main.rs` 仍承担过多 orchestration；尚未沉淀首字/句末延迟指标。
-- 下一步建议：优先完成真实 sherpa model smoke test、固定 WAV/手工回归与延迟指标采集，再决定默认后端切换时机。
+- 主要阻塞：仓库尚未完成 sherpa 模型文件与 tokens 的真实接线验证；`main.rs` 仍承担过多 orchestration；尚未沉淀首字/句末延迟指标；Wayland 触发路径仍缺正式主方案实现。
+- 下一步建议：优先完成真实 sherpa model smoke test、固定 WAV/手工回归与延迟指标采集，并推进 Wayland“桌面快捷键绑定 + 外部触发”主路径实施。
 
 ## 阶段状态
 
@@ -41,6 +41,7 @@
 | R-004 | 高 | 流式 ASR 迁移涉及音频热路径、partial/final 状态机与宿主输入兼容性，若边界不清会导致大范围回归 | 司空 / 大司马 / 司寇 | 先实施引擎抽象与 insert-only 基线，再分阶段接入 streaming、shadow mode 和宿主增强 | 打开 |
 | R-005 | 高 | sherpa SenseVoice 当前仅以 offline recognizer 包装进 session，若官方 Rust API 侧缺少在线 SenseVoice 支持，则“真流式”能力可能需要改技术路线或继续过渡方案 | 司空 / 大司马 | 先验证现有 wrapper 的时延收益；并确认是否存在可用在线 API、其他 backend 或 FFI 方案 | 打开 |
 | R-006 | 中 | 当前 backend 切换已支持配置化回退，但尚未通过真实模型文件与真实录音验证回退路径是否满足用户体验 | 大司马 / 司寇 | 准备 sherpa 模型目录，执行本机实测与回退验证 | 打开 |
+| R-007 | 高 | Linux/Wayland 下若继续沿用应用内全局热键监听，会持续与平台安全边界冲突，造成“某些桌面可用、某些不可用、原因不透明”的支持成本 | 司空 / 大司马 / 司寇 | 采用“桌面快捷键绑定 + EchoPup 外部触发接口”作为主路径，并补能力探测与运行日志 | 打开 |
 
 ## 阻塞清单
 
@@ -49,6 +50,7 @@
 | B-001 | sherpa backend 已可编译，但尚未准备真实 `model.onnx` / `tokens.txt` 并完成本机冒烟 | 模型文件到位、配置切换、录音回归 | 大司马 / 司寇 | 打开 |
 | B-002 | `main.rs` 仍承载录音生命周期和 session orchestration，后续继续扩展容易失控 | 抽离 `session_control`、收束 preview/final 线程编排 | 司空 / 大司马 | 打开 |
 | B-003 | 尚未建立延迟指标记录与固定 WAV 基线，无法判断 sherpa 过渡实现是否达到切换条件 | 增加 perf logging / baseline 样例集 | 大司马 / 司寇 | 打开 |
+| B-004 | Wayland 路径尚未实现正式 external trigger 入口与 backend 探测，用户仍需依赖当前不稳定的应用内热键方案 | trigger backend 抽象、CLI/IPC 入口、README/runbook 指引 | 司空 / 大司马 | 打开 |
 
 ## 巡检记录
 
@@ -72,3 +74,11 @@
   - 当前 sherpa 实现为 `OfflineRecognizer + incremental session` 过渡方案。
   - 下一阶段必须先完成真实模型与真实录音验证，再决定默认 backend 是否可切换。
   - 需要重点记录的后续动作：`session_control` 抽离、固定 WAV 基线、时延指标采集、sherpa 真流式能力核验。
+
+### Wayland 触发与文本提交方案沉淀
+
+- 时间：2026-04-17 10:42:42 +0800
+- 结论：已基于当前代码、上游依赖说明与 Ubuntu GNOME Wayland 验证环境，沉淀 Wayland 兼容方案与 ADR。明确 EchoPup 在 Wayland 下不应再把“应用自己监听全局热键”作为主路径，而应采用“桌面快捷键绑定 + 外部触发接口”；文本提交短期继续保留 `wtype` 作为 Wayland fallback。
+- 备注：
+  - 当前验证环境可见 `RemoteDesktop` / `InputCapture` portal，但未观察到 `GlobalShortcuts` portal。
+  - 后续需实现 trigger backend 抽象、CLI/IPC 触发入口、能力探测日志与 README/runbook 指引。

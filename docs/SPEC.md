@@ -1,6 +1,6 @@
 # SPEC 文档总入口（AI First）
 
-最后更新：2026-03-31
+最后更新：2026-04-17
 
 此文档为 AI 编程工具提供统一导航，优先指向结构化、可追踪、稳定命名的技术文档。
 
@@ -14,12 +14,14 @@
 
 - `design/system-design-v1.md`
 - `architecture/technical-solution-v1.md`
+- `architecture/wayland-compatibility-plan-v1.md`
 - `architecture/streaming-asr-migration-plan-v1.md`
 - `architecture/status-bar-menu-sync-plan-v1.md`
 - `architecture/performance-optimization-roadmap-v1.md`
 - `adr/README.md`
 - `adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md`
 - `adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`
+- `adr/0005-wayland-trigger-and-text-commit-strategy.md`
 
 ## 3. 接口与运维层
 
@@ -29,6 +31,7 @@
 ## 4. 变更与审计
 
 - `changes/changelog-20260331.md`
+- `changes/changelog-20260417.md`
 - `PROMPT-QA-LOG.md`
 
 ## 5. 治理与协作

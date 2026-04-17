@@ -23,6 +23,8 @@
 | 验收脚本 | `./scripts/run_acceptance.sh` | 状态栏菜单与 TUI 对齐验收 | 司寇 |
 | 性能基线 | `./scripts/perf_baseline.py --limit 200` | 汇总最近性能埋点 | 司寇 / 少府 |
 | 文档治理 | `<zhou-tianzi-skill-root>/libu/scripts/quick_command.py audit .` | 礼部体检与同步 | 大司礼 |
+| Wayland 会话检查 | `echo "$XDG_SESSION_TYPE" && echo "$XDG_CURRENT_DESKTOP"` | 判断当前是否为 Wayland 及桌面环境 | 少府 / 司寇 |
+| Portal 能力检查 | `gdbus introspect --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop` | 核验 `GlobalShortcuts` / `RemoteDesktop` / `InputCapture` | 少府 / 司寇 |
 
 ## 三、模板与资产
 

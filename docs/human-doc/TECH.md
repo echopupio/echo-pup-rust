@@ -1,6 +1,6 @@
 # TECH（Human Readable）
 
-最后更新：2026-03-31
+最后更新：2026-04-17
 
 ## 技术方案摘要
 
@@ -32,6 +32,11 @@
   - 已新增 `SherpaSenseVoiceEngine` 骨架。
   - 目前采用 `OfflineRecognizer + incremental session` 过渡实现，尚未证明等价于真流式 SenseVoice。
 
+- Linux / Wayland 兼容主线：
+  - 已确认当前热键实现依赖 `global-hotkey` 与 `rdev`，其中 `rdev` 在 Linux 上基于 X11，不适合作为 Wayland 主路径。
+  - 已确认文本输入当前采用 `enigo`，Linux 下会回退到 `xdotool` / `wtype`。
+  - 本轮新增文档决策：Wayland 下优先采用“桌面快捷键绑定 -> EchoPup 外部触发接口”的方案；`GlobalShortcuts` portal 仅作为后续增强路径。
+
 ## 关键改动
 
 - 设计/技术文档统一为版本化文件（`system-design-v1`、`technical-solution-v1`）。
@@ -40,6 +45,9 @@
 - 新增流式 ASR 迁移方案与 ADR：
   - `docs/architecture/streaming-asr-migration-plan-v1.md`
   - `docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`
+- 新增 Wayland 兼容方案与 ADR：
+  - `docs/architecture/wayland-compatibility-plan-v1.md`
+  - `docs/adr/0005-wayland-trigger-and-text-commit-strategy.md`
 
 ## 风险与应对
 
@@ -51,6 +59,8 @@
   - 应对：先抽象接口与 insert-only 基线，再分阶段替换后端。
 - 风险：当前 sherpa 只完成过渡型 session 包装，真实模型效果和延迟收益尚未实测。
   - 应对：先完成本机模型冒烟与固定 WAV/手工录音回归，再决定默认后端切换。
+- 风险：Wayland 若继续沿用应用内全局热键思路，将长期与平台边界冲突。
+  - 应对：把热键问题改造为 trigger backend 问题，由桌面环境负责快捷键绑定，应用负责业务动作。
 
 ## 后续实施顺序
 
@@ -60,3 +70,4 @@
 4. 将 `main.rs` 中录音生命周期和 session orchestration 下沉到独立 `session_control` 模块。
 5. 核验 sherpa Rust API 是否存在可用在线 SenseVoice 能力；若没有，明确继续过渡方案还是切换实现路径。
 6. 在 sherpa 稳定后，再推进宿主草稿替换与更强的 partial/final 交互体验。
+7. 为 Wayland 增加能力探测、外部触发入口与 README / runbook 指引。

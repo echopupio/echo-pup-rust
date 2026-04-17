@@ -1,6 +1,6 @@
 # 需求到实现追踪矩阵
 
-最后更新：2026-03-31
+最后更新：2026-04-17
 
 | 需求 ID | 需求摘要 | 设计章节 | 代码位置 | 测试证据 | 状态 |
 | --- | --- | --- | --- | --- | --- |
@@ -19,6 +19,7 @@
 | R-013 | Linux 状态栏菜单（GNOME/X11） | `docs/changes/R-013-Linux-vs-macOS-comparison.md` | `src/status_indicator.rs` | `review-20260323-01` | 已实现（含待修复项） |
 | R-014 | 模型下载 aria2 风格高速并发下载 | `docs/changes/R-014-aria2-style-model-download.md` | `src/model_download.rs`, `src/menu_core.rs`, `src/status_indicator.rs`, `src/ui.rs` | 待实现：`cargo test -q` + 下载回归（并发 / 降级 / 恢复） | 规划中 |
 | R-015 | 本地 STT 主链路迁移到 `sherpa-onnx + SenseVoiceSmall`，支持 partial / final 双阶段输出并优先优化中文实时性 | `docs/architecture/streaming-asr-migration-plan-v1.md`；`docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`；`docs/architecture/technical-solution-v1.md` 第 5/7 节 | 已落地：`src/asr/*`, `src/session/*`, `src/commit/*`, `src/audio/*`, `src/main.rs`；待继续：`src/vad/*`, `session_control` 抽离 | 已有证据：`cargo test -q`（56 passed）；待补：真实 SenseVoice 模型冒烟、固定 WAV 基线、手工口述回归、`first_partial_ms` / `final_after_silence_ms` 指标验证 | 实施中 |
+| R-016 | Wayland 下提供可解释的热键触发与文本提交兼容路径 | `docs/architecture/wayland-compatibility-plan-v1.md`；`docs/changes/R-016-wayland-trigger-and-text-commit-compatibility.md`；`docs/adr/0005-wayland-trigger-and-text-commit-strategy.md` | 当前事实：`src/hotkey/listener.rs`, `src/input/keyboard.rs`, `src/commit/mod.rs`, `src/main.rs`；待实现：外部触发入口、能力探测、backend 选择日志 | 已有证据：2026-04-17 代码与环境核验；待补：CLI/IPC 触发实现、Wayland 手工回归 | 规划中 |
 
 ## 说明
 

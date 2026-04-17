@@ -1,6 +1,6 @@
 # 文档索引
 
-最后更新：2026-03-31
+最后更新：2026-04-17
 
 ## 基线文档（主入口）
 
@@ -8,20 +8,23 @@
 - `requirements/PRD.md` - 产品需求、范围与验收标准。
 - `design/system-design-v1.md` - 系统行为、流程与组件设计。
 - `architecture/technical-solution-v1.md` - 架构约束、选型与技术策略。
+- `architecture/wayland-compatibility-plan-v1.md` - Wayland 下热键触发与文本提交兼容方案。
 - `architecture/streaming-asr-migration-plan-v1.md` - Whisper 到 sherpa-onnx + SenseVoiceSmall 的流式迁移方案。
 - `adr/` - 架构决策记录。
 - `api/README.md` - 接口契约与版本兼容策略。
 - `operations/runbook.md` - 发布、回滚与故障处置流程。
-- `changes/changelog-20260331.md` - 本周期关键变更记录。
+- `changes/changelog-20260417.md` - 本周期关键变更记录。
 - `traceability/requirements-to-implementation.md` - 需求到实现与验证追踪。
 
 ## 专题文档
 
 - `architecture/status-bar-menu-sync-plan-v1.md` - 状态栏菜单与 TUI 功能同步实施方案。
 - `architecture/performance-optimization-roadmap-v1.md` - 性能优化路线图。
+- `changes/R-016-wayland-trigger-and-text-commit-compatibility.md` - Wayland 热键触发与文本提交兼容方案需求条目。
 - `changes/R-014-aria2-style-model-download.md` - 模型下载 aria2 风格高速并发下载需求。
 - `adr/0003-hotkey-trigger-mode-and-adaptive-indicator.md` - 热键双模式与状态栏自适应占位决策。
 - `adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md` - 流式 ASR 后端迁移决策。
+- `adr/0005-wayland-trigger-and-text-commit-strategy.md` - Wayland 采用“桌面绑定 + 外部触发”为主路径的决策。
 
 ## 治理与协作
 

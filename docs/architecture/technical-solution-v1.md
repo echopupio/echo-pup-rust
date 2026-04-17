@@ -1,12 +1,12 @@
 # 技术方案文档 v1 - echo-pup-rust
 
-最后更新：2026-03-31
+最后更新：2026-04-17
 
 ## 1. 背景与约束
 
 - 业务约束：后台运行时必须保证用户能感知录音/识别状态。
 - 技术约束：核心链路本地优先；当前主链路处于“Whisper 可用 + sherpa backend 已接入骨架”的过渡阶段，目标后端仍为 `sherpa-onnx + SenseVoiceSmall`。
-- 平台约束：状态栏能力支持 macOS 与 Linux (GNOME/X11)。
+- 平台约束：状态栏能力支持 macOS 与 Linux；Linux 下 X11 与 Wayland 的输入能力边界不同，不能继续把 X11 全局热键假设直接套用到 Wayland。
 - 工程约束：TUI 与状态栏不能维护两套独立业务逻辑。
 - 实时性约束：中文实时输入需优先降低首字延迟、句末 final 延迟和热键释放后的等待感。
 
@@ -35,12 +35,19 @@
 | --- | --- | --- | --- |
 | CLI | `clap` | 子命令与参数定义清晰 | 手写解析 |
 | 配置 | `serde + toml` | 配置结构化、可读性高 | JSON / YAML |
-| 热键 | `global-hotkey` + `rdev` | 跨平台兼容与低层监听补充 | 平台专用 API |
+| 热键 | 当前：`global-hotkey` + `rdev`；Wayland 规划：桌面快捷键绑定 + EchoPup CLI / IPC 触发，portal 可用时再补 `GlobalShortcuts` backend | 兼顾现有 X11/macOS 路径与 Wayland 平台边界 | 继续仅靠应用内全局监听 |
 | 音频 | `cpal`（项目内封装） | 跨平台音频采集 | 平台专用库 |
 | STT | 当前：`whisper-rs`；规划：`sherpa-onnx + SenseVoiceSmall` | 保持本地离线前提下，逐步从整段识别迁移到更适合中文实时输入的流式链路 | 远程 STT API |
 | HTTP 下载 | `reqwest` blocking | 简化下载与重试逻辑 | 外部脚本调用 |
 | TUI | `ratatui + crossterm` | 终端 UI 生态成熟 | 自绘终端控件 |
 | 状态栏 | Cocoa / ObjC FFI (macOS) / tray-icon + muda + gtk (Linux) | 原生 macOS 菜单栏能力 / Linux GNOME 托盘 | - |
+
+Wayland 兼容补充：
+
+- 当前仓库事实：`src/hotkey/listener.rs` 默认走 `global-hotkey`，`right_ctrl` 特判走 `rdev::listen`；`src/input/keyboard.rs` 默认先尝试 `enigo`，Linux 失败后回退 `xdotool` / `wtype`。
+- 已核验约束：`rdev` Linux `listen` 基于 X11；`enigo` 的 Wayland / libei 路径仍属 experimental。
+- 因此，Wayland 下推荐主路径不是“应用自己监听全局热键”，而是“桌面环境绑定快捷键 -> EchoPup 外部触发接口”。
+- 当运行环境存在 `GlobalShortcuts` portal 时，可作为后续增强 backend；当前 Ubuntu GNOME Wayland 验证环境未观测到该接口。
 
 ## 4. Linux 托盘实现 (R-013)
 
@@ -111,6 +118,21 @@
 - 检测到代理连接失败时自动回退直连请求（no-proxy 客户端）。
 - 下载失败后自动清理 0B 临时文件，避免后续重试污染。
 
+Wayland 兼容新增契约（规划中）：
+- trigger backend 需显式区分：
+  - `global_hotkey`（现有 X11 / macOS）
+  - `external_trigger`（Wayland 主路径）
+  - `portal_global_shortcuts`（可选增强路径）
+- text commit backend 需显式区分：
+  - X11：`enigo` / `xdotool`
+  - Wayland：`wtype`（短期明确 fallback）
+  - Future：`libei` / portal-backed backend
+- 启动日志需记录：
+  - `XDG_SESSION_TYPE`
+  - `XDG_CURRENT_DESKTOP`
+  - portal 能力摘要
+  - trigger backend / text commit backend
+
 ## 7. 实施里程碑状态（截至 2026-03-31）
 
 - 里程碑 1（共享菜单内核重构）：已完成。
@@ -142,9 +164,11 @@
 ## 10. 关联文档
 
 - `docs/design/system-design-v1.md`
+- `docs/architecture/wayland-compatibility-plan-v1.md`
 - `docs/architecture/streaming-asr-migration-plan-v1.md`
 - `docs/architecture/status-bar-menu-sync-plan-v1.md`
 - `docs/architecture/performance-optimization-roadmap-v1.md`
 - `docs/adr/0004-streaming-asr-backend-migration-to-sherpa-sensevoice.md`
+- `docs/adr/0005-wayland-trigger-and-text-commit-strategy.md`
 - `docs/requirements/PRD.md`
 - `docs/operations/runbook.md`
