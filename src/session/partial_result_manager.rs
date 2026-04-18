@@ -182,52 +182,28 @@ impl PartialResultManager {
 
     /// 从已追加文字过渡到最终文本。
     ///
-    /// 找 total_appended 和 final_text 的公共前缀，
-    /// 删掉 total_appended 尾部的错误字符，追加 final 的剩余部分。
+    /// 全文替换：删掉所有中间结果，输入完整的最终识别文本。
     pub fn prepare_final_from_draft(&mut self, final_text: &str) -> Option<CommitAction> {
         if self.total_appended.is_empty() {
             return None;
         }
 
         let normalized = final_text.replace('\n', " ").trim().to_string();
-        if normalized.is_empty() {
-            // final 为空但已经输出了文字 — 需要全部退格
-            let total = self.total_appended.chars().count();
-            self.total_appended.clear();
-            self.last_window_text.clear();
-            return Some(CommitAction::CommitFinalFromDraft {
-                new_text: String::new(),
-                delete_chars: total,
-            });
-        }
-
-        let appended_chars: Vec<char> = self.total_appended.chars().collect();
-        let final_chars: Vec<char> = normalized.chars().collect();
-        let common = common_char_prefix_len(&appended_chars, &final_chars);
-
-        let delete_chars = appended_chars.len().saturating_sub(common);
-        let new_suffix: String = final_chars[common..].iter().collect();
+        let delete_chars = self.total_appended.chars().count();
 
         debug!(
-            "[final_from_draft] appended={:?}({}) final={:?}({}) common={} del={} type={:?}",
+            "[final_from_draft] delete all appended={:?}({}) → final={:?}({})",
             self.total_appended,
-            appended_chars.len(),
-            normalized,
-            final_chars.len(),
-            common,
             delete_chars,
-            new_suffix
+            normalized,
+            normalized.chars().count(),
         );
 
         self.total_appended.clear();
         self.last_window_text.clear();
 
-        if delete_chars == 0 && new_suffix.is_empty() {
-            return None;
-        }
-
         Some(CommitAction::CommitFinalFromDraft {
-            new_text: new_suffix,
+            new_text: normalized,
             delete_chars,
         })
     }
@@ -403,11 +379,11 @@ mod tests {
     }
 
     #[test]
-    fn final_from_draft_appends_only() {
+    fn final_from_draft_replaces_all() {
         let mut manager = PartialResultManager::default();
         manager.prepare_draft_commit("今天天气很好");
         manager.prepare_draft_commit("天气很好我们");
-        // total_appended = "今天天气很好我们"
+        // total_appended = "今天天气很好我们" (8 chars)
         let action = manager
             .prepare_final_from_draft("今天天气很好我们去公园")
             .unwrap();
@@ -416,18 +392,19 @@ mod tests {
                 new_text,
                 delete_chars,
             } => {
-                assert_eq!(delete_chars, 0);
-                assert_eq!(new_text, "去公园");
+                // 全文替换：删 8, 输入完整 final
+                assert_eq!(delete_chars, 8);
+                assert_eq!(new_text, "今天天气很好我们去公园");
             }
             _ => panic!("expected CommitFinalFromDraft"),
         }
     }
 
     #[test]
-    fn final_from_draft_fixes_tail() {
+    fn final_from_draft_full_replace() {
         let mut manager = PartialResultManager::default();
         manager.prepare_draft_commit("今天天气好嘛");
-        // total = "今天天气好嘛", final = "今天天气很好"
+        // total = "今天天气好嘛" (6 chars), final = "今天天气很好"
         let action = manager
             .prepare_final_from_draft("今天天气很好")
             .unwrap();
@@ -436,9 +413,9 @@ mod tests {
                 new_text,
                 delete_chars,
             } => {
-                // common = 4 ("今天天气"), del = 6-4 = 2 ("好嘛"), type = "很好"
-                assert_eq!(delete_chars, 2);
-                assert_eq!(new_text, "很好");
+                // 全文替换：删 6, 输入完整 final
+                assert_eq!(delete_chars, 6);
+                assert_eq!(new_text, "今天天气很好");
             }
             _ => panic!("expected CommitFinalFromDraft"),
         }
