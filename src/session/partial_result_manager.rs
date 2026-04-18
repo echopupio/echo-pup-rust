@@ -34,29 +34,32 @@ impl PartialResultManager {
         })
     }
 
-    /// 构造草稿提交动作：只删除与新文本不同的尾部，再输入新的尾部。
+    /// 构造草稿提交动作：利用标点锚定 + 增量 diff 最小化退格。
     ///
-    /// 例如：已提交 "你好世界" → 新 partial "你好世界啊"
-    ///   → 公共前缀 "你好世界"(4字符)，delete_chars=0，new_text="啊"
+    /// 规则：已提交文字中最后一个中文标点（，。！？）之前（含标点）的部分视为"锚定文本"，
+    /// 不会被退格删除。只有标点之后的"活跃尾部"参与 diff。
     ///
-    /// 已提交 "你好世界吗" → 新 partial "你好世界啊"
-    ///   → 公共前缀 "你好世界"(4字符)，delete_chars=1("吗")，new_text="啊"
+    /// 例如：committed = "你好，世界吧" → 锚定到 "你好，"，活跃尾部 "世界吧"
+    ///       new_text  = "你好，世界啊" → 活跃尾部 "世界啊"
+    ///       → delete 1("吧"), type "啊"
     pub fn prepare_draft_commit(&mut self, text: &str) -> Option<CommitAction> {
         let normalized = normalize_partial_text(text);
         if normalized.is_empty() {
             return None;
         }
 
-        let common_prefix_chars = common_char_prefix_len(&self.committed_text, &normalized);
-        let old_total_chars = self.committed_text.chars().count();
-        let delete_chars = old_total_chars - common_prefix_chars;
+        // 找到 committed_text 中最后一个中文标点的锚定位置（char 粒度）
+        let anchor_chars = last_chinese_punct_boundary_chars(&self.committed_text);
+        // 如果新文本也以同一锚定前缀开头，只 diff 锚定之后的活跃部分
+        let natural_common = common_char_prefix_len(&self.committed_text, &normalized);
+        let safe_prefix = natural_common.max(anchor_chars);
 
-        // 取新文本中公共前缀之后的部分
-        let new_suffix: String = normalized.chars().skip(common_prefix_chars).collect();
+        let old_total_chars = self.committed_text.chars().count();
+        let delete_chars = old_total_chars.saturating_sub(safe_prefix);
+        let new_suffix: String = normalized.chars().skip(safe_prefix).collect();
 
         self.committed_text = normalized;
 
-        // 如果没有要删也没有要输入的，跳过
         if delete_chars == 0 && new_suffix.is_empty() {
             return None;
         }
@@ -79,7 +82,7 @@ impl PartialResultManager {
         })
     }
 
-    /// 从草稿平滑过渡到最终文本：只替换尾部差异。
+    /// 从草稿平滑过渡到最终文本：利用标点锚定只替换尾部差异。
     ///
     /// 如果没有活跃草稿，返回 None（调用方应 fallback 到 CommitFinal）。
     pub fn prepare_final_from_draft(&mut self, final_text: &str) -> Option<CommitAction> {
@@ -89,14 +92,16 @@ impl PartialResultManager {
 
         let normalized = final_text.replace('\n', " ").trim().to_string();
         if normalized.is_empty() {
-            // final 为空时，清除草稿
             return self.prepare_draft_clear();
         }
 
-        let common_prefix_chars = common_char_prefix_len(&self.committed_text, &normalized);
+        let anchor_chars = last_chinese_punct_boundary_chars(&self.committed_text);
+        let natural_common = common_char_prefix_len(&self.committed_text, &normalized);
+        let safe_prefix = natural_common.max(anchor_chars);
+
         let old_total_chars = self.committed_text.chars().count();
-        let delete_chars = old_total_chars - common_prefix_chars;
-        let new_suffix: String = normalized.chars().skip(common_prefix_chars).collect();
+        let delete_chars = old_total_chars.saturating_sub(safe_prefix);
+        let new_suffix: String = normalized.chars().skip(safe_prefix).collect();
 
         self.committed_text.clear();
 
@@ -114,6 +119,21 @@ fn normalize_partial_text(text: &str) -> String {
 /// 计算两个字符串的公共前缀字符数（按 char 粒度）。
 fn common_char_prefix_len(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+/// 返回文本中最后一个中文标点（，。！？；）之后的 char 位置。
+/// 如果没有找到标点，返回 0（无锚定）。
+///
+/// 例如 "你好，世界吧" → 3 (逗号在 index 2，boundary = 3)
+fn last_chinese_punct_boundary_chars(text: &str) -> usize {
+    const PUNCT: &[char] = &['，', '。', '！', '？', '；', '、'];
+    let chars: Vec<char> = text.chars().collect();
+    for i in (0..chars.len()).rev() {
+        if PUNCT.contains(&chars[i]) {
+            return i + 1;
+        }
+    }
+    0
 }
 
 fn format_partial_status(text: &str) -> String {
@@ -179,7 +199,6 @@ mod tests {
                 new_text,
                 delete_chars,
             } => {
-                // 公共前缀 "你好"(2 chars)，旧文本 2 chars → delete 0，输入 "世界"
                 assert_eq!(new_text, "世界");
                 assert_eq!(delete_chars, 0);
             }
@@ -197,9 +216,48 @@ mod tests {
                 new_text,
                 delete_chars,
             } => {
-                // 公共前缀 "你好世界"(4 chars)，旧 5 chars → delete 1("吗")，输入 "啊"
                 assert_eq!(new_text, "啊");
                 assert_eq!(delete_chars, 1);
+            }
+            _ => panic!("expected UpdateDraft"),
+        }
+    }
+
+    #[test]
+    fn draft_commit_punct_anchors_prevents_full_delete() {
+        let mut manager = PartialResultManager::default();
+        // committed: "你好，世界吧" — 逗号锚定在 char index 3
+        manager.prepare_draft_commit("你好，世界吧");
+        // 新 partial: "经典，世界啊" — natural common prefix = 0 (你 vs 经)
+        // 但锚定到 char 3 (逗号之后)，所以只删 "世界吧"(3 chars)
+        let action = manager.prepare_draft_commit("经典，世界啊").unwrap();
+        match action {
+            CommitAction::UpdateDraft {
+                new_text,
+                delete_chars,
+            } => {
+                // 锚定 "你好，" → safe_prefix=3，旧 6 chars → delete 3
+                // 新文本跳 3 chars: "世界啊"
+                assert_eq!(delete_chars, 3);
+                assert_eq!(new_text, "世界啊");
+            }
+            _ => panic!("expected UpdateDraft"),
+        }
+    }
+
+    #[test]
+    fn draft_commit_no_punct_falls_back_to_natural_diff() {
+        let mut manager = PartialResultManager::default();
+        // 无标点：完全靠 natural common prefix
+        manager.prepare_draft_commit("今天天气");
+        let action = manager.prepare_draft_commit("今天天气很好").unwrap();
+        match action {
+            CommitAction::UpdateDraft {
+                new_text,
+                delete_chars,
+            } => {
+                assert_eq!(delete_chars, 0);
+                assert_eq!(new_text, "很好");
             }
             _ => panic!("expected UpdateDraft"),
         }
