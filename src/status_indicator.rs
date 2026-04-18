@@ -711,12 +711,14 @@ mod menu_bridge {
     use std::ffi::CStr;
     use std::sync::{Mutex, Once, OnceLock};
 
+    const DOWNLOAD_MODEL_SIZES: [&str; 1] = ["paraformer"];
+
     pub const TAG_TOGGLE_LLM: i64 = 1001;
     pub const TAG_TOGGLE_CORRECTION: i64 = 1002;
     pub const TAG_TOGGLE_VAD: i64 = 1003;
+    pub const TAG_TOGGLE_STREAMING_DRAFT: i64 = 1015;
     pub const TAG_EDIT_HOTKEY: i64 = 1004;
     pub const TAG_EDIT_LLM_FORM: i64 = 1005;
-    pub const TAG_SWITCH_WHISPER_MODEL: i64 = 1006;
     pub const TAG_DOWNLOAD_MODEL: i64 = 1007;
     pub const TAG_QUIT_UI: i64 = 1008;
     pub const TAG_OPEN_CONFIG_FOLDER: i64 = 1009;
@@ -741,11 +743,11 @@ mod menu_bridge {
         pub toggle_llm: id,
         pub toggle_correction: id,
         pub toggle_vad: id,
+        pub toggle_streaming_draft: id,
         pub edit_hotkey: id,
         pub mode_hold: id,
         pub mode_press_toggle: id,
         pub edit_llm_form: id,
-        pub switch_whisper_model: id,
         pub download_model: id,
         pub status_line: id,
     }
@@ -833,6 +835,12 @@ mod menu_bridge {
             let toggle_correction =
                 add_action_item(menu, target, TAG_TOGGLE_CORRECTION, "切换文本纠错开关");
             let toggle_vad = add_action_item(menu, target, TAG_TOGGLE_VAD, "切换 VAD 开关");
+            let toggle_streaming_draft = add_action_item(
+                menu,
+                target,
+                TAG_TOGGLE_STREAMING_DRAFT,
+                "切换流式草稿开关",
+            );
 
             add_separator(menu);
 
@@ -853,12 +861,6 @@ mod menu_bridge {
             );
             let edit_llm_form =
                 add_action_item(menu, target, TAG_EDIT_LLM_FORM, "编辑 LLM 配置...");
-            let switch_whisper_model = add_action_item(
-                menu,
-                target,
-                TAG_SWITCH_WHISPER_MODEL,
-                "切换 Whisper 模型...",
-            );
 
             add_separator(menu);
 
@@ -886,11 +888,11 @@ mod menu_bridge {
                 toggle_llm,
                 toggle_correction,
                 toggle_vad,
+                toggle_streaming_draft,
                 edit_hotkey,
                 mode_hold,
                 mode_press_toggle,
                 edit_llm_form,
-                switch_whisper_model,
                 download_model,
                 status_line,
             };
@@ -899,15 +901,17 @@ mod menu_bridge {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_hotkey_capture_tag(tag: i64) -> bool {
         tag == TAG_EDIT_HOTKEY
     }
 
-    pub fn map_tag_to_action(tag: i64, snapshot: &MenuSnapshot) -> Option<MenuAction> {
+    pub fn map_tag_to_action(tag: i64, _snapshot: &MenuSnapshot) -> Option<MenuAction> {
         match tag {
             TAG_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
             TAG_TOGGLE_CORRECTION => Some(MenuAction::ToggleTextCorrectionEnabled),
             TAG_TOGGLE_VAD => Some(MenuAction::ToggleVadEnabled),
+            TAG_TOGGLE_STREAMING_DRAFT => Some(MenuAction::ToggleStreamingDraft),
             TAG_MODE_HOLD => Some(MenuAction::SetHotkeyTriggerMode {
                 mode: HotkeyTriggerMode::HoldToRecord,
             }),
@@ -915,7 +919,6 @@ mod menu_bridge {
                 mode: HotkeyTriggerMode::PressToToggle,
             }),
             TAG_EDIT_LLM_FORM => None,
-            TAG_SWITCH_WHISPER_MODEL => Some(MenuAction::DownloadModel),
             TAG_DOWNLOAD_MODEL => Some(MenuAction::DownloadModel),
             TAG_RELOAD_CONFIG => Some(MenuAction::ReloadConfig),
             TAG_QUIT_UI => Some(MenuAction::QuitUi),
@@ -928,6 +931,7 @@ mod menu_bridge {
             set_check_state(handles.toggle_llm, snapshot.llm_enabled);
             set_check_state(handles.toggle_correction, snapshot.text_correction_enabled);
             set_check_state(handles.toggle_vad, snapshot.vad_enabled);
+            set_check_state(handles.toggle_streaming_draft, snapshot.streaming_draft);
             set_check_state(
                 handles.mode_hold,
                 snapshot.hotkey_trigger_mode == HotkeyTriggerMode::HoldToRecord,
@@ -946,13 +950,6 @@ mod menu_bridge {
                 &format!(
                     "编辑 LLM 配置 ({}/{})",
                     snapshot.llm_provider, snapshot.llm_model
-                ),
-            );
-            set_title(
-                handles.switch_whisper_model,
-                &format!(
-                    "切换 Whisper 模型 ({})",
-                    shorten_path(&current_whisper_model_name(snapshot))
                 ),
             );
             set_title(handles.download_model, &download_menu_title(snapshot));
@@ -1228,7 +1225,7 @@ mod menu_bridge {
             return None;
         }
         let _: () = msg_send![window, setReleasedWhenClosed: YES];
-        let _: () = msg_send![window, setTitle: nsstring("下载 Whisper 模型")];
+        let _: () = msg_send![window, setTitle: nsstring("下载 Sherpa Paraformer 模型")];
         let _: () = msg_send![window, center];
 
         let content: id = msg_send![window, contentView];
@@ -1239,7 +1236,7 @@ mod menu_bridge {
         let _choose_label = add_label(
             content,
             NSRect::new(NSPoint::new(20.0, 318.0), NSSize::new(120.0, 20.0)),
-            "模型尺寸:",
+            "模型类型:",
         );
         let model_selector: id = msg_send![class!(NSPopUpButton), alloc];
         let model_selector: id = msg_send![model_selector,
@@ -1267,7 +1264,7 @@ mod menu_bridge {
         let status_label = add_label(
             content,
             NSRect::new(NSPoint::new(20.0, 284.0), NSSize::new(580.0, 20.0)),
-            "请选择模型并点击下载",
+            "点击下载以获取 Sherpa Paraformer 模型文件",
         );
         let progress_bar: id = msg_send![class!(NSProgressIndicator), alloc];
         let progress_bar: id = msg_send![progress_bar,
@@ -1332,6 +1329,7 @@ mod menu_bridge {
         })
     }
 
+    #[allow(dead_code)]
     pub unsafe fn selected_download_size(dialog: &DownloadDialog) -> String {
         let selected: id = msg_send![dialog.model_selector, titleOfSelectedItem];
         let text = nsstring_to_string(selected);
@@ -1476,91 +1474,9 @@ mod menu_bridge {
         format!("...{}", tail)
     }
 
-    fn shorten_path(path: &str) -> String {
-        const MAX: usize = 42;
-        if path.len() <= MAX {
-            return path.to_string();
-        }
-        let tail = &path[path.len() - (MAX - 3)..];
-        format!("...{}", tail)
-    }
-
-    fn current_whisper_model_name(snapshot: &MenuSnapshot) -> String {
-        std::path::Path::new(&snapshot.whisper_model_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-    }
-
     fn download_menu_title(snapshot: &MenuSnapshot) -> String {
         let _ = snapshot;
-        "下载模型...".to_string()
-    }
-
-    fn prompt_choose_from_list(
-        title: &str,
-        prompt: &str,
-        options: &[String],
-        default: &str,
-    ) -> Option<String> {
-        if options.is_empty() {
-            return None;
-        }
-        let escaped_title = applescript_escape(title);
-        let escaped_prompt = applescript_escape(prompt);
-        let escaped_default = applescript_escape(default);
-        let items = options
-            .iter()
-            .map(|s| format!("\"{}\"", applescript_escape(s)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let script = format!(
-            "set choices to {{{items}}}\nset picked to choose from list choices with title \"{escaped_title}\" with prompt \"{escaped_prompt}\" default items {{\"{escaped_default}\"}}\nif picked is false then return \"\"\nreturn item 1 of picked"
-        );
-        let output = std::process::Command::new("/usr/bin/osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() {
-            return None;
-        }
-        Some(value)
-    }
-
-    fn prompt_switch_whisper_model(snapshot: &MenuSnapshot) -> Option<MenuAction> {
-        let mut options = snapshot
-            .local_models
-            .iter()
-            .filter(|name| name.ends_with(".bin"))
-            .cloned()
-            .collect::<Vec<_>>();
-        options.sort();
-        options.dedup();
-        if options.is_empty() {
-            return None;
-        }
-
-        let current = current_whisper_model_name(snapshot);
-        let default = if options.iter().any(|m| m == &current) {
-            current
-        } else {
-            options[0].clone()
-        };
-
-        let selected = prompt_choose_from_list(
-            "切换 Whisper 模型",
-            "选择要切换的模型（切换后自动保存并立即生效）",
-            &options,
-            &default,
-        )?;
-        let model_path = whisper_model_path_from_file_name(&selected).ok()?;
-        Some(MenuAction::SwitchWhisperModel { model_path })
+        "下载 Sherpa Paraformer 模型...".to_string()
     }
 
     fn modifier_parts(flags: NSEventModifierFlags) -> Vec<String> {
@@ -1656,13 +1572,6 @@ mod menu_bridge {
         CStr::from_ptr(cstr).to_string_lossy().into_owned()
     }
 
-    fn applescript_escape(value: &str) -> String {
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', " ")
-    }
-
     unsafe fn nsstring(value: &str) -> id {
         NSString::alloc(nil).init_str(value)
     }
@@ -1719,6 +1628,7 @@ fn empty_snapshot() -> MenuSnapshot {
         llm_enabled: false,
         text_correction_enabled: true,
         vad_enabled: false,
+        streaming_draft: true,
         llm_provider: "openai".to_string(),
         llm_model: "gpt-4o-mini".to_string(),
         llm_api_base: "https://api.openai.com/v1".to_string(),
@@ -1826,18 +1736,8 @@ fn show_about_popup() {
 }
 
 #[cfg(target_os = "macos")]
-fn preferred_download_size(snapshot: &MenuSnapshot) -> &'static str {
-    let model_name = std::path::Path::new(&snapshot.whisper_model_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if model_name.contains("turbo") {
-        "turbo"
-    } else if model_name.contains("medium") {
-        "medium"
-    } else {
-        "large-v3"
-    }
+fn preferred_download_size(_snapshot: &MenuSnapshot) -> &'static str {
+    "paraformer"
 }
 
 #[cfg(target_os = "macos")]
@@ -2771,6 +2671,8 @@ const MENU_ID_TOGGLE_CORRECTION: &str = "toggle_correction";
 #[cfg(target_os = "linux")]
 const MENU_ID_TOGGLE_VAD: &str = "toggle_vad";
 #[cfg(target_os = "linux")]
+const MENU_ID_TOGGLE_STREAMING_DRAFT: &str = "toggle_streaming_draft";
+#[cfg(target_os = "linux")]
 const MENU_ID_MODE_HOLD: &str = "mode_hold";
 #[cfg(target_os = "linux")]
 const MENU_ID_MODE_TOGGLE: &str = "mode_toggle";
@@ -2797,6 +2699,7 @@ struct LinuxMenuHandles {
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
     vad_enabled: muda::CheckMenuItem,
+    streaming_draft: muda::CheckMenuItem,
     mode_hold: muda::CheckMenuItem,
     mode_toggle: muda::CheckMenuItem,
 }
@@ -3421,6 +3324,13 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
     let vad_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_VAD, "启用 VAD", true, false, None);
+    let streaming_draft = muda::CheckMenuItem::with_id(
+        MENU_ID_TOGGLE_STREAMING_DRAFT,
+        "启用流式草稿",
+        true,
+        true,
+        None,
+    );
 
     menu.append(&status_line)?;
     menu.append(&hotkey_line)?;
@@ -3437,6 +3347,7 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     menu.append(&llm_enabled)?;
     menu.append(&correction_enabled)?;
     menu.append(&vad_enabled)?;
+    menu.append(&streaming_draft)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
 
     let mode_hold = muda::CheckMenuItem::with_id(MENU_ID_MODE_HOLD, "长按模式", true, false, None);
@@ -3488,6 +3399,7 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
             llm_enabled,
             correction_enabled,
             vad_enabled,
+            streaming_draft,
             mode_hold,
             mode_toggle,
         },
@@ -3516,6 +3428,9 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         .correction_enabled
         .set_checked(snapshot.text_correction_enabled);
     handles.vad_enabled.set_checked(snapshot.vad_enabled);
+    handles
+        .streaming_draft
+        .set_checked(snapshot.streaming_draft);
     handles
         .mode_hold
         .set_checked(snapshot.hotkey_trigger_mode == HotkeyTriggerMode::HoldToRecord);
@@ -3581,6 +3496,7 @@ fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
         MENU_ID_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
         MENU_ID_TOGGLE_CORRECTION => Some(MenuAction::ToggleTextCorrectionEnabled),
         MENU_ID_TOGGLE_VAD => Some(MenuAction::ToggleVadEnabled),
+        MENU_ID_TOGGLE_STREAMING_DRAFT => Some(MenuAction::ToggleStreamingDraft),
         MENU_ID_OPEN_CONFIG_FOLDER => Some(MenuAction::OpenConfigFolder),
         MENU_ID_OPEN_MODEL_FOLDER => Some(MenuAction::OpenModelFolder),
         MENU_ID_MODE_HOLD => Some(MenuAction::SetHotkeyTriggerMode {
@@ -3848,7 +3764,7 @@ mod tests {
         ));
         assert!(matches!(
             menu_bridge::map_tag_to_action(menu_bridge::TAG_DOWNLOAD_MODEL, &snapshot),
-            Some(MenuAction::DownloadModel { .. }) | None
+            Some(MenuAction::DownloadModel) | None
         ));
         assert!(matches!(
             menu_bridge::map_tag_to_action(menu_bridge::TAG_QUIT_UI, &snapshot),

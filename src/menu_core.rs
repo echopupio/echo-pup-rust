@@ -9,10 +9,11 @@ use crate::config::HotkeyTriggerMode;
 use crate::hotkey;
 use crate::model_download::{self, DownloadEvent, DownloadState, DOWNLOAD_LOG_MAX_LINES};
 
-pub const MENU_ITEMS: [&str; 7] = [
+pub const MENU_ITEMS: [&str; 8] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
     "切换 VAD 开关",
+    "切换流式草稿开关",
     "编辑热键（按键捕获）",
     "编辑 LLM 配置",
     "下载 ASR 模型",
@@ -35,6 +36,7 @@ pub enum MenuAction {
     ToggleLlmEnabled,
     ToggleTextCorrectionEnabled,
     ToggleVadEnabled,
+    ToggleStreamingDraft,
     OpenConfigFolder,
     OpenModelFolder,
     SetField {
@@ -67,6 +69,7 @@ pub struct MenuSnapshot {
     pub llm_enabled: bool,
     pub text_correction_enabled: bool,
     pub vad_enabled: bool,
+    pub streaming_draft: bool,
     pub llm_provider: String,
     pub llm_model: String,
     pub llm_api_base: String,
@@ -125,6 +128,7 @@ impl MenuCore {
             llm_enabled: self.config.llm.enabled,
             text_correction_enabled: self.config.text_correction.enabled,
             vad_enabled: self.config.audio.vad_enabled,
+            streaming_draft: self.config.commit.streaming_draft,
             llm_provider: self.config.llm.provider.clone(),
             llm_model: self.config.llm.model.clone(),
             llm_api_base: self.config.llm.api_base.clone(),
@@ -198,6 +202,15 @@ impl MenuCore {
                 self.status = format!(
                     "VAD 开关 => {}（已自动保存）",
                     self.config.audio.vad_enabled
+                );
+                Ok(self.status.clone())
+            }
+            MenuAction::ToggleStreamingDraft => {
+                self.config.commit.streaming_draft = !self.config.commit.streaming_draft;
+                self.persist_config()?;
+                self.status = format!(
+                    "流式草稿 => {}（已自动保存，重启生效）",
+                    self.config.commit.streaming_draft
                 );
                 Ok(self.status.clone())
             }
@@ -470,10 +483,10 @@ mod tests {
 
     #[test]
     fn test_phase_e_menu_contract_order() {
-        assert_eq!(MENU_ITEMS.len(), 7);
+        assert_eq!(MENU_ITEMS.len(), 8);
         assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
-        assert_eq!(MENU_ITEMS[5], "下载 ASR 模型");
-        assert_eq!(MENU_ITEMS[6], "退出");
+        assert_eq!(MENU_ITEMS[6], "下载 ASR 模型");
+        assert_eq!(MENU_ITEMS[7], "退出");
     }
 
     #[test]
