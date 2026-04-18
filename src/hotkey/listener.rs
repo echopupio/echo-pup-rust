@@ -11,7 +11,6 @@ use rdev::{EventType, Key};
 use rdev::{EventType, Key};
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -37,6 +36,42 @@ enum ListenerMode {
     FunctionKeyNoMods(Code),
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LowLevelTarget {
+    Inactive,
+    RightCtrl,
+    FunctionKey(Key),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Default)]
+struct LowLevelCallbacks {
+    event_callback: Option<HotkeyCallback>,
+    press_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+    release_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct LowLevelListenerRuntime {
+    target: LowLevelTarget,
+    callbacks: LowLevelCallbacks,
+    pressed: bool,
+    pressed_count: u8,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Default for LowLevelListenerRuntime {
+    fn default() -> Self {
+        Self {
+            target: LowLevelTarget::Inactive,
+            callbacks: LowLevelCallbacks::default(),
+            pressed: false,
+            pressed_count: 0,
+        }
+    }
+}
+
 /// 热键监听器
 pub struct HotkeyListener {
     hotkey: Option<HotKey>,
@@ -48,6 +83,10 @@ pub struct HotkeyListener {
     stop_sender: Option<Sender<()>>,
     event_receiver: Option<GlobalHotKeyEventReceiver>,
     mode: ListenerMode,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    low_level_runtime: Arc<Mutex<LowLevelListenerRuntime>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    low_level_listener_started: bool,
 }
 
 impl HotkeyListener {
@@ -74,6 +113,10 @@ impl HotkeyListener {
             stop_sender: None,
             event_receiver: None,
             mode: ListenerMode::GlobalHotkey,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            low_level_runtime: Arc::new(Mutex::new(LowLevelListenerRuntime::default())),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            low_level_listener_started: false,
         })
     }
 
@@ -156,16 +199,29 @@ impl HotkeyListener {
     /// 设置回调函数
     pub fn on_event(&mut self, callback: HotkeyCallback) {
         self.callback = Some(callback);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.low_level_runtime.lock().callbacks.event_callback = self.callback.clone();
+        }
     }
 
     /// 设置按下回调 (兼容旧接口)
     pub fn on_press(&mut self, callback: Arc<dyn Fn() + Send + Sync>) {
         self.press_callback = Some(callback);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.low_level_runtime.lock().callbacks.press_callback = self.press_callback.clone();
+        }
     }
 
     /// 设置松开回调 (兼容旧接口)
     pub fn on_release(&mut self, callback: Arc<dyn Fn() + Send + Sync>) {
         self.release_callback = Some(callback);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.low_level_runtime.lock().callbacks.release_callback =
+                self.release_callback.clone();
+        }
     }
 
     /// 开始监听热键事件
@@ -236,84 +292,7 @@ impl HotkeyListener {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn start_right_ctrl_listener(&mut self) -> Result<()> {
         info!("热键监听模式: right_ctrl (rdev)");
-
-        let is_pressed = self.is_pressed.clone();
-        let pressed_count = Arc::new(Mutex::new(0u8));
-        let event_callback = self.callback.clone();
-        let press_callback = self.press_callback.clone();
-        let release_callback = self.release_callback.clone();
-
-        let (stop_tx, stop_rx) = channel();
-        self.stop_sender = Some(stop_tx);
-
-        let should_stop = Arc::new(AtomicBool::new(false));
-
-        {
-            let should_stop = should_stop.clone();
-            thread::spawn(move || {
-                let _ = stop_rx.recv();
-                should_stop.store(true, Ordering::SeqCst);
-            });
-        }
-
-        thread::spawn(move || {
-            let pressed_count = pressed_count.clone();
-            let result = rdev::listen(move |event| {
-                if should_stop.load(Ordering::SeqCst) {
-                    return;
-                }
-
-                match event.event_type {
-                    EventType::KeyPress(key) if is_right_ctrl_event_key(key) => {
-                        let mut count = pressed_count.lock();
-                        let was_zero = *count == 0;
-                        *count = count.saturating_add(1);
-                        drop(count);
-
-                        if was_zero {
-                            let mut pressed = is_pressed.lock();
-                            *pressed = true;
-                            drop(pressed);
-                            if let Some(ref cb) = event_callback {
-                                cb(HotkeyEvent::Pressed);
-                            }
-                            if let Some(ref cb) = press_callback {
-                                cb();
-                            }
-                        }
-                    }
-                    EventType::KeyRelease(key) if is_right_ctrl_event_key(key) => {
-                        debug!("rdev KeyRelease event received for right ctrl");
-                        let mut count = pressed_count.lock();
-                        if *count > 0 {
-                            *count -= 1;
-                        }
-                        let became_zero = *count == 0;
-                        debug!("KeyRelease: count={}, became_zero={}", *count, became_zero);
-                        drop(count);
-
-                        if became_zero {
-                            debug!("Calling release_callback due to became_zero");
-                            let mut pressed = is_pressed.lock();
-                            *pressed = false;
-                            drop(pressed);
-                            if let Some(ref cb) = event_callback {
-                                cb(HotkeyEvent::Released);
-                            }
-                            if let Some(ref cb) = release_callback {
-                                cb();
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            });
-
-            if let Err(err) = result {
-                error!("right_ctrl 热键监听失败: {:?}", err);
-            }
-        });
-
+        self.activate_low_level_listener(LowLevelTarget::RightCtrl);
         Ok(())
     }
 
@@ -322,66 +301,7 @@ impl HotkeyListener {
         let target_key =
             code_to_rdev_function_key(code).ok_or_else(|| anyhow!("不支持的功能键: {:?}", code))?;
         info!("热键监听模式: function-key (rdev, {:?})", code);
-
-        let is_pressed = self.is_pressed.clone();
-        let event_callback = self.callback.clone();
-        let press_callback = self.press_callback.clone();
-        let release_callback = self.release_callback.clone();
-
-        let (stop_tx, stop_rx) = channel();
-        self.stop_sender = Some(stop_tx);
-
-        let should_stop = Arc::new(AtomicBool::new(false));
-        {
-            let should_stop = should_stop.clone();
-            thread::spawn(move || {
-                let _ = stop_rx.recv();
-                should_stop.store(true, Ordering::SeqCst);
-            });
-        }
-
-        thread::spawn(move || {
-            let result = rdev::listen(move |event| {
-                if should_stop.load(Ordering::SeqCst) {
-                    return;
-                }
-
-                match event.event_type {
-                    EventType::KeyPress(key) if key == target_key => {
-                        let mut pressed = is_pressed.lock();
-                        if !*pressed {
-                            *pressed = true;
-                            drop(pressed);
-                            if let Some(ref cb) = event_callback {
-                                cb(HotkeyEvent::Pressed);
-                            }
-                            if let Some(ref cb) = press_callback {
-                                cb();
-                            }
-                        }
-                    }
-                    EventType::KeyRelease(key) if key == target_key => {
-                        let mut pressed = is_pressed.lock();
-                        if *pressed {
-                            *pressed = false;
-                            drop(pressed);
-                            if let Some(ref cb) = event_callback {
-                                cb(HotkeyEvent::Released);
-                            }
-                            if let Some(ref cb) = release_callback {
-                                cb();
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            });
-
-            if let Err(err) = result {
-                error!("function-key 热键监听失败({:?}): {:?}", code, err);
-            }
-        });
-
+        self.activate_low_level_listener(LowLevelTarget::FunctionKey(target_key));
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -415,6 +335,13 @@ impl HotkeyListener {
         if let Some(sender) = self.stop_sender.take() {
             let _ = sender.send(());
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let mut runtime = self.low_level_runtime.lock();
+            runtime.target = LowLevelTarget::Inactive;
+            runtime.pressed = false;
+            runtime.pressed_count = 0;
+        }
         *self.is_pressed.lock() = false;
     }
 
@@ -424,6 +351,128 @@ impl HotkeyListener {
                 let _ = manager.unregister(*hotkey);
             }
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn activate_low_level_listener(&mut self, target: LowLevelTarget) {
+        {
+            let mut runtime = self.low_level_runtime.lock();
+            runtime.target = target;
+            runtime.pressed = false;
+            runtime.pressed_count = 0;
+            runtime.callbacks.event_callback = self.callback.clone();
+            runtime.callbacks.press_callback = self.press_callback.clone();
+            runtime.callbacks.release_callback = self.release_callback.clone();
+        }
+
+        if self.low_level_listener_started {
+            return;
+        }
+
+        let runtime = self.low_level_runtime.clone();
+        let is_pressed = self.is_pressed.clone();
+        thread::spawn(move || {
+            let result = rdev::listen(move |event| {
+                handle_low_level_event(&runtime, &is_pressed, event.event_type);
+            });
+
+            if let Err(err) = result {
+                error!("低层热键监听失败: {:?}", err);
+            }
+        });
+        self.low_level_listener_started = true;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn handle_low_level_event(
+    runtime: &Arc<Mutex<LowLevelListenerRuntime>>,
+    is_pressed: &Arc<Mutex<bool>>,
+    event_type: EventType,
+) {
+    let mut callbacks = LowLevelCallbacks::default();
+    let mut fired_event = None::<HotkeyEvent>;
+    let mut next_pressed = None::<bool>;
+
+    {
+        let mut runtime = runtime.lock();
+        match runtime.target {
+            LowLevelTarget::Inactive => return,
+            LowLevelTarget::RightCtrl => match event_type {
+                EventType::KeyPress(key) if is_right_ctrl_event_key(key) => {
+                    let was_zero = runtime.pressed_count == 0;
+                    runtime.pressed_count = runtime.pressed_count.saturating_add(1);
+                    if was_zero {
+                        runtime.pressed = true;
+                        callbacks = runtime.callbacks.clone();
+                        fired_event = Some(HotkeyEvent::Pressed);
+                        next_pressed = Some(true);
+                    }
+                }
+                EventType::KeyRelease(key) if is_right_ctrl_event_key(key) => {
+                    debug!("rdev KeyRelease event received for right ctrl");
+                    if runtime.pressed_count > 0 {
+                        runtime.pressed_count -= 1;
+                    }
+                    let became_zero = runtime.pressed_count == 0;
+                    debug!(
+                        "KeyRelease: count={}, became_zero={}",
+                        runtime.pressed_count, became_zero
+                    );
+                    if became_zero && runtime.pressed {
+                        debug!("Calling release_callback due to became_zero");
+                        runtime.pressed = false;
+                        callbacks = runtime.callbacks.clone();
+                        fired_event = Some(HotkeyEvent::Released);
+                        next_pressed = Some(false);
+                    }
+                }
+                _ => {}
+            },
+            LowLevelTarget::FunctionKey(target_key) => match event_type {
+                EventType::KeyPress(key) if key == target_key => {
+                    if !runtime.pressed {
+                        runtime.pressed = true;
+                        callbacks = runtime.callbacks.clone();
+                        fired_event = Some(HotkeyEvent::Pressed);
+                        next_pressed = Some(true);
+                    }
+                }
+                EventType::KeyRelease(key) if key == target_key => {
+                    if runtime.pressed {
+                        runtime.pressed = false;
+                        callbacks = runtime.callbacks.clone();
+                        fired_event = Some(HotkeyEvent::Released);
+                        next_pressed = Some(false);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    if let Some(pressed) = next_pressed {
+        *is_pressed.lock() = pressed;
+    }
+
+    match fired_event {
+        Some(HotkeyEvent::Pressed) => {
+            if let Some(ref cb) = callbacks.event_callback {
+                cb(HotkeyEvent::Pressed);
+            }
+            if let Some(ref cb) = callbacks.press_callback {
+                cb();
+            }
+        }
+        Some(HotkeyEvent::Released) => {
+            if let Some(ref cb) = callbacks.event_callback {
+                cb(HotkeyEvent::Released);
+            }
+            if let Some(ref cb) = callbacks.release_callback {
+                cb();
+            }
+        }
+        None => {}
     }
 }
 
@@ -440,7 +489,7 @@ pub fn validate_hotkey_config(key: &str) -> Result<()> {
     validate_hotkey_config_for_session(key, is_wayland_session())
 }
 
-fn validate_hotkey_config_for_session(key: &str, is_wayland: bool) -> Result<()> {
+fn validate_hotkey_config_for_session(key: &str, _is_wayland: bool) -> Result<()> {
     let key_count = hotkey_key_count(key);
     if key_count == 0 {
         return Err(anyhow!("热键不能为空"));
@@ -454,7 +503,7 @@ fn validate_hotkey_config_for_session(key: &str, is_wayland: bool) -> Result<()>
     }
 
     #[cfg(target_os = "linux")]
-    if is_wayland {
+    if _is_wayland {
         return Err(anyhow!(linux_wayland_hotkey_unsupported_message()));
     }
 
@@ -684,11 +733,23 @@ impl Drop for HotkeyListener {
 mod tests {
     #[cfg(target_os = "macos")]
     use super::parse_macos_fn_state_output;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use super::{
+        handle_low_level_event, LowLevelCallbacks, LowLevelListenerRuntime, LowLevelTarget,
+    };
     use super::{is_right_ctrl_alias, validate_hotkey_config_for_session};
     use global_hotkey::hotkey::HotKey;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use parking_lot::Mutex;
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::should_use_low_level_function_key_listener_for_session;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use rdev::{EventType, Key};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::sync::Arc;
 
     #[test]
     fn test_right_ctrl_aliases() {
@@ -776,6 +837,62 @@ mod tests {
         assert!(!should_use_low_level_function_key_listener_for_session(
             &hotkey, false
         ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_low_level_runtime_switches_targets_without_restart() {
+        let press_count = Arc::new(AtomicUsize::new(0));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let press_counter = press_count.clone();
+        let release_counter = release_count.clone();
+
+        let runtime = Arc::new(Mutex::new(LowLevelListenerRuntime {
+            target: LowLevelTarget::RightCtrl,
+            callbacks: LowLevelCallbacks {
+                event_callback: None,
+                press_callback: Some(Arc::new(move || {
+                    press_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+                release_callback: Some(Arc::new(move || {
+                    release_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+            },
+            pressed: false,
+            pressed_count: 0,
+        }));
+        let is_pressed = Arc::new(Mutex::new(false));
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::ControlLeft));
+        assert_eq!(press_count.load(Ordering::SeqCst), 1);
+        assert!(*is_pressed.lock());
+
+        handle_low_level_event(
+            &runtime,
+            &is_pressed,
+            EventType::KeyRelease(Key::ControlLeft),
+        );
+        assert_eq!(release_count.load(Ordering::SeqCst), 1);
+        assert!(!*is_pressed.lock());
+
+        {
+            let mut guard = runtime.lock();
+            guard.target = LowLevelTarget::FunctionKey(Key::F1);
+            guard.pressed = false;
+            guard.pressed_count = 0;
+        }
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::ControlLeft));
+        assert_eq!(press_count.load(Ordering::SeqCst), 1);
+        assert!(!*is_pressed.lock());
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::F1));
+        assert_eq!(press_count.load(Ordering::SeqCst), 2);
+        assert!(*is_pressed.lock());
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyRelease(Key::F1));
+        assert_eq!(release_count.load(Ordering::SeqCst), 2);
+        assert!(!*is_pressed.lock());
     }
 
     #[cfg(target_os = "linux")]
