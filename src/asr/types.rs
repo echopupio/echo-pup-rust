@@ -31,7 +31,6 @@ pub struct AsrRuntimeInfo {
 #[derive(Debug, Clone, Copy)]
 pub struct AsrSessionConfig {
     pub min_partial_samples: usize,
-    pub max_partial_window_samples: usize,
 }
 
 /// 单次录音生命周期内的流式识别会话。

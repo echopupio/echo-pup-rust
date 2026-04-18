@@ -184,7 +184,6 @@ fn transcribe_final_with_session(
 ) -> Result<String> {
     let session_config = asr::AsrSessionConfig {
         min_partial_samples: audio.len().max(1),
-        max_partial_window_samples: audio.len().max(1),
     };
 
     match asr_engine.start_session(session_config) {
@@ -1399,8 +1398,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     let min_samples = (recorder_callback.target_sample_rate() as usize)
                         .saturating_mul(800)
                         / 1000;
-                    let max_preview_samples =
-                        (recorder_callback.target_sample_rate() as usize).saturating_mul(3);
                     let callback_handle = std::thread::spawn(move || {
                         let mut preview_session: Box<dyn asr::AsrSession> = {
                             let asr_guard = preview_asr_runtime_for_callback.lock();
@@ -1410,14 +1407,12 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
                             match asr_engine.start_session(asr::AsrSessionConfig {
                                 min_partial_samples: min_samples,
-                                max_partial_window_samples: max_preview_samples,
                             }) {
                                 Ok(session) => {
                                     info!(
-                                        "ASR 预览会话已启动: backend={}, min_samples={}, window_samples={}",
+                                        "ASR 预览会话已启动: backend={}, min_samples={}",
                                         session.backend_kind().label(),
-                                        min_samples,
-                                        max_preview_samples
+                                        min_samples
                                     );
                                     session
                                 }
