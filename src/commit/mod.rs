@@ -5,6 +5,7 @@ use anyhow::Result;
 
 /// 文本提交动作。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum CommitAction {
     /// 最终提交文本（录音结束后，无草稿在屏时使用）
     CommitFinal { text: String },
