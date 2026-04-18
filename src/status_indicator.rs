@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::HotkeyTriggerMode;
-use crate::menu_core::{EditableField, MenuAction, MenuActionResult, MenuSnapshot};
+use crate::menu_core::{MenuAction, MenuActionResult, MenuSnapshot};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -700,7 +700,7 @@ unsafe fn apply_button_style(
 mod menu_bridge {
     use super::*;
     use cocoa::appkit::{
-        NSApp, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSWindow,
+        NSApp, NSBackingStoreType, NSWindow,
         NSWindowStyleMask,
     };
     use cocoa::base::{id, nil, NO, YES};
@@ -715,7 +715,6 @@ mod menu_bridge {
 
     pub const TAG_TOGGLE_LLM: i64 = 1001;
     pub const TAG_TOGGLE_CORRECTION: i64 = 1002;
-    pub const TAG_EDIT_HOTKEY: i64 = 1004;
     pub const TAG_EDIT_LLM_FORM: i64 = 1005;
     pub const TAG_DOWNLOAD_MODEL: i64 = 1007;
     pub const TAG_QUIT_UI: i64 = 1008;
@@ -725,9 +724,6 @@ mod menu_bridge {
     pub const TAG_SHOW_ABOUT: i64 = 1012;
     pub const TAG_MODE_HOLD: i64 = 1013;
     pub const TAG_MODE_PRESS_TOGGLE: i64 = 1014;
-    pub const TAG_HOTKEY_UNDO: i64 = 2001;
-    pub const TAG_HOTKEY_CONFIRM: i64 = 2002;
-    pub const TAG_HOTKEY_CANCEL: i64 = 2003;
     pub const TAG_LLM_FORM_CONFIRM: i64 = 2101;
     pub const TAG_LLM_FORM_CANCEL: i64 = 2102;
     pub const TAG_DOWNLOAD_DIALOG_CONFIRM: i64 = 3001;
@@ -740,21 +736,11 @@ mod menu_bridge {
         pub target: id,
         pub toggle_llm: id,
         pub toggle_correction: id,
-        pub edit_hotkey: id,
         pub mode_hold: id,
         pub mode_press_toggle: id,
         pub edit_llm_form: id,
         pub download_model: id,
         pub status_line: id,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    pub struct HotkeyDialog {
-        pub window: id,
-        pub value_label: id,
-        pub hint_label: id,
-        pub undo_button: id,
-        pub confirm_button: id,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -833,8 +819,6 @@ mod menu_bridge {
 
             add_separator(menu);
 
-            let edit_hotkey =
-                add_action_item(menu, target, TAG_EDIT_HOTKEY, "编辑热键（按键捕获）");
             let mode_submenu = add_submenu(menu, "录音触发模式");
             let mode_hold = add_action_item(
                 mode_submenu,
@@ -876,7 +860,6 @@ mod menu_bridge {
                 target,
                 toggle_llm,
                 toggle_correction,
-                edit_hotkey,
                 mode_hold,
                 mode_press_toggle,
                 edit_llm_form,
@@ -886,11 +869,6 @@ mod menu_bridge {
 
             (menu, handles)
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn is_hotkey_capture_tag(tag: i64) -> bool {
-        tag == TAG_EDIT_HOTKEY
     }
 
     pub fn map_tag_to_action(tag: i64, _snapshot: &MenuSnapshot) -> Option<MenuAction> {
@@ -925,10 +903,6 @@ mod menu_bridge {
             );
 
             set_title(
-                handles.edit_hotkey,
-                &format!("编辑热键 ({})", snapshot.hotkey),
-            );
-            set_title(
                 handles.edit_llm_form,
                 &format!(
                     "编辑 LLM 配置 ({}/{})",
@@ -941,45 +915,6 @@ mod menu_bridge {
         }
     }
 
-    pub enum HotkeyCaptureResult {
-        Captured(String),
-        Cancelled,
-        Ignored,
-    }
-
-    pub unsafe fn capture_hotkey_from_event(event: id) -> HotkeyCaptureResult {
-        let event_type = event.eventType();
-        match event_type {
-            NSEventType::NSFlagsChanged => {
-                let key_code = event.keyCode();
-                // 59: left control, 62: right control
-                if key_code == 59 || key_code == 62 {
-                    return HotkeyCaptureResult::Captured("ctrl".to_string());
-                }
-                HotkeyCaptureResult::Ignored
-            }
-            NSEventType::NSKeyDown => {
-                let key_code = event.keyCode();
-                if key_code == 53 {
-                    return HotkeyCaptureResult::Cancelled;
-                }
-
-                let mut parts: Vec<String> = modifier_parts(event.modifierFlags());
-                let Some(key_name) = key_name_from_event(event, key_code) else {
-                    return HotkeyCaptureResult::Ignored;
-                };
-                parts.push(key_name);
-                let hotkey = parts.join("+");
-                if crate::hotkey::validate_hotkey_config(&hotkey).is_ok() {
-                    HotkeyCaptureResult::Captured(hotkey)
-                } else {
-                    HotkeyCaptureResult::Ignored
-                }
-            }
-            _ => HotkeyCaptureResult::Ignored,
-        }
-    }
-
     pub unsafe fn show_window(window: id) {
         if window == nil {
             return;
@@ -987,100 +922,6 @@ mod menu_bridge {
         let app = NSApp();
         let _: () = msg_send![app, activateIgnoringOtherApps: YES];
         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
-    }
-
-    pub unsafe fn create_hotkey_dialog(target: id, current_hotkey: &str) -> Option<HotkeyDialog> {
-        let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(430.0, 190.0)),
-            NSWindowStyleMask::NSTitledWindowMask,
-            NSBackingStoreType::NSBackingStoreBuffered,
-            NO,
-        );
-        if window == nil {
-            return None;
-        }
-        let _: () = msg_send![window, setReleasedWhenClosed: YES];
-        let _: () = msg_send![window, setTitle: nsstring("编辑热键")];
-        let _: () = msg_send![window, center];
-
-        let content: id = msg_send![window, contentView];
-        if content == nil {
-            return None;
-        }
-
-        let _title = add_label(
-            content,
-            NSRect::new(NSPoint::new(20.0, 142.0), NSSize::new(390.0, 24.0)),
-            "请直接按下目标热键组合",
-        );
-        let value_label = add_label(
-            content,
-            NSRect::new(NSPoint::new(20.0, 106.0), NSSize::new(390.0, 24.0)),
-            &format!("当前按键: {}", current_hotkey),
-        );
-        let hint_label = add_label(
-            content,
-            NSRect::new(NSPoint::new(20.0, 84.0), NSSize::new(390.0, 18.0)),
-            "Esc 或取消可退出，支持撤销后确认",
-        );
-
-        let undo_button = add_button(
-            content,
-            target,
-            TAG_HOTKEY_UNDO,
-            "撤销",
-            NSRect::new(NSPoint::new(110.0, 28.0), NSSize::new(80.0, 28.0)),
-        );
-        let confirm_button = add_button(
-            content,
-            target,
-            TAG_HOTKEY_CONFIRM,
-            "确认",
-            NSRect::new(NSPoint::new(200.0, 28.0), NSSize::new(80.0, 28.0)),
-        );
-        let _cancel_button = add_button(
-            content,
-            target,
-            TAG_HOTKEY_CANCEL,
-            "取消",
-            NSRect::new(NSPoint::new(290.0, 28.0), NSSize::new(80.0, 28.0)),
-        );
-
-        set_enabled(undo_button, false);
-        set_enabled(confirm_button, false);
-        show_window(window);
-
-        Some(HotkeyDialog {
-            window,
-            value_label,
-            hint_label,
-            undo_button,
-            confirm_button,
-        })
-    }
-
-    pub unsafe fn update_hotkey_dialog(
-        dialog: &HotkeyDialog,
-        captured_hotkey: &str,
-        hint: &str,
-        can_undo: bool,
-        can_confirm: bool,
-    ) {
-        set_text(
-            dialog.value_label,
-            &format!("当前按键: {}", captured_hotkey.trim()),
-        );
-        set_text(dialog.hint_label, hint);
-        set_enabled(dialog.undo_button, can_undo);
-        set_enabled(dialog.confirm_button, can_confirm);
-    }
-
-    pub unsafe fn close_hotkey_dialog(dialog: HotkeyDialog) {
-        if dialog.window == nil {
-            return;
-        }
-        let _: () = msg_send![dialog.window, orderOut: nil];
-        let _: () = msg_send![dialog.window, close];
     }
 
     pub unsafe fn create_llm_form_dialog(
@@ -1462,88 +1303,6 @@ mod menu_bridge {
         "下载 Sherpa Paraformer 模型...".to_string()
     }
 
-    fn modifier_parts(flags: NSEventModifierFlags) -> Vec<String> {
-        let mut parts = Vec::new();
-        if flags.contains(NSEventModifierFlags::NSControlKeyMask) {
-            parts.push("ctrl".to_string());
-        }
-        if flags.contains(NSEventModifierFlags::NSAlternateKeyMask) {
-            parts.push("alt".to_string());
-        }
-        if flags.contains(NSEventModifierFlags::NSShiftKeyMask) {
-            parts.push("shift".to_string());
-        }
-        if flags.contains(NSEventModifierFlags::NSCommandKeyMask) {
-            parts.push("super".to_string());
-        }
-        parts
-    }
-
-    unsafe fn key_name_from_event(event: id, key_code: u16) -> Option<String> {
-        if let Some(name) = key_name_from_key_code(key_code) {
-            return Some(name.to_string());
-        }
-
-        let chars: id = event.charactersIgnoringModifiers();
-        if chars == nil {
-            return None;
-        }
-        let text = nsstring_to_string(chars);
-        let ch = text.chars().next()?;
-        char_to_hotkey_key(ch)
-    }
-
-    fn key_name_from_key_code(key_code: u16) -> Option<&'static str> {
-        match key_code {
-            36 => Some("enter"),
-            48 => Some("tab"),
-            51 => Some("backspace"),
-            53 => Some("esc"),
-            115 => Some("home"),
-            119 => Some("end"),
-            116 => Some("pageup"),
-            121 => Some("pagedown"),
-            123 => Some("left"),
-            124 => Some("right"),
-            125 => Some("down"),
-            126 => Some("up"),
-            122 => Some("f1"),
-            120 => Some("f2"),
-            99 => Some("f3"),
-            118 => Some("f4"),
-            96 => Some("f5"),
-            97 => Some("f6"),
-            98 => Some("f7"),
-            100 => Some("f8"),
-            101 => Some("f9"),
-            109 => Some("f10"),
-            103 => Some("f11"),
-            111 => Some("f12"),
-            _ => None,
-        }
-    }
-
-    fn char_to_hotkey_key(c: char) -> Option<String> {
-        let key = match c {
-            'a'..='z' | '0'..='9' => c.to_string(),
-            'A'..='Z' => c.to_ascii_lowercase().to_string(),
-            ' ' => "space".to_string(),
-            '+' | '=' => "equal".to_string(),
-            '-' | '_' => "minus".to_string(),
-            ',' | '<' => "comma".to_string(),
-            '.' | '>' => "period".to_string(),
-            ';' | ':' => "semicolon".to_string(),
-            '/' | '?' => "slash".to_string(),
-            '\'' | '"' => "quote".to_string(),
-            '[' | '{' => "bracketleft".to_string(),
-            ']' | '}' => "bracketright".to_string(),
-            '\\' | '|' => "backslash".to_string(),
-            '`' | '~' => "backquote".to_string(),
-            _ => return None,
-        };
-        Some(key)
-    }
-
     unsafe fn nsstring_to_string(value: id) -> String {
         if value == nil {
             return String::new();
@@ -1606,7 +1365,6 @@ fn empty_snapshot() -> MenuSnapshot {
         status: "就绪".to_string(),
         dirty: false,
         should_quit_ui: false,
-        hotkey: "right_ctrl".to_string(),
         hotkey_trigger_mode: HotkeyTriggerMode::PressToToggle,
         llm_enabled: false,
         text_correction_enabled: true,
@@ -1618,15 +1376,6 @@ fn empty_snapshot() -> MenuSnapshot {
         download: None,
         download_logs: vec![],
     }
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Debug, Default)]
-struct HotkeyPopupState {
-    dialog: Option<menu_bridge::HotkeyDialog>,
-    original: String,
-    current: String,
-    history: Vec<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1719,60 +1468,6 @@ fn show_about_popup() {
 #[cfg(target_os = "macos")]
 fn preferred_download_size(_snapshot: &MenuSnapshot) -> &'static str {
     "paraformer"
-}
-
-#[cfg(target_os = "macos")]
-fn open_hotkey_popup(
-    menu_handles: &menu_bridge::MenuHandles,
-    snapshot: &MenuSnapshot,
-    popup: &mut HotkeyPopupState,
-) {
-    unsafe {
-        if popup.dialog.is_none() {
-            popup.dialog = menu_bridge::create_hotkey_dialog(menu_handles.target, &snapshot.hotkey);
-        }
-        popup.original = snapshot.hotkey.clone();
-        popup.current = snapshot.hotkey.clone();
-        popup.history.clear();
-        if let Some(dialog) = popup.dialog {
-            menu_bridge::update_hotkey_dialog(
-                &dialog,
-                &popup.current,
-                "按下按键后可撤销，确认后自动保存并生效",
-                false,
-                false,
-            );
-            menu_bridge::show_window(dialog.window);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn close_hotkey_popup(popup: &mut HotkeyPopupState) {
-    if let Some(dialog) = popup.dialog.take() {
-        unsafe {
-            menu_bridge::close_hotkey_dialog(dialog);
-        }
-    }
-    popup.original.clear();
-    popup.current.clear();
-    popup.history.clear();
-}
-
-#[cfg(target_os = "macos")]
-fn update_hotkey_popup_view(popup: &mut HotkeyPopupState, hint: &str) {
-    let Some(dialog) = popup.dialog else {
-        return;
-    };
-    unsafe {
-        menu_bridge::update_hotkey_dialog(
-            &dialog,
-            &popup.current,
-            hint,
-            !popup.history.is_empty(),
-            popup.current != popup.original,
-        );
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1971,7 +1666,6 @@ pub fn run_status_indicator_process() -> Result<()> {
         let mut pulse_phase = 0.0f32;
         let mut should_exit = false;
         let mut latest_snapshot = empty_snapshot();
-        let mut hotkey_popup = HotkeyPopupState::default();
         let mut llm_form_popup = LlmFormPopupState::default();
         let mut download_popup = DownloadPopupState::default();
 
@@ -1980,40 +1674,6 @@ pub fn run_status_indicator_process() -> Result<()> {
         while !should_exit {
             while let Ok(tag) = menu_rx.try_recv() {
                 match tag {
-                    menu_bridge::TAG_EDIT_HOTKEY => {
-                        open_hotkey_popup(&menu_handles, &latest_snapshot, &mut hotkey_popup);
-                        continue;
-                    }
-                    menu_bridge::TAG_HOTKEY_UNDO => {
-                        if let Some(previous) = hotkey_popup.history.pop() {
-                            hotkey_popup.current = previous;
-                            update_hotkey_popup_view(
-                                &mut hotkey_popup,
-                                "已撤销到上一个按键，确认后生效",
-                            );
-                        }
-                        continue;
-                    }
-                    menu_bridge::TAG_HOTKEY_CONFIRM => {
-                        if hotkey_popup.dialog.is_some() {
-                            let should_apply = hotkey_popup.current != hotkey_popup.original;
-                            let next_hotkey = hotkey_popup.current.clone();
-                            close_hotkey_popup(&mut hotkey_popup);
-                            if should_apply {
-                                send_child_message(&ChildMessage::ActionRequest {
-                                    action: MenuAction::SetField {
-                                        field: EditableField::Hotkey,
-                                        value: next_hotkey,
-                                    },
-                                });
-                            }
-                        }
-                        continue;
-                    }
-                    menu_bridge::TAG_HOTKEY_CANCEL => {
-                        close_hotkey_popup(&mut hotkey_popup);
-                        continue;
-                    }
                     menu_bridge::TAG_EDIT_LLM_FORM => {
                         open_llm_form_popup(&menu_handles, &latest_snapshot, &mut llm_form_popup);
                         continue;
@@ -2215,33 +1875,12 @@ pub fn run_status_indicator_process() -> Result<()> {
                 YES,
             );
             if event != nil {
-                if hotkey_popup.dialog.is_some() {
-                    match menu_bridge::capture_hotkey_from_event(event) {
-                        menu_bridge::HotkeyCaptureResult::Captured(hotkey) => {
-                            if hotkey != hotkey_popup.current {
-                                hotkey_popup.history.push(hotkey_popup.current.clone());
-                                hotkey_popup.current = hotkey.clone();
-                            }
-                            update_hotkey_popup_view(
-                                &mut hotkey_popup,
-                                &format!("已捕获: {}。可撤销或确认", hotkey),
-                            );
-                            continue;
-                        }
-                        menu_bridge::HotkeyCaptureResult::Cancelled => {
-                            close_hotkey_popup(&mut hotkey_popup);
-                            continue;
-                        }
-                        menu_bridge::HotkeyCaptureResult::Ignored => {}
-                    }
-                }
                 app.sendEvent_(event);
             }
 
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
 
-        close_hotkey_popup(&mut hotkey_popup);
         close_llm_form_popup(&mut llm_form_popup);
         close_download_popup(&mut download_popup);
         status_bar.removeStatusItem_(status_item);
@@ -2656,8 +2295,6 @@ const MENU_ID_MODE_TOGGLE: &str = "mode_toggle";
 #[cfg(target_os = "linux")]
 const MENU_ID_RELOAD_CONFIG: &str = "reload_config";
 #[cfg(target_os = "linux")]
-const MENU_ID_EDIT_HOTKEY_LINUX: &str = "edit_hotkey_linux";
-#[cfg(target_os = "linux")]
 const MENU_ID_EDIT_LLM_FORM_LINUX: &str = "edit_llm_form_linux";
 #[cfg(target_os = "linux")]
 const MENU_ID_OPEN_CONFIG_FOLDER: &str = "open_config_folder";
@@ -2671,19 +2308,11 @@ const MENU_ID_DOWNLOAD_MODEL_LINUX: &str = "download_model_linux";
 #[cfg(target_os = "linux")]
 struct LinuxMenuHandles {
     status_line: muda::MenuItem,
-    hotkey_line: muda::MenuItem,
     edit_llm_form: muda::MenuItem,
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
     mode_hold: muda::CheckMenuItem,
     mode_toggle: muda::CheckMenuItem,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Default)]
-struct HotkeyPopupLinux {
-    current_hotkey: String,
-    is_editing: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -2924,275 +2553,6 @@ fn handle_download_popup_response_linux(
 }
 
 #[cfg(target_os = "linux")]
-fn open_hotkey_popup_linux(
-    snapshot: &MenuSnapshot,
-    popup: &mut HotkeyPopupLinux,
-) -> Option<String> {
-    use gtk::prelude::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    popup.current_hotkey = snapshot.hotkey.clone();
-    popup.is_editing = true;
-
-    let dialog = gtk::Dialog::with_buttons(
-        Some("编辑热键"),
-        None::<&gtk::Window>,
-        gtk::DialogFlags::MODAL,
-        &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("确认", gtk::ResponseType::Ok),
-        ],
-    );
-    apply_linux_dialog_icon(&dialog);
-    let content = dialog.content_area();
-    content.set_spacing(8);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
-
-    let hint = gtk::Label::new(Some("请直接按下目标热键，Esc 取消，Enter 确认"));
-    hint.set_xalign(0.0);
-    content.pack_start(&hint, false, false, 6);
-
-    let captured_label = gtk::Label::new(Some(&format!("当前按键: {}", popup.current_hotkey)));
-    captured_label.set_xalign(0.0);
-    content.pack_start(&captured_label, false, false, 0);
-    dialog.set_default_response(gtk::ResponseType::Ok);
-    dialog.set_can_focus(true);
-
-    let captured_value = Rc::new(RefCell::new(popup.current_hotkey.clone()));
-    if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
-        widget.set_sensitive(crate::hotkey::validate_hotkey_config(&popup.current_hotkey).is_ok());
-    }
-
-    let label_for_key = captured_label.clone();
-    let hint_for_key = hint.clone();
-    let dialog_for_key = dialog.clone();
-    let value_for_key = captured_value.clone();
-    dialog.connect_key_press_event(move |dialog, event| {
-        use gtk::glib::Propagation;
-
-        let keyval = event.keyval();
-        let state = normalize_linux_modifier_state(event.state(), keyval);
-
-        if keyval == gtk::gdk::keys::constants::Escape {
-            dialog.response(gtk::ResponseType::Cancel);
-            return Propagation::Stop;
-        }
-
-        let response_type = if (keyval == gtk::gdk::keys::constants::Return
-            || keyval == gtk::gdk::keys::constants::KP_Enter)
-            && state.is_empty()
-        {
-            Some(gtk::ResponseType::Ok)
-        } else {
-            None
-        };
-        if let Some(response_type) = response_type {
-            dialog.response(response_type);
-            return Propagation::Stop;
-        }
-
-        match linux_hotkey_from_key_event(event) {
-            Some(hotkey) => {
-                *value_for_key.borrow_mut() = hotkey.clone();
-                label_for_key.set_text(&format!("当前按键: {}", hotkey));
-                hint_for_key.set_text("已捕获，按 Enter 确认，继续按键可覆盖");
-                if let Some(widget) = dialog_for_key.widget_for_response(gtk::ResponseType::Ok) {
-                    widget.set_sensitive(true);
-                }
-            }
-            None => {
-                hint_for_key.set_text("该按键暂不支持作为热键，请换一个");
-                if let Some(widget) = dialog_for_key.widget_for_response(gtk::ResponseType::Ok) {
-                    widget.set_sensitive(
-                        crate::hotkey::validate_hotkey_config(&value_for_key.borrow()).is_ok(),
-                    );
-                }
-            }
-        }
-
-        Propagation::Stop
-    });
-
-    dialog.show_all();
-    dialog.present();
-    dialog.grab_focus();
-    let response = dialog.run();
-    let value = captured_value.borrow().trim().to_string();
-    dialog.close();
-    popup.is_editing = false;
-
-    if response != gtk::ResponseType::Ok || value.is_empty() {
-        return None;
-    }
-    if crate::hotkey::validate_hotkey_config(&value).is_err() {
-        return None;
-    }
-    popup.current_hotkey = value.clone();
-    Some(value)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_hotkey_from_key_event(event: &gtk::gdk::EventKey) -> Option<String> {
-    let keyval = event.keyval();
-    let state = normalize_linux_modifier_state(event.state(), keyval);
-
-    if keyval == gtk::gdk::keys::constants::Escape {
-        return Some("esc".to_string());
-    }
-
-    if (keyval == gtk::gdk::keys::constants::Control_L
-        || keyval == gtk::gdk::keys::constants::Control_R)
-        && !state.intersects(
-            gtk::gdk::ModifierType::SHIFT_MASK
-                | gtk::gdk::ModifierType::MOD1_MASK
-                | gtk::gdk::ModifierType::SUPER_MASK
-                | gtk::gdk::ModifierType::META_MASK,
-        )
-    {
-        return Some("right_ctrl".to_string());
-    }
-
-    let mut parts: Vec<String> = Vec::new();
-    if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-        parts.push("ctrl".to_string());
-    }
-    if state.contains(gtk::gdk::ModifierType::MOD1_MASK) {
-        parts.push("alt".to_string());
-    }
-    if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
-        parts.push("shift".to_string());
-    }
-    if state.intersects(gtk::gdk::ModifierType::SUPER_MASK | gtk::gdk::ModifierType::META_MASK) {
-        parts.push("super".to_string());
-    }
-
-    let key = linux_keyval_to_hotkey_key(keyval)?;
-    parts.push(key);
-    let hotkey = parts.join("+");
-    crate::hotkey::validate_hotkey_config(&hotkey)
-        .ok()
-        .map(|_| hotkey)
-}
-
-#[cfg(target_os = "linux")]
-fn normalize_linux_modifier_state(
-    mut state: gtk::gdk::ModifierType,
-    keyval: gtk::gdk::keys::Key,
-) -> gtk::gdk::ModifierType {
-    use gtk::gdk::keys::constants;
-
-    state.remove(
-        gtk::gdk::ModifierType::LOCK_MASK
-            | gtk::gdk::ModifierType::MOD2_MASK
-            | gtk::gdk::ModifierType::BUTTON1_MASK
-            | gtk::gdk::ModifierType::BUTTON2_MASK
-            | gtk::gdk::ModifierType::BUTTON3_MASK
-            | gtk::gdk::ModifierType::BUTTON4_MASK
-            | gtk::gdk::ModifierType::BUTTON5_MASK,
-    );
-
-    match keyval {
-        constants::Control_L | constants::Control_R => {
-            state.remove(gtk::gdk::ModifierType::CONTROL_MASK);
-        }
-        constants::Shift_L | constants::Shift_R => {
-            state.remove(gtk::gdk::ModifierType::SHIFT_MASK);
-        }
-        constants::Alt_L | constants::Alt_R | constants::Meta_L | constants::Meta_R => {
-            state.remove(gtk::gdk::ModifierType::MOD1_MASK | gtk::gdk::ModifierType::META_MASK);
-        }
-        constants::Super_L | constants::Super_R => {
-            state.remove(gtk::gdk::ModifierType::SUPER_MASK);
-        }
-        _ => {}
-    }
-
-    state
-}
-
-#[cfg(target_os = "linux")]
-fn linux_keyval_to_hotkey_key(keyval: gtk::gdk::keys::Key) -> Option<String> {
-    use gtk::gdk::keys::constants;
-
-    let key = match keyval {
-        constants::Return | constants::KP_Enter => "enter".to_string(),
-        constants::Tab | constants::ISO_Left_Tab => "tab".to_string(),
-        constants::BackSpace => "backspace".to_string(),
-        constants::Delete | constants::KP_Delete => "delete".to_string(),
-        constants::Insert | constants::KP_Insert => "insert".to_string(),
-        constants::Home | constants::KP_Home => "home".to_string(),
-        constants::End | constants::KP_End => "end".to_string(),
-        constants::Page_Up | constants::KP_Page_Up => "pageup".to_string(),
-        constants::Page_Down | constants::KP_Page_Down => "pagedown".to_string(),
-        constants::Left | constants::KP_Left => "left".to_string(),
-        constants::Right | constants::KP_Right => "right".to_string(),
-        constants::Up | constants::KP_Up => "up".to_string(),
-        constants::Down | constants::KP_Down => "down".to_string(),
-        constants::Escape => "esc".to_string(),
-        constants::Caps_Lock => "capslock".to_string(),
-        constants::Scroll_Lock => "scrolllock".to_string(),
-        constants::Num_Lock => "numlock".to_string(),
-        constants::Print => "printscreen".to_string(),
-        constants::Pause => "pause".to_string(),
-        _ => {
-            if let Some(name) = linux_function_key_name(keyval) {
-                return Some(name.to_string());
-            }
-            let ch = keyval.to_unicode()?;
-            return linux_char_to_hotkey_key(ch);
-        }
-    };
-    Some(key)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_function_key_name(keyval: gtk::gdk::keys::Key) -> Option<&'static str> {
-    use gtk::gdk::keys::constants;
-
-    match keyval {
-        constants::F1 => Some("f1"),
-        constants::F2 => Some("f2"),
-        constants::F3 => Some("f3"),
-        constants::F4 => Some("f4"),
-        constants::F5 => Some("f5"),
-        constants::F6 => Some("f6"),
-        constants::F7 => Some("f7"),
-        constants::F8 => Some("f8"),
-        constants::F9 => Some("f9"),
-        constants::F10 => Some("f10"),
-        constants::F11 => Some("f11"),
-        constants::F12 => Some("f12"),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_char_to_hotkey_key(c: char) -> Option<String> {
-    let key = match c {
-        'a'..='z' | '0'..='9' => c.to_string(),
-        'A'..='Z' => c.to_ascii_lowercase().to_string(),
-        ' ' => "space".to_string(),
-        '+' | '=' => "equal".to_string(),
-        '-' | '_' => "minus".to_string(),
-        ',' | '<' => "comma".to_string(),
-        '.' | '>' => "period".to_string(),
-        ';' | ':' => "semicolon".to_string(),
-        '/' | '?' => "slash".to_string(),
-        '\'' | '"' => "quote".to_string(),
-        '[' | '{' => "bracketleft".to_string(),
-        ']' | '}' => "bracketright".to_string(),
-        '\\' | '|' => "backslash".to_string(),
-        '`' | '~' => "backquote".to_string(),
-        _ => return None,
-    };
-    Some(key)
-}
-
-#[cfg(target_os = "linux")]
 fn open_llm_form_popup_linux(
     snapshot: &MenuSnapshot,
     popup: &mut LlmFormPopupLinux,
@@ -3292,20 +2652,13 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     let menu = muda::Menu::new();
 
     let status_line = muda::MenuItem::new("状态: 就绪", false, None);
-    let hotkey_line = muda::MenuItem::new("热键: -", false, None);
     let llm_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM", true, false, None);
     let correction_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
 
     menu.append(&status_line)?;
-    menu.append(&hotkey_line)?;
-    menu.append(&muda::MenuItem::with_id(
-        MENU_ID_EDIT_HOTKEY_LINUX,
-        "编辑热键",
-        true,
-        None,
-    ))?;
+    menu.append(&muda::PredefinedMenuItem::separator())?;
     let edit_llm_form =
         muda::MenuItem::with_id(MENU_ID_EDIT_LLM_FORM_LINUX, "编辑 LLM 配置", true, None);
     menu.append(&edit_llm_form)?;
@@ -3358,7 +2711,6 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         menu,
         LinuxMenuHandles {
             status_line,
-            hotkey_line,
             edit_llm_form,
             llm_enabled,
             correction_enabled,
@@ -3378,9 +2730,6 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
     handles
         .status_line
         .set_text(format!("状态: {}", status_text.replace('\n', " ")));
-    handles
-        .hotkey_line
-        .set_text(format!("热键: {}", snapshot.hotkey));
     handles.edit_llm_form.set_text(format!(
         "编辑 LLM 配置 ({}/{})",
         snapshot.llm_provider, snapshot.llm_model
@@ -3525,7 +2874,6 @@ pub fn run_status_indicator_process() -> Result<()> {
 
     let mut state = IndicatorState::Idle;
     let mut snapshot = empty_snapshot();
-    let mut hotkey_popup = HotkeyPopupLinux::default();
     let mut llm_form_popup = LlmFormPopupLinux::default();
     let mut download_popup = DownloadPopupLinux::default();
     update_linux_menu(&handles, &snapshot, state);
@@ -3544,19 +2892,6 @@ pub fn run_status_indicator_process() -> Result<()> {
 
     while !should_exit {
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
-            if event.id.as_ref() == MENU_ID_EDIT_HOTKEY_LINUX {
-                if let Some(new_hotkey) = open_hotkey_popup_linux(&snapshot, &mut hotkey_popup) {
-                    if new_hotkey != snapshot.hotkey {
-                        send_child_message(&ChildMessage::ActionRequest {
-                            action: MenuAction::SetField {
-                                field: EditableField::Hotkey,
-                                value: new_hotkey,
-                            },
-                        });
-                    }
-                }
-                continue;
-            }
             if event.id.as_ref() == MENU_ID_EDIT_LLM_FORM_LINUX {
                 if let Some((provider, model, api_base, api_key_env)) =
                     open_llm_form_popup_linux(&snapshot, &mut llm_form_popup)
@@ -3607,9 +2942,6 @@ pub fn run_status_indicator_process() -> Result<()> {
                         snapshot: next_snapshot,
                     } => {
                         snapshot = next_snapshot;
-                        if !hotkey_popup.is_editing {
-                            hotkey_popup.current_hotkey = snapshot.hotkey.clone();
-                        }
                         let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
                         update_linux_menu(&handles, &snapshot, state);
                         sync_download_popup_linux(&snapshot, &mut download_popup);
@@ -3619,9 +2951,6 @@ pub fn run_status_indicator_process() -> Result<()> {
                             warn!("状态栏动作执行失败: {}", result.message);
                         }
                         snapshot = result.snapshot;
-                        if !hotkey_popup.is_editing {
-                            hotkey_popup.current_hotkey = snapshot.hotkey.clone();
-                        }
                         let _ = tray_icon.set_tooltip(Some(&linux_tooltip_text(&snapshot, state)));
                         if !result.ok
                             && matches!(download_popup.phase, DownloadDialogPhaseLinux::Starting)
@@ -3721,9 +3050,6 @@ mod tests {
         assert!(matches!(
             menu_bridge::map_tag_to_action(menu_bridge::TAG_QUIT_UI, &snapshot),
             Some(MenuAction::QuitUi)
-        ));
-        assert!(menu_bridge::is_hotkey_capture_tag(
-            menu_bridge::TAG_EDIT_HOTKEY
         ));
     }
 

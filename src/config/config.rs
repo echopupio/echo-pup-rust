@@ -72,21 +72,13 @@ impl HotkeyTriggerMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
-    /// 按键名称，如 "F12"
-    pub key: String,
     /// 触发模式
     pub trigger_mode: HotkeyTriggerMode,
 }
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let default_hotkey = "right_ctrl";
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let default_hotkey = "ctrl+space";
-
         Self {
-            key: default_hotkey.to_string(),
             trigger_mode: HotkeyTriggerMode::default(),
         }
     }
@@ -378,10 +370,6 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        assert_eq!(config.hotkey.key, "right_ctrl");
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        assert_eq!(config.hotkey.key, "ctrl+space");
         assert_eq!(config.hotkey.trigger_mode, HotkeyTriggerMode::PressToToggle);
         assert_eq!(config.audio.sample_rate, 16000);
         assert_eq!(config.asr.backend, AsrBackend::SherpaParaformer);

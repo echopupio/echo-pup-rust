@@ -771,7 +771,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn start_background_mode(config_path: &str) -> Result<()> {
-    validate_hotkey_before_background_start(config_path)?;
     let config = config::Config::load(config_path)?;
 
     if runtime::is_running()? {
@@ -816,7 +815,6 @@ fn show_background_status() -> Result<()> {
 }
 
 fn restart_background_mode(config_path: &str) -> Result<()> {
-    validate_hotkey_before_background_start(config_path)?;
     let config = config::Config::load(config_path)?;
 
     if let Some(pid) = runtime::stop_running_instance()? {
@@ -829,18 +827,6 @@ fn restart_background_mode(config_path: &str) -> Result<()> {
     println!("日志文件: {}", log_path.display());
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
     println!("可使用 `echopup ui` 管理配置。");
-    Ok(())
-}
-
-fn validate_hotkey_before_background_start(config_path: &str) -> Result<()> {
-    let config = config::Config::load(config_path)?;
-    if let Err(err) = hotkey::validate_hotkey_config(&config.hotkey.key) {
-        anyhow::bail!(
-            "热键配置不安全/不可用: {}。{}",
-            err,
-            hotkey::hotkey_policy_hint()
-        );
-    }
     Ok(())
 }
 
@@ -1014,14 +1000,6 @@ fn apply_runtime_menu_action(
     llm_runtime: &Arc<Mutex<Option<llm::LLMRewrite>>>,
 ) -> Result<()> {
     match action {
-        menu_core::MenuAction::SetField {
-            field: menu_core::EditableField::Hotkey,
-            ..
-        } => {
-            hotkey_listener.set_hotkey(&snapshot.hotkey)?;
-            hotkey_listener.start()?;
-            info!("热键已热更新为 {}", snapshot.hotkey);
-        }
         menu_core::MenuAction::SetHotkeyTriggerMode { mode } => {
             *hotkey_trigger_mode_runtime.lock() = *mode;
             info!("热键触发模式已热更新为 {}", mode.label());
@@ -1058,7 +1036,7 @@ fn apply_runtime_menu_action(
         menu_core::MenuAction::ReloadConfig => {
             let cfg = config::Config::load(&snapshot.config_path)?;
 
-            hotkey_listener.set_hotkey(&cfg.hotkey.key)?;
+            hotkey_listener.set_hotkey("ctrl")?;
             hotkey_listener.start()?;
             *hotkey_trigger_mode_runtime.lock() = cfg.hotkey.trigger_mode;
 
@@ -1160,13 +1138,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     }
 
     let config = config::Config::load(config_path)?;
-    if let Err(err) = hotkey::validate_hotkey_config(&config.hotkey.key) {
-        anyhow::bail!(
-            "热键配置不安全/不可用: {}。{}",
-            err,
-            hotkey::hotkey_policy_hint()
-        );
-    }
     let mut menu_runtime = menu_core::MenuCore::new(config_path)?;
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
 
@@ -1737,7 +1708,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     // ===== 初始化热键监听器 =====
     let mut hotkey = hotkey::HotkeyListener::new()?;
-    hotkey.set_hotkey(&config.hotkey.key)?;
+    hotkey.set_hotkey("ctrl")?;
     hotkey.on_press(press_callback);
     hotkey.on_release(release_callback);
     hotkey.start()?;
@@ -1757,7 +1728,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     info!("===========================================");
     info!("🎤 EchoPup 语音输入已启动");
-    info!("   热键: {}", config.hotkey.key);
+    info!("   热键: ctrl (固定)");
     info!("   模式: {}", config.hotkey.trigger_mode.label());
     info!("   长按 1 秒开始录音");
     match config.hotkey.trigger_mode {

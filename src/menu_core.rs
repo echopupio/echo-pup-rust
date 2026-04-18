@@ -6,13 +6,11 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::config::Config;
 use crate::config::HotkeyTriggerMode;
-use crate::hotkey;
 use crate::model_download::{self, DownloadEvent, DownloadState, DOWNLOAD_LOG_MAX_LINES};
 
-pub const MENU_ITEMS: [&str; 6] = [
+pub const MENU_ITEMS: [&str; 5] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
-    "编辑热键（按键捕获）",
     "编辑 LLM 配置",
     "下载 ASR 模型",
     "退出",
@@ -21,7 +19,6 @@ pub const MENU_ITEMS: [&str; 6] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EditableField {
-    Hotkey,
     LlmProvider,
     LlmModel,
     LlmApiBase,
@@ -60,7 +57,6 @@ pub struct MenuSnapshot {
     pub dirty: bool,
     pub should_quit_ui: bool,
 
-    pub hotkey: String,
     pub hotkey_trigger_mode: HotkeyTriggerMode,
     pub llm_enabled: bool,
     pub text_correction_enabled: bool,
@@ -117,7 +113,6 @@ impl MenuCore {
             dirty: self.dirty,
             should_quit_ui: self.should_quit_ui,
 
-            hotkey: self.config.hotkey.key.clone(),
             hotkey_trigger_mode: self.config.hotkey.trigger_mode,
             llm_enabled: self.config.llm.enabled,
             text_correction_enabled: self.config.text_correction.enabled,
@@ -132,9 +127,9 @@ impl MenuCore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn current_value(&self, field: EditableField) -> String {
         match field {
-            EditableField::Hotkey => self.config.hotkey.key.clone(),
             EditableField::LlmProvider => self.config.llm.provider.clone(),
             EditableField::LlmModel => self.config.llm.model.clone(),
             EditableField::LlmApiBase => self.config.llm.api_base.clone(),
@@ -202,14 +197,7 @@ impl MenuCore {
                     return Err(anyhow!("输入不能为空"));
                 }
 
-                if field == EditableField::Hotkey {
-                    if let Err(err) = hotkey::validate_hotkey_config(&trimmed) {
-                        return Err(anyhow!("热键不安全: {}", err));
-                    }
-                }
-
                 match field {
-                    EditableField::Hotkey => self.config.hotkey.key = trimmed,
                     EditableField::LlmProvider => self.config.llm.provider = trimmed,
                     EditableField::LlmModel => self.config.llm.model = trimmed,
                     EditableField::LlmApiBase => self.config.llm.api_base = trimmed,
@@ -453,10 +441,10 @@ mod tests {
 
     #[test]
     fn test_phase_e_menu_contract_order() {
-        assert_eq!(MENU_ITEMS.len(), 6);
+        assert_eq!(MENU_ITEMS.len(), 5);
         assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
-        assert_eq!(MENU_ITEMS[4], "下载 ASR 模型");
-        assert_eq!(MENU_ITEMS[5], "退出");
+        assert_eq!(MENU_ITEMS[3], "下载 ASR 模型");
+        assert_eq!(MENU_ITEMS[4], "退出");
     }
 
     #[test]

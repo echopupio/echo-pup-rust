@@ -1,12 +1,11 @@
 //! 终端管理界面（TUI）
 
-use crate::hotkey;
 use crate::menu_core::{EditableField, MenuAction, MenuCore, MENU_ITEMS};
 use crate::model_download;
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    ModifierKeyCode, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -54,7 +53,6 @@ impl LlmFormDraft {
             EditableField::LlmModel => self.model.clone(),
             EditableField::LlmApiBase => self.api_base.clone(),
             EditableField::LlmApiKeyEnv => self.api_key_env.clone(),
-            _ => String::new(),
         }
     }
 
@@ -64,7 +62,6 @@ impl LlmFormDraft {
             EditableField::LlmModel => self.model = value,
             EditableField::LlmApiBase => self.api_base = value,
             EditableField::LlmApiKeyEnv => self.api_key_env = value,
-            _ => {}
         }
     }
 
@@ -74,7 +71,6 @@ impl LlmFormDraft {
             EditableField::LlmModel => "llm.model",
             EditableField::LlmApiBase => "llm.api_base",
             EditableField::LlmApiKeyEnv => "llm.api_key_env",
-            _ => "llm",
         }
     }
 }
@@ -209,8 +205,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     };
 
     let summary = format!(
-        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
-        snapshot.hotkey,
+        "当前配置\n\nhotkey: ctrl (固定)\nllm.enabled: {}\ntext_correction.enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
         snapshot.llm_enabled,
         snapshot.text_correction_enabled,
         snapshot.llm_provider,
@@ -227,24 +222,11 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     frame.render_widget(detail, body_chunks[1]);
 
     let bottom_text = if let Some(target) = app.input_target {
-        if target == EditableField::Hotkey {
-            let captured = if app.input_buffer.is_empty() {
-                "（未捕获）".to_string()
-            } else {
-                app.input_buffer.clone()
-            };
-            format!(
-                "正在编辑 {}\n已捕获: {}\n按目标组合键进行捕获，Enter 保存，Esc 取消，Backspace 清空",
-                input_target_label(target),
-                captured
-            )
-        } else {
-            format!(
-                "正在编辑 {}\n当前输入: {}\nEnter 保存，Esc 取消",
-                input_target_label(target),
-                app.input_buffer
-            )
-        }
+        format!(
+            "正在编辑 {}\n当前输入: {}\nEnter 保存，Esc 取消",
+            input_target_label(target),
+            app.input_buffer
+        )
     } else {
         format!(
             "状态: {}\n当前选中: {}",
@@ -300,11 +282,7 @@ fn handle_menu_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
 }
 
 fn handle_input_mode_event(app: &mut AppState, key: KeyEvent) -> Result<()> {
-    if app.input_target == Some(EditableField::Hotkey) {
-        handle_hotkey_capture_event(app, key)
-    } else {
-        handle_input_mode_key(app, key.code)
-    }
+    handle_input_mode_key(app, key.code)
 }
 
 fn handle_input_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
@@ -329,136 +307,6 @@ fn handle_input_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_hotkey_capture_event(app: &mut AppState, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc if key.modifiers.is_empty() => {
-            app.input_target = None;
-            app.input_buffer.clear();
-            app.menu.set_status("已取消热键编辑");
-            return Ok(());
-        }
-        KeyCode::Enter if key.modifiers.is_empty() => {
-            return apply_input(app);
-        }
-        KeyCode::Backspace if key.modifiers.is_empty() => {
-            app.input_buffer.clear();
-            app.menu.set_status("已清空捕获热键");
-            return Ok(());
-        }
-        _ => {}
-    }
-
-    let Some(value) = key_event_to_hotkey(&key) else {
-        app.menu.set_status("该按键暂不支持作为热键，请换一个");
-        return Ok(());
-    };
-
-    let total_keys = hotkey_key_count(&value);
-    if total_keys > 3 {
-        app.menu
-            .set_status(format!("热键最多支持 3 个键，当前为 {} 个", total_keys));
-        return Ok(());
-    }
-
-    if let Err(err) = hotkey::validate_hotkey_config(&value) {
-        app.menu.set_status(format!("热键不安全: {}", err));
-        return Ok(());
-    }
-
-    app.input_buffer = value.clone();
-    app.menu
-        .set_status(format!("已捕获热键: {}（Enter 保存）", value));
-    Ok(())
-}
-
-fn hotkey_key_count(value: &str) -> usize {
-    value.split('+').filter(|s| !s.is_empty()).count()
-}
-
-fn key_event_to_hotkey(key: &KeyEvent) -> Option<String> {
-    if let KeyCode::Modifier(modifier) = key.code {
-        return modifier_only_hotkey(modifier).map(ToOwned::to_owned);
-    }
-
-    let mut parts: Vec<String> = Vec::new();
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        parts.push("ctrl".to_string());
-    }
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        parts.push("alt".to_string());
-    }
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
-        parts.push("shift".to_string());
-    }
-    if key.modifiers.contains(KeyModifiers::SUPER) {
-        parts.push("super".to_string());
-    }
-
-    if let Some(main) = key_code_to_hotkey_key(key.code) {
-        parts.push(main);
-        return Some(parts.join("+"));
-    }
-
-    None
-}
-
-fn modifier_only_hotkey(modifier: ModifierKeyCode) -> Option<&'static str> {
-    match modifier {
-        ModifierKeyCode::RightControl => Some("right_ctrl"),
-        _ => None,
-    }
-}
-
-fn key_code_to_hotkey_key(code: KeyCode) -> Option<String> {
-    let key = match code {
-        KeyCode::Char(c) => return char_to_hotkey_key(c),
-        KeyCode::F(n) => return Some(format!("f{}", n)),
-        KeyCode::Enter => "enter".to_string(),
-        KeyCode::Tab | KeyCode::BackTab => "tab".to_string(),
-        KeyCode::Backspace => "backspace".to_string(),
-        KeyCode::Delete => "delete".to_string(),
-        KeyCode::Insert => "insert".to_string(),
-        KeyCode::Home => "home".to_string(),
-        KeyCode::End => "end".to_string(),
-        KeyCode::PageUp => "pageup".to_string(),
-        KeyCode::PageDown => "pagedown".to_string(),
-        KeyCode::Left => "left".to_string(),
-        KeyCode::Right => "right".to_string(),
-        KeyCode::Up => "up".to_string(),
-        KeyCode::Down => "down".to_string(),
-        KeyCode::Esc => "esc".to_string(),
-        KeyCode::CapsLock => "capslock".to_string(),
-        KeyCode::ScrollLock => "scrolllock".to_string(),
-        KeyCode::NumLock => "numlock".to_string(),
-        KeyCode::PrintScreen => "printscreen".to_string(),
-        KeyCode::Pause => "pause".to_string(),
-        _ => return None,
-    };
-    Some(key)
-}
-
-fn char_to_hotkey_key(c: char) -> Option<String> {
-    let key = match c {
-        'a'..='z' | '0'..='9' => c.to_string(),
-        'A'..='Z' => c.to_ascii_lowercase().to_string(),
-        ' ' => "space".to_string(),
-        '+' | '=' => "equal".to_string(),
-        '-' | '_' => "minus".to_string(),
-        ',' | '<' => "comma".to_string(),
-        '.' | '>' => "period".to_string(),
-        ';' | ':' => "semicolon".to_string(),
-        '/' | '?' => "slash".to_string(),
-        '\'' | '"' => "quote".to_string(),
-        '[' | '{' => "bracketleft".to_string(),
-        ']' | '}' => "bracketright".to_string(),
-        '\\' | '|' => "backslash".to_string(),
-        '`' | '~' => "backquote".to_string(),
-        _ => return None,
-    };
-    Some(key)
-}
-
 fn execute_menu_action(app: &mut AppState) {
     match app.selected {
         0 => {
@@ -467,32 +315,17 @@ fn execute_menu_action(app: &mut AppState) {
         1 => {
             app.menu.execute(MenuAction::ToggleTextCorrectionEnabled);
         }
-        2 => start_input(app, EditableField::Hotkey),
-        3 => start_llm_form(app),
-        4 => {
+        2 => start_llm_form(app),
+        3 => {
             app.menu.execute(MenuAction::DownloadModel);
         }
-        5 => {
+        4 => {
             let result = app.menu.execute(MenuAction::QuitUi);
             if result.quit_ui {
                 app.should_quit = true;
             }
         }
         _ => {}
-    }
-}
-
-fn start_input(app: &mut AppState, target: EditableField) {
-    app.input_target = Some(target);
-    app.input_buffer = app.menu.current_value(target);
-    if target == EditableField::Hotkey {
-        app.menu.set_status(format!(
-            "请按下热键组合进行捕获（最多3键）。{}",
-            hotkey::hotkey_policy_hint()
-        ));
-    } else {
-        app.menu
-            .set_status(format!("编辑 {}", input_target_label(target)));
     }
 }
 
@@ -565,7 +398,6 @@ fn apply_input(app: &mut AppState) -> Result<()> {
 
 fn input_target_label(target: EditableField) -> &'static str {
     match target {
-        EditableField::Hotkey => "hotkey",
         EditableField::LlmProvider => "llm.provider",
         EditableField::LlmModel => "llm.model",
         EditableField::LlmApiBase => "llm.api_base",
@@ -576,7 +408,7 @@ fn input_target_label(target: EditableField) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
+    use crossterm::event::KeyCode;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_config_path() -> String {
@@ -666,83 +498,5 @@ mod tests {
         execute_menu_action(&mut app);
         let s2 = app.menu.snapshot();
         assert_ne!(s2.text_correction_enabled, s1.text_correction_enabled);
-    }
-
-    #[test]
-    fn test_key_event_to_hotkey_basic_combos() {
-        let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
-        assert_eq!(
-            key_event_to_hotkey(&ctrl_space).as_deref(),
-            Some("ctrl+space")
-        );
-
-        let ctrl_shift_a = KeyEvent::new(
-            KeyCode::Char('A'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        assert_eq!(
-            key_event_to_hotkey(&ctrl_shift_a).as_deref(),
-            Some("ctrl+shift+a")
-        );
-    }
-
-    #[test]
-    fn test_key_event_to_hotkey_modifier_only() {
-        let right_ctrl = KeyEvent::new(
-            KeyCode::Modifier(ModifierKeyCode::RightControl),
-            KeyModifiers::empty(),
-        );
-        assert_eq!(
-            key_event_to_hotkey(&right_ctrl).as_deref(),
-            Some("right_ctrl")
-        );
-    }
-
-    #[test]
-    fn test_hotkey_capture_limit_max_three_keys() {
-        let mut app = make_app();
-        app.input_target = Some(EditableField::Hotkey);
-        app.input_buffer = "ctrl+space".to_string();
-
-        let too_many = KeyEvent::new(
-            KeyCode::Char('k'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
-        );
-
-        handle_hotkey_capture_event(&mut app, too_many).unwrap();
-
-        assert_eq!(app.input_buffer, "ctrl+space");
-    }
-
-    #[test]
-    fn test_hotkey_capture_rejects_unsafe_single_key() {
-        let mut app = make_app();
-        app.input_target = Some(EditableField::Hotkey);
-        app.input_buffer = app.menu.current_value(EditableField::Hotkey);
-
-        let unsafe_key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
-        handle_hotkey_capture_event(&mut app, unsafe_key).unwrap();
-
-        assert_eq!(
-            app.input_buffer,
-            app.menu.current_value(EditableField::Hotkey)
-        );
-    }
-
-    #[test]
-    fn test_apply_input_rejects_unsafe_hotkey() {
-        let mut app = make_app();
-        app.input_target = Some(EditableField::Hotkey);
-        app.input_buffer = "z".to_string();
-
-        apply_input(&mut app).unwrap();
-
-        assert_eq!(
-            app.menu.current_value(EditableField::Hotkey),
-            MenuCore::new("/tmp/echopup-ui-test-default.toml")
-                .unwrap()
-                .current_value(EditableField::Hotkey)
-        );
-        assert!(app.input_target.is_some());
     }
 }
