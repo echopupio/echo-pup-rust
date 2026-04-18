@@ -172,7 +172,10 @@ fn decode_audio(recognizer: &OnlineRecognizer, sample_rate: i32, audio: &[f32]) 
 
     let stream = recognizer.create_stream();
     stream.accept_waveform(sample_rate, audio);
-    recognizer.decode(&stream);
+    stream.input_finished();
+    while recognizer.is_ready(&stream) {
+        recognizer.decode(&stream);
+    }
     let result = recognizer
         .get_result(&stream)
         .context("sherpa-onnx 未返回识别结果")?;
