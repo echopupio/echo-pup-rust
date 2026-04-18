@@ -862,7 +862,8 @@ mod menu_bridge {
     pub fn update_menu(handles: &MenuHandles, snapshot: &MenuSnapshot) {
         unsafe {
             set_check_state(handles.toggle_llm, snapshot.llm_enabled);
-            let _: () = msg_send![handles.edit_llm_form, setHidden: !snapshot.llm_enabled as cocoa::base::BOOL];
+            // 始终显示编辑按钮，用户需先配置再启用
+
             set_check_state(handles.toggle_correction, snapshot.text_correction_enabled);
             set_check_state(
                 handles.mode_hold,
@@ -2214,7 +2215,7 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         snapshot.llm_provider, snapshot.llm_model
     ));
     handles.llm_enabled.set_checked(snapshot.llm_enabled);
-    handles.edit_llm_form.set_enabled(snapshot.llm_enabled);
+    // 始终可用，用户需先配置再启用
     handles
         .correction_enabled
         .set_checked(snapshot.text_correction_enabled);
