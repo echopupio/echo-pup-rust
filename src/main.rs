@@ -799,10 +799,10 @@ fn print_banner() {
   █▀▀ █▀▀ █ █ █▀█ █▀█ █ █ █▀█"#
     );
     eprintln!(
-        "  █▀▀ █\x1b[38;2;255;200;0m⡄\x1b[38;2;60;120;255m⡆\x1b[0m █▀█ █ █ █▀▀ █ █ █▀▀"
+        "  █▀▀ █\x1b[38;2;255;200;0m⣤\x1b[38;2;0;200;100m⣿\x1b[0m █▀█ █ █ █▀▀ █ █ █▀▀"
     );
     eprintln!(
-        "  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀ ▀   ▀▀▀ ▀\x1b[38;2;255;200;0m⡀\x1b[38;2;60;120;255m⡇\x1b[38;2;0;200;100m⡆\x1b[38;2;160;50;200m⡄\x1b[0m"
+        "  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀ ▀   ▀▀▀ ▀\x1b[38;2;255;200;0m⣀\x1b[38;2;0;200;100m⣿\x1b[38;2;160;50;200m⣤\x1b[38;2;60;120;255m⣶\x1b[0m"
     );
     eprintln!("  🎙  AI Voice Dictation  v{}\n", ver);
 }
@@ -1187,7 +1187,7 @@ fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewr
     match llm::LLMRewrite::new(
         &llm_cfg.provider,
         &llm_cfg.api_base,
-        &llm_cfg.api_key_env,
+        &llm_cfg.api_key,
         &llm_cfg.model,
     ) {
         Ok(l) => Some(l),
@@ -1231,7 +1231,7 @@ fn apply_runtime_menu_action(
                 menu_core::EditableField::LlmProvider
                 | menu_core::EditableField::LlmModel
                 | menu_core::EditableField::LlmApiBase
-                | menu_core::EditableField::LlmApiKeyEnv,
+                | menu_core::EditableField::LlmApiKey,
             ..
         }
         | menu_core::MenuAction::SetLlmConfig { .. }
@@ -1306,7 +1306,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         println!("  provider = \"ollama\"");
         println!("  model = \"llama3\"");
         println!("  api_base = \"http://localhost:11434/v1\"");
-        println!("  api_key_env = \"\"");
+        println!("  api_key = \"\"");
         println!("");
         println!("📝 配置示例 (OpenAI):");
         println!("");
@@ -1315,7 +1315,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         println!("  provider = \"openai\"");
         println!("  model = \"gpt-4o-mini\"");
         println!("  api_base = \"https://api.openai.com/v1\"");
-        println!("  api_key_env = \"OPENAI_API_KEY\"");
+        println!("  api_key = \"\"");
         println!("");
         println!("💡 提示：");
         println!("  - Ollama: 从 https://ollama.com 下载安装");
