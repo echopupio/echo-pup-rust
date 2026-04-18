@@ -217,6 +217,20 @@ fn join_thread_handle(handle: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) 
     }
 }
 
+/// 失败路径清理：清除屏幕上残留的草稿文字和 partial 状态
+fn cleanup_draft_on_failure(
+    recognition_session: &Arc<Mutex<session::RecognitionSession>>,
+    text_commit: &Arc<Mutex<Box<dyn commit::TextCommitBackend>>>,
+) {
+    let draft_clear = recognition_session.lock().prepare_draft_clear();
+    if let Some(action) = draft_clear {
+        if let Err(err) = text_commit.lock().apply(action) {
+            warn!("失败路径清除草稿失败: {}", err);
+        }
+    }
+    recognition_session.lock().clear_partials();
+}
+
 /// 处理音频数据：转写 -> LLM 整理 -> 谐音纠错 -> 键盘输入
 /// is_vad_triggered: 是否由 VAD 自动触发（用于日志区分）
 fn process_audio(
@@ -239,6 +253,7 @@ fn process_audio(
 
     if audio_data.is_empty() {
         info!("[{}] 录音数据为空", trigger_type);
+        cleanup_draft_on_failure(recognition_session, text_commit);
         desktop_notify(desktop_notify_enabled, "EchoPup", "未检测到语音输入");
         return false;
     }
@@ -282,6 +297,7 @@ fn process_audio(
                     let trimmed = text.trim();
                     if trimmed.is_empty() || trimmed == "[BLANK_AUDIO]" {
                         info!("转写结果为空或无效（可能没有说话或音量太小）");
+                        cleanup_draft_on_failure(recognition_session, text_commit);
                         desktop_notify(desktop_notify_enabled, "EchoPup", "未识别到有效语音");
                         return false;
                     }
@@ -300,6 +316,7 @@ fn process_audio(
     let stt_ms = stt_start.elapsed().as_millis();
 
     if !transcribe_success {
+        cleanup_draft_on_failure(recognition_session, text_commit);
         desktop_notify(
             desktop_notify_enabled,
             "EchoPup",
@@ -359,6 +376,8 @@ fn process_audio(
         session_guard.prepare_final_commit(&final_text)
     };
     let Some(commit_action) = commit_action else {
+        // 即使跳过提交，也需清理 partial 状态
+        recognition_session.lock().clear_partials();
         info!("最终结果为空或与本次会话已提交内容重复，跳过文本提交");
         return false;
     };
@@ -383,6 +402,8 @@ fn process_audio(
             }
         }
     }
+    // final commit 完成后清理 partial 状态
+    recognition_session.lock().clear_partials();
     type_ms = type_start.elapsed().as_millis();
 
     info!(
@@ -1537,16 +1558,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 }
             };
             info!("stop_recording_action: recorder.stop() 返回成功");
-            // 清除草稿：先从光标处删掉已输入的草稿文字，再清空 partial 状态
-            {
-                let draft_clear = recognition_session_on_stop.lock().prepare_draft_clear();
-                if let Some(action) = draft_clear {
-                    if let Err(err) = text_commit_stop.lock().apply(action) {
-                        warn!("清除草稿失败: {}", err);
-                    }
-                }
-            }
-            recognition_session_on_stop.lock().clear_partials();
+            // 草稿保留在光标处，final commit 时通过增量 diff 平滑过渡
             info!("stop_recording_action: 预览线程转为后台回收");
             detach_thread_handle(&partial_stt_handle_on_stop);
             detach_thread_handle(&partial_stt_callback_handle_on_stop);
@@ -1721,16 +1733,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     return;
                 }
             };
-            // 清除草稿（必须在 clear_partials 之前，否则 committed_char_count 已被重置）
-            {
-                let draft_clear = recognition_session_on_vad.lock().prepare_draft_clear();
-                if let Some(action) = draft_clear {
-                    if let Err(err) = vad_text_commit.lock().apply(action) {
-                        warn!("VAD 清除草稿失败: {}", err);
-                    }
-                }
-            }
-            recognition_session_on_vad.lock().clear_partials();
+            // 草稿保留在光标处，final commit 时通过增量 diff 平滑过渡
             detach_thread_handle(&partial_stt_handle_on_vad);
             detach_thread_handle(&partial_stt_callback_handle_on_vad);
             play_feedback_sound(sound_feedback_on_vad, FeedbackSoundEvent::RecordingEnd);

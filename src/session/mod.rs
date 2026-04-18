@@ -45,6 +45,11 @@ impl RecognitionSession {
     }
 
     pub fn prepare_final_commit(&mut self, text: &str) -> Option<CommitAction> {
+        // 如果有活跃草稿，平滑过渡到最终文本（只替换尾部差异）
+        if let Some(action) = self.partials.prepare_final_from_draft(text) {
+            return Some(action);
+        }
+        // 无草稿时，走普通 CommitFinal 路径
         self.finals.prepare_commit(text)
     }
 }

@@ -6,9 +6,14 @@ use anyhow::Result;
 /// 文本提交动作。
 #[derive(Debug, Clone)]
 pub enum CommitAction {
-    /// 最终提交文本（录音结束后）
+    /// 最终提交文本（录音结束后，无草稿在屏时使用）
     CommitFinal { text: String },
-    /// 更新草稿：先删旧草稿再输入新草稿
+    /// 从草稿平滑过渡到最终文本：只替换尾部差异，不闪烁
+    CommitFinalFromDraft {
+        new_text: String,
+        delete_chars: usize,
+    },
+    /// 更新草稿：先删旧草稿尾部再输入新后缀
     UpdateDraft {
         new_text: String,
         delete_chars: usize,
@@ -60,6 +65,19 @@ impl TextCommitBackend for InsertOnlyTextCommit {
                     self.draft_char_count = 0;
                 }
                 self.keyboard.type_text(&text)
+            }
+            CommitAction::CommitFinalFromDraft {
+                new_text,
+                delete_chars,
+            } => {
+                if delete_chars > 0 {
+                    self.keyboard.delete_backward(delete_chars)?;
+                }
+                if !new_text.is_empty() {
+                    self.keyboard.type_text(&new_text)?;
+                }
+                self.draft_char_count = 0;
+                Ok(())
             }
             CommitAction::UpdateDraft {
                 new_text,

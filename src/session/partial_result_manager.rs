@@ -78,6 +78,33 @@ impl PartialResultManager {
             delete_chars: char_count,
         })
     }
+
+    /// 从草稿平滑过渡到最终文本：只替换尾部差异。
+    ///
+    /// 如果没有活跃草稿，返回 None（调用方应 fallback 到 CommitFinal）。
+    pub fn prepare_final_from_draft(&mut self, final_text: &str) -> Option<CommitAction> {
+        if self.committed_text.is_empty() {
+            return None;
+        }
+
+        let normalized = final_text.replace('\n', " ").trim().to_string();
+        if normalized.is_empty() {
+            // final 为空时，清除草稿
+            return self.prepare_draft_clear();
+        }
+
+        let common_prefix_chars = common_char_prefix_len(&self.committed_text, &normalized);
+        let old_total_chars = self.committed_text.chars().count();
+        let delete_chars = old_total_chars - common_prefix_chars;
+        let new_suffix: String = normalized.chars().skip(common_prefix_chars).collect();
+
+        self.committed_text.clear();
+
+        Some(CommitAction::CommitFinalFromDraft {
+            new_text: new_suffix,
+            delete_chars,
+        })
+    }
 }
 
 fn normalize_partial_text(text: &str) -> String {
@@ -205,5 +232,33 @@ mod tests {
         }
         // 再次清除应返回 None
         assert!(manager.prepare_draft_clear().is_none());
+    }
+
+    #[test]
+    fn final_from_draft_smooth_transition() {
+        let mut manager = PartialResultManager::default();
+        // 模拟草稿: "你好世界吗"
+        manager.prepare_draft_commit("你好世界吗");
+        // final 文本: "你好世界啊！"
+        let action = manager.prepare_final_from_draft("你好世界啊！").unwrap();
+        match action {
+            CommitAction::CommitFinalFromDraft {
+                new_text,
+                delete_chars,
+            } => {
+                // 公共前缀 "你好世界"(4 chars)，旧 5 chars → delete 1("吗")，输入 "啊！"
+                assert_eq!(delete_chars, 1);
+                assert_eq!(new_text, "啊！");
+            }
+            _ => panic!("expected CommitFinalFromDraft"),
+        }
+        // committed_text 应已清空
+        assert!(manager.prepare_draft_clear().is_none());
+    }
+
+    #[test]
+    fn final_from_draft_returns_none_when_no_draft() {
+        let mut manager = PartialResultManager::default();
+        assert!(manager.prepare_final_from_draft("any text").is_none());
     }
 }
