@@ -17,6 +17,8 @@ pub enum CommitAction {
     UpdateDraft {
         new_text: String,
         delete_chars: usize,
+        /// 旧 draft 中有多少字符被"确认"（不删除，但不再算作 draft）
+        confirm_chars: usize,
     },
     /// 清除草稿（不输入新文字）
     ClearDraft { delete_chars: usize },
@@ -82,13 +84,19 @@ impl TextCommitBackend for InsertOnlyTextCommit {
             CommitAction::UpdateDraft {
                 new_text,
                 delete_chars,
+                confirm_chars,
             } => {
                 if delete_chars > 0 {
                     self.keyboard.delete_backward(delete_chars)?;
                 }
-                self.keyboard.type_text(&new_text)?;
-                self.draft_char_count =
-                    self.draft_char_count - delete_chars + new_text.chars().count();
+                if !new_text.is_empty() {
+                    self.keyboard.type_text(&new_text)?;
+                }
+                self.draft_char_count = self
+                    .draft_char_count
+                    .saturating_sub(delete_chars)
+                    .saturating_sub(confirm_chars)
+                    + new_text.chars().count();
                 Ok(())
             }
             CommitAction::ClearDraft { delete_chars } => {
