@@ -209,11 +209,10 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     };
 
     let summary = format!(
-        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\ncommit.streaming_draft: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
+        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
         snapshot.hotkey,
         snapshot.llm_enabled,
         snapshot.text_correction_enabled,
-        snapshot.streaming_draft,
         snapshot.llm_provider,
         snapshot.llm_model,
         snapshot.llm_api_base,
@@ -468,15 +467,12 @@ fn execute_menu_action(app: &mut AppState) {
         1 => {
             app.menu.execute(MenuAction::ToggleTextCorrectionEnabled);
         }
-        2 => {
-            app.menu.execute(MenuAction::ToggleStreamingDraft);
-        }
-        3 => start_input(app, EditableField::Hotkey),
-        4 => start_llm_form(app),
-        5 => {
+        2 => start_input(app, EditableField::Hotkey),
+        3 => start_llm_form(app),
+        4 => {
             app.menu.execute(MenuAction::DownloadModel);
         }
-        6 => {
+        5 => {
             let result = app.menu.execute(MenuAction::QuitUi);
             if result.quit_ui {
                 app.should_quit = true;

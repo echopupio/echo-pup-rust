@@ -1315,7 +1315,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let partial_stt_callback_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let recognition_session = Arc::new(Mutex::new(session::RecognitionSession::new()));
-    let streaming_draft_enabled = config.commit.streaming_draft;
 
     // 录音动画控制
     let recording_animation = Arc::new(AtomicBool::new(false));
@@ -1369,7 +1368,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_callback_handle_on_start = partial_stt_callback_handle.clone();
     let recognition_session_on_start = recognition_session.clone();
     let text_commit_on_start = text_commit.clone();
-    let streaming_draft_on_start = streaming_draft_enabled;
     let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
@@ -1403,7 +1401,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     let partial_stt_stop_callback = partial_stt_stop_on_start.clone();
                     let recognition_session_for_callback = recognition_session_on_start.clone();
                     let text_commit_for_callback = text_commit_on_start.clone();
-                    let streaming_draft_for_callback = streaming_draft_on_start;
                     let spinner_interval = Duration::from_millis(150);
                     let asr_poll_every_n: u32 = 3; // 每 3 个 spinner tick poll 一次 ASR (~450ms)
                     let min_samples = (recorder_callback.target_sample_rate() as usize)
@@ -1438,8 +1435,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             }
                         };
 
-                        let draft_enabled = streaming_draft_for_callback
-                            && text_commit_for_callback
+                        let draft_enabled = text_commit_for_callback
                                 .lock()
                                 .supports_draft_replacement();
 

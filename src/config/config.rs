@@ -257,19 +257,14 @@ impl Default for LLMConfig {
     }
 }
 
-/// 文本提交配置
+/// 文本提交配置（流式草稿现在始终启用，保留空结构体以兼容已有配置文件）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CommitConfig {
-    /// 是否启用流式草稿输入（边说边出文字）
-    pub streaming_draft: bool,
-}
+pub struct CommitConfig {}
 
 impl Default for CommitConfig {
     fn default() -> Self {
-        Self {
-            streaming_draft: true,
-        }
+        Self {}
     }
 }
 

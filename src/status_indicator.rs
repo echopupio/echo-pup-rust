@@ -715,7 +715,6 @@ mod menu_bridge {
 
     pub const TAG_TOGGLE_LLM: i64 = 1001;
     pub const TAG_TOGGLE_CORRECTION: i64 = 1002;
-    pub const TAG_TOGGLE_STREAMING_DRAFT: i64 = 1015;
     pub const TAG_EDIT_HOTKEY: i64 = 1004;
     pub const TAG_EDIT_LLM_FORM: i64 = 1005;
     pub const TAG_DOWNLOAD_MODEL: i64 = 1007;
@@ -741,7 +740,6 @@ mod menu_bridge {
         pub target: id,
         pub toggle_llm: id,
         pub toggle_correction: id,
-        pub toggle_streaming_draft: id,
         pub edit_hotkey: id,
         pub mode_hold: id,
         pub mode_press_toggle: id,
@@ -832,12 +830,6 @@ mod menu_bridge {
             let toggle_llm = add_action_item(menu, target, TAG_TOGGLE_LLM, "切换 LLM 开关");
             let toggle_correction =
                 add_action_item(menu, target, TAG_TOGGLE_CORRECTION, "切换文本纠错开关");
-            let toggle_streaming_draft = add_action_item(
-                menu,
-                target,
-                TAG_TOGGLE_STREAMING_DRAFT,
-                "切换流式草稿开关",
-            );
 
             add_separator(menu);
 
@@ -884,7 +876,6 @@ mod menu_bridge {
                 target,
                 toggle_llm,
                 toggle_correction,
-                toggle_streaming_draft,
                 edit_hotkey,
                 mode_hold,
                 mode_press_toggle,
@@ -906,7 +897,6 @@ mod menu_bridge {
         match tag {
             TAG_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
             TAG_TOGGLE_CORRECTION => Some(MenuAction::ToggleTextCorrectionEnabled),
-            TAG_TOGGLE_STREAMING_DRAFT => Some(MenuAction::ToggleStreamingDraft),
             TAG_MODE_HOLD => Some(MenuAction::SetHotkeyTriggerMode {
                 mode: HotkeyTriggerMode::HoldToRecord,
             }),
@@ -925,7 +915,6 @@ mod menu_bridge {
         unsafe {
             set_check_state(handles.toggle_llm, snapshot.llm_enabled);
             set_check_state(handles.toggle_correction, snapshot.text_correction_enabled);
-            set_check_state(handles.toggle_streaming_draft, snapshot.streaming_draft);
             set_check_state(
                 handles.mode_hold,
                 snapshot.hotkey_trigger_mode == HotkeyTriggerMode::HoldToRecord,
@@ -1621,7 +1610,6 @@ fn empty_snapshot() -> MenuSnapshot {
         hotkey_trigger_mode: HotkeyTriggerMode::PressToToggle,
         llm_enabled: false,
         text_correction_enabled: true,
-        streaming_draft: true,
         llm_provider: "openai".to_string(),
         llm_model: "gpt-4o-mini".to_string(),
         llm_api_base: "https://api.openai.com/v1".to_string(),
@@ -2662,8 +2650,6 @@ const MENU_ID_TOGGLE_LLM: &str = "toggle_llm";
 #[cfg(target_os = "linux")]
 const MENU_ID_TOGGLE_CORRECTION: &str = "toggle_correction";
 #[cfg(target_os = "linux")]
-const MENU_ID_TOGGLE_STREAMING_DRAFT: &str = "toggle_streaming_draft";
-#[cfg(target_os = "linux")]
 const MENU_ID_MODE_HOLD: &str = "mode_hold";
 #[cfg(target_os = "linux")]
 const MENU_ID_MODE_TOGGLE: &str = "mode_toggle";
@@ -2689,7 +2675,6 @@ struct LinuxMenuHandles {
     edit_llm_form: muda::MenuItem,
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
-    streaming_draft: muda::CheckMenuItem,
     mode_hold: muda::CheckMenuItem,
     mode_toggle: muda::CheckMenuItem,
 }
@@ -3312,13 +3297,6 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM", true, false, None);
     let correction_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
-    let streaming_draft = muda::CheckMenuItem::with_id(
-        MENU_ID_TOGGLE_STREAMING_DRAFT,
-        "启用流式草稿",
-        true,
-        true,
-        None,
-    );
 
     menu.append(&status_line)?;
     menu.append(&hotkey_line)?;
@@ -3334,7 +3312,6 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     menu.append(&muda::PredefinedMenuItem::separator())?;
     menu.append(&llm_enabled)?;
     menu.append(&correction_enabled)?;
-    menu.append(&streaming_draft)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
 
     let mode_hold = muda::CheckMenuItem::with_id(MENU_ID_MODE_HOLD, "长按模式", true, false, None);
@@ -3385,7 +3362,6 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
             edit_llm_form,
             llm_enabled,
             correction_enabled,
-            streaming_draft,
             mode_hold,
             mode_toggle,
         },
@@ -3413,9 +3389,6 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
     handles
         .correction_enabled
         .set_checked(snapshot.text_correction_enabled);
-    handles
-        .streaming_draft
-        .set_checked(snapshot.streaming_draft);
     handles
         .mode_hold
         .set_checked(snapshot.hotkey_trigger_mode == HotkeyTriggerMode::HoldToRecord);
@@ -3480,7 +3453,6 @@ fn map_linux_menu_id_to_action(id: &str) -> Option<MenuAction> {
     match id {
         MENU_ID_TOGGLE_LLM => Some(MenuAction::ToggleLlmEnabled),
         MENU_ID_TOGGLE_CORRECTION => Some(MenuAction::ToggleTextCorrectionEnabled),
-        MENU_ID_TOGGLE_STREAMING_DRAFT => Some(MenuAction::ToggleStreamingDraft),
         MENU_ID_OPEN_CONFIG_FOLDER => Some(MenuAction::OpenConfigFolder),
         MENU_ID_OPEN_MODEL_FOLDER => Some(MenuAction::OpenModelFolder),
         MENU_ID_MODE_HOLD => Some(MenuAction::SetHotkeyTriggerMode {
