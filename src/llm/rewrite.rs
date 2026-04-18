@@ -3,6 +3,19 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
+
+/// 请求超时（秒）
+const REQUEST_TIMEOUT_SECS: u64 = 8;
+
+/// 网络检测间隔（秒）
+const CONNECTIVITY_CHECK_INTERVAL_SECS: u64 = 60;
+
+/// 系统提示词
+const SYSTEM_PROMPT: &str = "你是语音转写文本的校对助手。请仅修正以下语音识别文本中的错误，不要改变原意、不要添加内容、不要解释。\n\n规则：\n1. 修正同音字和近音字错误\n2. 补充必要的标点符号\n3. 只输出修正后的文本";
 
 /// LLM 文本整理
 pub struct LLMRewrite {
@@ -12,6 +25,7 @@ pub struct LLMRewrite {
     api_base: String,
     api_key: String,
     enabled: bool,
+    online: Arc<AtomicBool>,
 }
 
 /// OpenAI API 请求
@@ -77,17 +91,40 @@ impl LLMRewrite {
     /// 创建新的 LLM 整理器
     pub fn new(provider: &str, api_base: &str, api_key: &str, model: &str) -> Result<Self> {
         let api_key = api_key.to_string();
+        let provider = provider.to_string();
 
-        let enabled = !api_key.is_empty();
+        // Ollama 是本地服务，不需要 API Key 也算启用
+        let enabled = provider == "ollama" || !api_key.is_empty();
 
-        Ok(Self {
-            client: Client::new(),
-            provider: provider.to_string(),
+        let client = Client::builder()
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .build()
+            .context("创建 HTTP 客户端失败")?;
+
+        let online = Arc::new(AtomicBool::new(true));
+
+        let instance = Self {
+            client,
+            provider,
             model: model.to_string(),
             api_base: api_base.to_string(),
             api_key,
             enabled,
-        })
+            online: online.clone(),
+        };
+
+        // 启动后台网络检测线程
+        if instance.enabled {
+            let check_url = instance.connectivity_check_url();
+            let is_local = instance.provider == "ollama";
+            let online_flag = online;
+            std::thread::Builder::new()
+                .name("llm-connectivity".into())
+                .spawn(move || connectivity_check_loop(check_url, is_local, online_flag))
+                .ok();
+        }
+
+        Ok(instance)
     }
 
     /// 整理/润色文本
@@ -96,27 +133,50 @@ impl LLMRewrite {
             return Ok(text.to_string());
         }
 
-        let prompt = format!(
-            "请将以下语音转写的文本进行整理和润色：\n1. 修正明显的识别错误\n2. 添加适当的标点符号\n3. 使语句更通顺自然\n\n原始文本：\n{}",
-            text
-        );
+        if !self.online.load(Ordering::Relaxed) {
+            info!("网络离线，跳过 LLM 整理");
+            return Ok(text.to_string());
+        }
 
-        match self.provider.as_str() {
-            "ollama" => self.rewrite_ollama(&prompt),
-            "anthropic" => self.rewrite_anthropic(&prompt),
-            _ => self.rewrite_openai(&prompt),
+        let start = Instant::now();
+        let result = match self.provider.as_str() {
+            "ollama" => self.rewrite_ollama(text),
+            "anthropic" => self.rewrite_anthropic(text),
+            _ => self.rewrite_openai(text),
+        };
+
+        match result {
+            Ok(rewritten) => {
+                info!("LLM 整理耗时: {}ms", start.elapsed().as_millis());
+                Ok(rewritten)
+            }
+            Err(e) => {
+                let elapsed = start.elapsed();
+                if elapsed >= Duration::from_secs(REQUEST_TIMEOUT_SECS) {
+                    warn!("LLM 整理超时 ({}ms)，降级到原始文本", elapsed.as_millis());
+                } else {
+                    warn!("LLM 整理失败: {}，降级到原始文本", e);
+                }
+                Ok(text.to_string())
+            }
         }
     }
 
     /// 使用 OpenAI API 整理文本
-    fn rewrite_openai(&self, prompt: &str) -> Result<String> {
+    fn rewrite_openai(&self, text: &str) -> Result<String> {
         let request = ChatRequest {
             model: self.model.clone(),
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
-            temperature: 0.7,
+            messages: vec![
+                Message {
+                    role: "system".to_string(),
+                    content: SYSTEM_PROMPT.to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                },
+            ],
+            temperature: 0.3,
         };
 
         let url = format!("{}/chat/completions", self.api_base);
@@ -142,16 +202,17 @@ impl LLMRewrite {
             .choices
             .first()
             .map(|c| c.message.content.clone())
-            .unwrap_or_else(|| prompt.to_string());
+            .unwrap_or_else(|| text.to_string());
 
         Ok(result)
     }
 
-    /// 使用 Ollama API 整理文本（流式）
-    fn rewrite_ollama(&self, prompt: &str) -> Result<String> {
+    /// 使用 Ollama API 整理文本
+    fn rewrite_ollama(&self, text: &str) -> Result<String> {
+        let prompt = format!("{}\n\n{}", SYSTEM_PROMPT, text);
         let request = OllamaRequest {
             model: self.model.clone(),
-            prompt: prompt.to_string(),
+            prompt,
             stream: false,
         };
 
@@ -177,13 +238,14 @@ impl LLMRewrite {
     }
 
     /// 使用 Anthropic Messages API 整理文本
-    fn rewrite_anthropic(&self, prompt: &str) -> Result<String> {
+    fn rewrite_anthropic(&self, text: &str) -> Result<String> {
         let url = format!("{}/messages", self.api_base);
 
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": 2048,
-            "messages": [{"role": "user", "content": prompt}]
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": text}]
         });
 
         let response = self
@@ -208,13 +270,44 @@ impl LLMRewrite {
             .content
             .first()
             .map(|c| c.text.clone())
-            .unwrap_or_else(|| prompt.to_string());
+            .unwrap_or_else(|| text.to_string());
 
         Ok(result)
+    }
+
+    /// 构造网络检测用 URL
+    fn connectivity_check_url(&self) -> String {
+        self.api_base.clone()
     }
 
     /// 检查是否启用
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+}
+
+/// 后台网络检测循环
+fn connectivity_check_loop(url: String, is_local: bool, online: Arc<AtomicBool>) {
+    // 本地服务（Ollama）不做网络检测
+    if is_local {
+        return;
+    }
+
+    let probe_client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    loop {
+        std::thread::sleep(Duration::from_secs(CONNECTIVITY_CHECK_INTERVAL_SECS));
+
+        let reachable = probe_client.head(&url).send().is_ok();
+        let was_online = online.swap(reachable, Ordering::Relaxed);
+
+        if reachable && !was_online {
+            info!("网络已恢复，LLM 整理重新启用");
+        } else if !reachable && was_online {
+            warn!("网络不可达 ({})，LLM 整理暂停", url);
+        }
     }
 }

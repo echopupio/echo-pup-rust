@@ -364,11 +364,10 @@ fn process_audio(
         if let Some(ref llm) = *llm_guard {
             match llm.rewrite(&final_text) {
                 Ok(rewritten) => {
-                    info!("LLM 整理完成: {}", rewritten);
                     final_text = rewritten;
                 }
                 Err(e) => {
-                    error!("LLM 整理失败: {}，使用原始转写结果", e);
+                    error!("LLM 整理异常: {}", e);
                 }
             }
         }
