@@ -7,17 +7,18 @@ pub struct PartialUpdate {
     pub status_text: String,
 }
 
-/// 用于避免 partial 重复刷屏的最小状态管理器，同时跟踪已提交草稿字符数。
+/// 用于避免 partial 重复刷屏的最小状态管理器，同时跟踪已提交草稿文本。
 #[derive(Debug, Default)]
 pub struct PartialResultManager {
     latest_text: String,
-    committed_char_count: usize,
+    /// 已提交到光标处的草稿文本（用于计算增量 diff）
+    committed_text: String,
 }
 
 impl PartialResultManager {
     pub fn clear(&mut self) {
         self.latest_text.clear();
-        self.committed_char_count = 0;
+        self.committed_text.clear();
     }
 
     pub fn update(&mut self, text: &str) -> Option<PartialUpdate> {
@@ -33,34 +34,59 @@ impl PartialResultManager {
         })
     }
 
-    /// 构造草稿提交动作：删掉已提交的旧草稿，输入新文本。
+    /// 构造草稿提交动作：只删除与新文本不同的尾部，再输入新的尾部。
+    ///
+    /// 例如：已提交 "你好世界" → 新 partial "你好世界啊"
+    ///   → 公共前缀 "你好世界"(4字符)，delete_chars=0，new_text="啊"
+    ///
+    /// 已提交 "你好世界吗" → 新 partial "你好世界啊"
+    ///   → 公共前缀 "你好世界"(4字符)，delete_chars=1("吗")，new_text="啊"
     pub fn prepare_draft_commit(&mut self, text: &str) -> Option<CommitAction> {
         let normalized = normalize_partial_text(text);
         if normalized.is_empty() {
             return None;
         }
 
-        let delete_chars = self.committed_char_count;
-        self.committed_char_count = normalized.chars().count();
+        let common_prefix_chars = common_char_prefix_len(&self.committed_text, &normalized);
+        let old_total_chars = self.committed_text.chars().count();
+        let delete_chars = old_total_chars - common_prefix_chars;
+
+        // 取新文本中公共前缀之后的部分
+        let new_suffix: String = normalized.chars().skip(common_prefix_chars).collect();
+
+        self.committed_text = normalized;
+
+        // 如果没有要删也没有要输入的，跳过
+        if delete_chars == 0 && new_suffix.is_empty() {
+            return None;
+        }
+
         Some(CommitAction::UpdateDraft {
-            new_text: normalized,
+            new_text: new_suffix,
             delete_chars,
         })
     }
 
     /// 构造清除草稿动作（录音结束时调用）。
     pub fn prepare_draft_clear(&mut self) -> Option<CommitAction> {
-        if self.committed_char_count == 0 {
+        let char_count = self.committed_text.chars().count();
+        if char_count == 0 {
             return None;
         }
-        let delete_chars = self.committed_char_count;
-        self.committed_char_count = 0;
-        Some(CommitAction::ClearDraft { delete_chars })
+        self.committed_text.clear();
+        Some(CommitAction::ClearDraft {
+            delete_chars: char_count,
+        })
     }
 }
 
 fn normalize_partial_text(text: &str) -> String {
     text.replace('\n', " ").trim().to_string()
+}
+
+/// 计算两个字符串的公共前缀字符数（按 char 粒度）。
+fn common_char_prefix_len(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
 fn format_partial_status(text: &str) -> String {
@@ -117,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn draft_commit_second_call_deletes_previous() {
+    fn draft_commit_appends_when_prefix_matches() {
         let mut manager = PartialResultManager::default();
         manager.prepare_draft_commit("你好");
         let action = manager.prepare_draft_commit("你好世界").unwrap();
@@ -126,11 +152,38 @@ mod tests {
                 new_text,
                 delete_chars,
             } => {
-                assert_eq!(new_text, "你好世界");
-                assert_eq!(delete_chars, 2); // "你好" = 2 chars
+                // 公共前缀 "你好"(2 chars)，旧文本 2 chars → delete 0，输入 "世界"
+                assert_eq!(new_text, "世界");
+                assert_eq!(delete_chars, 0);
             }
             _ => panic!("expected UpdateDraft"),
         }
+    }
+
+    #[test]
+    fn draft_commit_replaces_divergent_tail() {
+        let mut manager = PartialResultManager::default();
+        manager.prepare_draft_commit("你好世界吗");
+        let action = manager.prepare_draft_commit("你好世界啊").unwrap();
+        match action {
+            CommitAction::UpdateDraft {
+                new_text,
+                delete_chars,
+            } => {
+                // 公共前缀 "你好世界"(4 chars)，旧 5 chars → delete 1("吗")，输入 "啊"
+                assert_eq!(new_text, "啊");
+                assert_eq!(delete_chars, 1);
+            }
+            _ => panic!("expected UpdateDraft"),
+        }
+    }
+
+    #[test]
+    fn draft_commit_identical_text_returns_none() {
+        let mut manager = PartialResultManager::default();
+        manager.prepare_draft_commit("你好");
+        // 同样的文本 → 无需操作
+        assert!(manager.prepare_draft_commit("你好").is_none());
     }
 
     #[test]

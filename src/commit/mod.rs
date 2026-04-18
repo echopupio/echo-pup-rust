@@ -69,7 +69,8 @@ impl TextCommitBackend for InsertOnlyTextCommit {
                     self.keyboard.delete_backward(delete_chars)?;
                 }
                 self.keyboard.type_text(&new_text)?;
-                self.draft_char_count = new_text.chars().count();
+                self.draft_char_count =
+                    self.draft_char_count - delete_chars + new_text.chars().count();
                 Ok(())
             }
             CommitAction::ClearDraft { delete_chars } => {
