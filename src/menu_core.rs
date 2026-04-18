@@ -9,10 +9,9 @@ use crate::config::HotkeyTriggerMode;
 use crate::hotkey;
 use crate::model_download::{self, DownloadEvent, DownloadState, DOWNLOAD_LOG_MAX_LINES};
 
-pub const MENU_ITEMS: [&str; 8] = [
+pub const MENU_ITEMS: [&str; 7] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
-    "切换 VAD 开关",
     "切换流式草稿开关",
     "编辑热键（按键捕获）",
     "编辑 LLM 配置",
@@ -35,7 +34,6 @@ pub enum EditableField {
 pub enum MenuAction {
     ToggleLlmEnabled,
     ToggleTextCorrectionEnabled,
-    ToggleVadEnabled,
     ToggleStreamingDraft,
     OpenConfigFolder,
     OpenModelFolder,
@@ -68,7 +66,6 @@ pub struct MenuSnapshot {
     pub hotkey_trigger_mode: HotkeyTriggerMode,
     pub llm_enabled: bool,
     pub text_correction_enabled: bool,
-    pub vad_enabled: bool,
     pub streaming_draft: bool,
     pub llm_provider: String,
     pub llm_model: String,
@@ -127,7 +124,6 @@ impl MenuCore {
             hotkey_trigger_mode: self.config.hotkey.trigger_mode,
             llm_enabled: self.config.llm.enabled,
             text_correction_enabled: self.config.text_correction.enabled,
-            vad_enabled: self.config.audio.vad_enabled,
             streaming_draft: self.config.commit.streaming_draft,
             llm_provider: self.config.llm.provider.clone(),
             llm_model: self.config.llm.model.clone(),
@@ -193,15 +189,6 @@ impl MenuCore {
                 self.status = format!(
                     "文本纠错开关 => {}（已自动保存）",
                     self.config.text_correction.enabled
-                );
-                Ok(self.status.clone())
-            }
-            MenuAction::ToggleVadEnabled => {
-                self.config.audio.vad_enabled = !self.config.audio.vad_enabled;
-                self.persist_config()?;
-                self.status = format!(
-                    "VAD 开关 => {}（已自动保存）",
-                    self.config.audio.vad_enabled
                 );
                 Ok(self.status.clone())
             }
@@ -455,10 +442,6 @@ mod tests {
             r2.snapshot.text_correction_enabled,
             r1.snapshot.text_correction_enabled
         );
-
-        let r3 = core.execute(MenuAction::ToggleVadEnabled);
-        assert!(r3.ok);
-        assert_ne!(r3.snapshot.vad_enabled, r2.snapshot.vad_enabled);
     }
 
     #[test]
@@ -483,10 +466,10 @@ mod tests {
 
     #[test]
     fn test_phase_e_menu_contract_order() {
-        assert_eq!(MENU_ITEMS.len(), 8);
+        assert_eq!(MENU_ITEMS.len(), 7);
         assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
-        assert_eq!(MENU_ITEMS[6], "下载 ASR 模型");
-        assert_eq!(MENU_ITEMS[7], "退出");
+        assert_eq!(MENU_ITEMS[5], "下载 ASR 模型");
+        assert_eq!(MENU_ITEMS[6], "退出");
     }
 
     #[test]

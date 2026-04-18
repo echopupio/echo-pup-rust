@@ -116,8 +116,6 @@ trigger_mode = "press_to_toggle" # 或 "hold_to_record"
 [audio]
 sample_rate = 16000
 channels = 1
-vad_enabled = false
-vad_silence_threshold_ms = 1500
 
 [whisper]
 # 可选: "accurate" / "balanced" / "fast"

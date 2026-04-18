@@ -209,11 +209,10 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     };
 
     let summary = format!(
-        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\naudio.vad_enabled: {}\ncommit.streaming_draft: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
+        "当前配置\n\nhotkey: {}\nllm.enabled: {}\ntext_correction.enabled: {}\ncommit.streaming_draft: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
         snapshot.hotkey,
         snapshot.llm_enabled,
         snapshot.text_correction_enabled,
-        snapshot.vad_enabled,
         snapshot.streaming_draft,
         snapshot.llm_provider,
         snapshot.llm_model,
@@ -470,17 +469,14 @@ fn execute_menu_action(app: &mut AppState) {
             app.menu.execute(MenuAction::ToggleTextCorrectionEnabled);
         }
         2 => {
-            app.menu.execute(MenuAction::ToggleVadEnabled);
-        }
-        3 => {
             app.menu.execute(MenuAction::ToggleStreamingDraft);
         }
-        4 => start_input(app, EditableField::Hotkey),
-        5 => start_llm_form(app),
-        6 => {
+        3 => start_input(app, EditableField::Hotkey),
+        4 => start_llm_form(app),
+        5 => {
             app.menu.execute(MenuAction::DownloadModel);
         }
-        7 => {
+        6 => {
             let result = app.menu.execute(MenuAction::QuitUi);
             if result.quit_ui {
                 app.should_quit = true;
@@ -674,11 +670,6 @@ mod tests {
         execute_menu_action(&mut app);
         let s2 = app.menu.snapshot();
         assert_ne!(s2.text_correction_enabled, s1.text_correction_enabled);
-
-        app.selected = 2;
-        execute_menu_action(&mut app);
-        let s3 = app.menu.snapshot();
-        assert_ne!(s3.vad_enabled, s2.vad_enabled);
     }
 
     #[test]

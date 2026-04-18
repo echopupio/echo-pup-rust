@@ -15,7 +15,6 @@ mod session;
 mod status_indicator;
 mod text_processor;
 mod ui;
-mod vad;
 
 use crate::commit::TextCommitBackend as _;
 use anyhow::{Context, Result};
@@ -233,7 +232,6 @@ fn cleanup_draft_on_failure(
 }
 
 /// 处理音频数据：转写 -> LLM 整理 -> 谐音纠错 -> 键盘输入
-/// is_vad_triggered: 是否由 VAD 自动触发（用于日志区分）
 fn process_audio(
     audio_data: &[f32],
     config_path: &str,
@@ -243,23 +241,16 @@ fn process_audio(
     punct_restorer: &Arc<Mutex<Option<punctuation::PunctuationRestorer>>>,
     text_commit: &Arc<Mutex<Box<dyn commit::TextCommitBackend>>>,
     recognition_session: &Arc<Mutex<session::RecognitionSession>>,
-    is_vad_triggered: bool,
     e2e_start: Instant,
     desktop_notify_enabled: bool,
 ) -> bool {
-    let trigger_type = if is_vad_triggered {
-        "VAD自动"
-    } else {
-        "热键松开"
-    };
-
     if audio_data.is_empty() {
-        info!("[{}] 录音数据为空", trigger_type);
+        info!("录音数据为空");
         cleanup_draft_on_failure(recognition_session, text_commit);
         desktop_notify(desktop_notify_enabled, "EchoPup", "未检测到语音输入");
         return false;
     }
-    info!("[{}] 录音完成，采样点: {}", trigger_type, audio_data.len());
+    info!("录音完成，采样点: {}", audio_data.len());
 
     let mut llm_ms = 0u128;
     let mut postprocess_ms = 0u128;
@@ -267,7 +258,6 @@ fn process_audio(
     let mut stt_backend = "unknown".to_string();
 
     // 1. 音频转写
-    // 为避免轻音/尾音被误裁剪，这里关闭“转写前二次 VAD 裁剪”
     let processed_audio = audio_data;
     let mut final_text = String::new();
     let mut transcribe_success = false;
@@ -325,8 +315,7 @@ fn process_audio(
             "语音识别失败，请查看日志",
         );
         info!(
-            "[{}] 性能埋点: backend={} model={} detail={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
-            trigger_type,
+            "[热键] 性能埋点: backend={} model={} detail={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
             stt_backend,
             stt_model,
             stt_detail,
@@ -419,8 +408,7 @@ fn process_audio(
     type_ms = type_start.elapsed().as_millis();
 
     info!(
-        "[{}] 性能埋点: backend={} model={} detail={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
-        trigger_type,
+        "[热键] 性能埋点: backend={} model={} detail={} threads={} stt_ms={} llm_ms={} postprocess_ms={} type_ms={} e2e_ms={}",
         stt_backend,
         stt_model,
         stt_detail,
@@ -1323,7 +1311,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     // ===== 状态标记 =====
     let is_recording = Arc::new(AtomicBool::new(false));
-    let vad_triggered = Arc::new(AtomicBool::new(false)); // VAD 触发标记
     let partial_stt_should_stop = Arc::new(AtomicBool::new(false));
     let partial_stt_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let partial_stt_callback_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
@@ -1597,7 +1584,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let punct_restorer_stop = punct_restorer.clone();
     let text_commit_stop = text_commit.clone();
     let is_recording_stop = is_recording.clone();
-    let vad_triggered_stop = vad_triggered.clone();
     let recording_animation_stop = recording_animation.clone();
     let config_path_on_stop = config_path.to_string();
     let desktop_notify_on_stop = desktop_notify_enabled;
@@ -1637,7 +1623,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             detach_thread_handle(&partial_stt_callback_handle_on_stop);
             play_feedback_sound(sound_feedback_on_stop, FeedbackSoundEvent::RecordingEnd);
 
-            let is_vad = vad_triggered_stop.swap(false, Ordering::SeqCst);
             let e2e_start = Instant::now();
             set_status_indicator_state(
                 &status_indicator_on_stop,
@@ -1654,7 +1639,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &punct_restorer_stop,
                 &text_commit_stop,
                 &recognition_session_on_stop,
-                is_vad,
                 e2e_start,
                 desktop_notify_on_stop,
             );
@@ -1754,109 +1738,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             stop_action_on_release();
         }
     });
-
-    // ===== 设置端点检测（VAD）回调 =====
-    // 根据配置决定是否启用 VAD
-    let vad_enabled = config.audio.vad_enabled;
-
-    if vad_enabled {
-        info!("端点检测已启用");
-
-        let vad_recorder = recorder.clone();
-        let vad_asr_runtime = asr_runtime.clone();
-        let vad_llm = llm.clone();
-        let vad_post_processor = post_processor.clone();
-        let vad_punct_restorer = punct_restorer.clone();
-        let vad_text_commit = text_commit.clone();
-        let vad_is_recording = is_recording.clone();
-        let vad_triggered_callback = vad_triggered.clone();
-        let vad_recording_animation = recording_animation.clone();
-        let config_path_on_vad = config_path.to_string();
-        let desktop_notify_on_vad = desktop_notify_enabled;
-        let sound_feedback_on_vad = sound_feedback_enabled;
-        let status_indicator_on_vad = status_indicator.clone();
-        let partial_stt_stop_on_vad = partial_stt_should_stop.clone();
-        let partial_stt_handle_on_vad = partial_stt_handle.clone();
-        let partial_stt_callback_handle_on_vad = partial_stt_callback_handle.clone();
-        let recognition_session_on_vad = recognition_session.clone();
-
-        let vad_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            info!("端点检测：语音结束，触发自动转写");
-
-            // 标记 VAD 已触发
-            vad_triggered_callback.store(true, Ordering::SeqCst);
-
-            // 停止录音
-            if vad_is_recording.load(Ordering::SeqCst) {
-                vad_is_recording.store(false, Ordering::SeqCst);
-                // 停止动画
-                vad_recording_animation.store(false, Ordering::SeqCst);
-                print!("\r"); // 清除动画行
-            }
-            partial_stt_stop_on_vad.store(true, Ordering::SeqCst);
-
-            // 获取音频数据并处理
-            let audio_data = match vad_recorder.stop() {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("VAD 停止录音失败: {}", e);
-                    set_status_indicator_state(
-                        &status_indicator_on_vad,
-                        status_indicator::IndicatorState::Failed,
-                    );
-                    desktop_notify(desktop_notify_on_vad, "EchoPup", "停止录音失败");
-                    return;
-                }
-            };
-            // 草稿保留在光标处，final commit 时通过增量 diff 平滑过渡
-            detach_thread_handle(&partial_stt_handle_on_vad);
-            detach_thread_handle(&partial_stt_callback_handle_on_vad);
-            play_feedback_sound(sound_feedback_on_vad, FeedbackSoundEvent::RecordingEnd);
-
-            // 处理音频
-            let e2e_start = Instant::now();
-            set_status_indicator_state(
-                &status_indicator_on_vad,
-                status_indicator::IndicatorState::Transcribing,
-            );
-            desktop_notify(desktop_notify_on_vad, "EchoPup", "识别中...");
-            let ok = process_audio(
-                &audio_data,
-                &config_path_on_vad,
-                &vad_asr_runtime,
-                &vad_llm,
-                &vad_post_processor,
-                &vad_punct_restorer,
-                &vad_text_commit,
-                &recognition_session_on_vad,
-                true,
-                e2e_start,
-                desktop_notify_on_vad,
-            );
-            set_status_indicator_state(
-                &status_indicator_on_vad,
-                if ok {
-                    status_indicator::IndicatorState::Completed
-                } else {
-                    status_indicator::IndicatorState::Failed
-                },
-            );
-        });
-
-        // 配置 VAD 参数并启用
-        let silence_threshold = config.audio.vad_silence_threshold_ms as u64;
-        recorder.set_vad_params(silence_threshold, 0.01);
-        recorder.set_vad_callback(move || {
-            vad_callback();
-        });
-        recorder.enable_vad();
-        info!(
-            "端点检测参数：持续静音 {} ms 自动结束录音",
-            silence_threshold
-        );
-    } else {
-        info!("端点检测已关闭（vad_enabled=false）");
-    }
 
     // ===== 初始化热键监听器 =====
     let mut hotkey = hotkey::HotkeyListener::new()?;

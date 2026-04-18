@@ -8,8 +8,7 @@ use cpal::{FromSample, Sample, SizedSample, Stream, SupportedStreamConfig};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::info;
 
 const RECENT_BUFFER_SECONDS: usize = 5;
@@ -213,13 +212,6 @@ pub struct AudioRecorder {
     // 降噪相关
     denoiser: Arc<Mutex<Denoiser>>,
     denoise_enabled: Arc<AtomicBool>,
-
-    // 端点检测（VAD）相关
-    vad_enabled: Arc<AtomicBool>,
-    vad_threshold: Arc<Mutex<f32>>,
-    vad_silence_duration_ms: Arc<AtomicU64>, // 持续静音多少毫秒后自动停止
-    vad_callback: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
-    vad_thread_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 // 确保 AudioRecorder 可以安全地在线程间共享
@@ -372,11 +364,6 @@ impl AudioRecorder {
             max_gain: 3.0,                   // 最大增益 3.0，防止爆音
             denoiser: Arc::new(Mutex::new(Denoiser::default_denoiser())),
             denoise_enabled: Arc::new(AtomicBool::new(false)),
-            vad_enabled: Arc::new(AtomicBool::new(false)),
-            vad_threshold: Arc::new(Mutex::new(0.01)),
-            vad_silence_duration_ms: Arc::new(AtomicU64::new(1500)), // 默认 1.5 秒
-            vad_callback: Arc::new(Mutex::new(None)),
-            vad_thread_handle: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -433,40 +420,6 @@ impl AudioRecorder {
     /// 重置降噪器状态（用于新的录音会话）
     pub fn reset_denoiser(&self) {
         self.denoiser.lock().reset();
-    }
-
-    /// 设置端点检测参数
-    /// - silence_duration_ms: 持续静音多少毫秒后自动停止录音（默认 1500ms）
-    /// - threshold: 能量阈值，低于此值认为是静音（默认 0.01）
-    pub fn set_vad_params(&self, silence_duration_ms: u64, threshold: f32) {
-        *self.vad_threshold.lock() = threshold;
-        self.vad_silence_duration_ms
-            .store(silence_duration_ms, Ordering::SeqCst);
-    }
-
-    /// 设置端点检测回调 - 当检测到语音结束时自动调用
-    pub fn set_vad_callback<F>(&self, callback: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        *self.vad_callback.lock() = Some(Box::new(callback));
-    }
-
-    /// 启用端点检测（自动结束录音）
-    pub fn enable_vad(&self) {
-        self.vad_enabled.store(true, Ordering::SeqCst);
-    }
-
-    /// 禁用端点检测
-    pub fn disable_vad(&self) {
-        self.vad_enabled.store(false, Ordering::SeqCst);
-    }
-
-    /// 检查端点检测是否已触发（语音已结束）
-    pub fn is_vad_triggered(&self) -> bool {
-        // 检查回调是否存在，如果存在说明 VAD 已触发
-        let callback = self.vad_callback.lock();
-        callback.is_some()
     }
 
     /// 开始录音
@@ -635,84 +588,7 @@ impl AudioRecorder {
         // 重置降噪器状态，确保新录音从头开始
         self.reset_denoiser();
 
-        // 启动端点检测线程（如果启用）
-        self.start_vad_thread();
-
         Ok(())
-    }
-
-    /// 启动 VAD 检测线程
-    fn start_vad_thread(&self) {
-        if !self.vad_enabled.load(Ordering::SeqCst) {
-            return;
-        }
-
-        let is_recording = self.is_recording.clone();
-        let capture_buffer = self.capture_buffer.clone();
-        let vad_enabled = self.vad_enabled.clone();
-        let vad_threshold = self.vad_threshold.clone();
-        let vad_silence_duration_ms = self.vad_silence_duration_ms.clone();
-        let vad_callback = self.vad_callback.clone();
-        let device_sample_rate = self.device_sample_rate.clone();
-
-        let handle = thread::spawn(move || {
-            let mut silence_start: Option<Instant> = None;
-            let check_interval = Duration::from_millis(100); // 每 100ms 检查一次
-
-            while is_recording.load(Ordering::SeqCst) {
-                thread::sleep(check_interval);
-
-                if !vad_enabled.load(Ordering::SeqCst) {
-                    continue;
-                }
-
-                // 计算最近一小段音频的能量
-                let threshold = *vad_threshold.lock();
-
-                // 获取最近 200ms 的音频进行能量计算
-                let sample_rate = *device_sample_rate.lock();
-                let lookback_samples = (sample_rate as usize * 200) / 1000; // 200ms
-                let recent_audio = capture_buffer.lock().recent_tail(lookback_samples);
-
-                if recent_audio.is_empty() {
-                    continue;
-                }
-
-                // 计算 RMS 能量
-                let sum: f32 = recent_audio.iter().map(|&s| s * s).sum();
-                let energy = (sum / recent_audio.len() as f32).sqrt();
-
-                if energy > threshold {
-                    // 有声音，重置静音计时
-                    silence_start = None;
-                } else {
-                    // 静音
-                    if silence_start.is_none() {
-                        silence_start = Some(Instant::now());
-                    } else if let Some(start) = silence_start {
-                        let silence_duration = start.elapsed().as_millis() as u64;
-                        if silence_duration >= vad_silence_duration_ms.load(Ordering::SeqCst) {
-                            // 持续静音达到阈值，触发 VAD 回调
-                            info!(
-                                "端点检测：检测到 {} ms 静音，自动结束录音",
-                                silence_duration
-                            );
-
-                            // 调用回调
-                            if let Some(ref callback) = *vad_callback.lock() {
-                                callback();
-                            } else {
-                                // 无回调时兜底停止
-                                is_recording.store(false, Ordering::SeqCst);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        *self.vad_thread_handle.lock() = Some(handle);
     }
 
     /// 停止录音并返回音频数据（已重采样到目标采样率）
@@ -735,20 +611,6 @@ impl AudioRecorder {
             "recorder.stop(): is_recording 设置为 false, elapsed_ms={}",
             elapsed_ms
         );
-
-        // 停止 VAD 线程
-        let vad_join_start = std::time::Instant::now();
-        info!("recorder.stop(): 准备停止 VAD 线程");
-        if let Some(handle) = self.vad_thread_handle.lock().take() {
-            info!("recorder.stop(): 找到 VAD 线程, 准备 join");
-            if handle.thread().id() != thread::current().id() {
-                let _ = handle.join();
-            }
-            info!("recorder.stop(): VAD 线程已 join");
-        } else {
-            info!("recorder.stop(): 没有 VAD 线程需要 join");
-        }
-        let vad_join_elapsed = vad_join_start.elapsed().as_millis();
 
         let stream_lock_start = std::time::Instant::now();
         info!("recorder.stop(): 准备 drop stream");
@@ -788,9 +650,8 @@ impl AudioRecorder {
         let captured_samples = self.captured_samples.load(Ordering::SeqCst);
         let total_elapsed = start_instant.elapsed().as_millis();
         info!(
-            "停止录音: 总耗时={}ms (vad_join={}ms, stream_lock={}ms, buffer_clone={}ms, resample={}ms), 录音时长={}ms, 捕获采样点={}, 重采样后采样点={}",
+            "停止录音: 总耗时={}ms (stream_lock={}ms, buffer_clone={}ms, resample={}ms), 录音时长={}ms, 捕获采样点={}, 重采样后采样点={}",
             total_elapsed,
-            vad_join_elapsed,
             stream_lock_elapsed,
             buffer_clone_elapsed,
             resample_elapsed,

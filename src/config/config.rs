@@ -100,10 +100,6 @@ pub struct AudioConfig {
     pub sample_rate: u32,
     /// 声道数
     pub channels: u16,
-    /// 是否启用 VAD（语音活动检测）
-    pub vad_enabled: bool,
-    /// VAD 静音阈值（秒），超过此时间自动结束录音
-    pub vad_silence_threshold_ms: u32,
 }
 
 impl Default for AudioConfig {
@@ -111,8 +107,6 @@ impl Default for AudioConfig {
         Self {
             sample_rate: 16000,
             channels: 1,
-            vad_enabled: false, // 默认关闭 VAD
-            vad_silence_threshold_ms: 1500,
         }
     }
 }
