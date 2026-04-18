@@ -3,5 +3,6 @@
 pub mod config;
 
 pub use config::{
-    AsrBackend, Config, HotkeyTriggerMode, SherpaParaformerConfig, TextCorrectionConfig,
+    AsrBackend, Config, HotkeyTriggerMode, PunctuationConfig, SherpaParaformerConfig,
+    TextCorrectionConfig,
 };

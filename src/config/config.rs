@@ -24,6 +24,8 @@ pub struct Config {
     pub feedback: FeedbackConfig,
     /// 文本提交配置
     pub commit: CommitConfig,
+    /// 离线标点恢复配置
+    pub punctuation: PunctuationConfig,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             text_correction: TextCorrectionConfig::default(),
             feedback: FeedbackConfig::default(),
             commit: CommitConfig::default(),
+            punctuation: PunctuationConfig::default(),
         }
     }
 }
@@ -274,6 +277,36 @@ impl Default for CommitConfig {
             streaming_draft: true,
         }
     }
+}
+
+/// 离线标点恢复配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PunctuationConfig {
+    /// 是否启用离线标点恢复
+    pub enabled: bool,
+    /// ct_transformer 模型路径
+    pub model_path: String,
+}
+
+impl Default for PunctuationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model_path: default_punctuation_model_path(),
+        }
+    }
+}
+
+fn default_punctuation_model_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".echopup")
+        .join("models")
+        .join("punctuation")
+        .join("model.onnx")
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Config {

@@ -9,6 +9,7 @@ mod input;
 mod llm;
 mod menu_core;
 mod model_download;
+mod punctuation;
 mod runtime;
 mod session;
 mod status_indicator;
@@ -239,6 +240,7 @@ fn process_audio(
     asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
     llm: &Arc<Mutex<Option<llm::LLMRewrite>>>,
     post_processor: &Arc<text_processor::TextPostProcessor>,
+    punct_restorer: &Arc<Mutex<Option<punctuation::PunctuationRestorer>>>,
     text_commit: &Arc<Mutex<Box<dyn commit::TextCommitBackend>>>,
     recognition_session: &Arc<Mutex<session::RecognitionSession>>,
     is_vad_triggered: bool,
@@ -338,7 +340,17 @@ fn process_audio(
         return false;
     }
 
-    // 2. LLM 整理（如果启用）
+    // 2. 离线标点恢复
+    {
+        let punct_guard = punct_restorer.lock();
+        if let Some(ref restorer) = *punct_guard {
+            let punct_start = Instant::now();
+            final_text = restorer.add_punctuation(&final_text);
+            info!("标点恢复耗时: {}ms", punct_start.elapsed().as_millis());
+        }
+    }
+
+    // 3. LLM 整理（如果启用）
     let llm_enabled = {
         let llm_guard = llm.lock();
         llm_guard.as_ref().map(|l| l.is_enabled()).unwrap_or(false)
@@ -361,7 +373,7 @@ fn process_audio(
         llm_ms = llm_start.elapsed().as_millis();
     }
 
-    // 3. 谐音纠错（规则映射）
+    // 4. 谐音纠错（规则映射）
     let postprocess_start = Instant::now();
     let corrected = post_processor.process(&final_text);
     if corrected != final_text {
@@ -370,7 +382,7 @@ fn process_audio(
     }
     postprocess_ms = postprocess_start.elapsed().as_millis();
 
-    // 4. 文本提交
+    // 5. 文本提交
     let commit_action = {
         let mut session_guard = recognition_session.lock();
         session_guard.prepare_final_commit(&final_text)
@@ -1265,6 +1277,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         info!("谐音纠错未启用");
     }
 
+    let punct_restorer: Arc<Mutex<Option<punctuation::PunctuationRestorer>>> = Arc::new(
+        Mutex::new(match punctuation::PunctuationRestorer::new(&config.punctuation) {
+            Ok(restorer) => restorer,
+            Err(e) => {
+                warn!("离线标点恢复初始化失败: {}，继续运行", e);
+                None
+            }
+        }),
+    );
+
     let text_commit = Arc::new(Mutex::new(
         Box::new(commit::InsertOnlyTextCommit::new().map_err(|e| {
             error!("文本提交后端初始化失败: {}", e);
@@ -1550,6 +1572,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let asr_runtime_on_stop = asr_runtime.clone();
     let llm_stop = llm.clone();
     let post_processor_stop = post_processor.clone();
+    let punct_restorer_stop = punct_restorer.clone();
     let text_commit_stop = text_commit.clone();
     let is_recording_stop = is_recording.clone();
     let vad_triggered_stop = vad_triggered.clone();
@@ -1606,6 +1629,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &asr_runtime_on_stop,
                 &llm_stop,
                 &post_processor_stop,
+                &punct_restorer_stop,
                 &text_commit_stop,
                 &recognition_session_on_stop,
                 is_vad,
@@ -1720,6 +1744,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let vad_asr_runtime = asr_runtime.clone();
         let vad_llm = llm.clone();
         let vad_post_processor = post_processor.clone();
+        let vad_punct_restorer = punct_restorer.clone();
         let vad_text_commit = text_commit.clone();
         let vad_is_recording = is_recording.clone();
         let vad_triggered_callback = vad_triggered.clone();
@@ -1779,6 +1804,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 &vad_asr_runtime,
                 &vad_llm,
                 &vad_post_processor,
+                &vad_punct_restorer,
                 &vad_text_commit,
                 &recognition_session_on_vad,
                 true,

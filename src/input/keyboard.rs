@@ -180,6 +180,41 @@ impl Keyboard {
             KeyboardBackend::Unavailable(reason) => Err(anyhow!("键盘输入不可用: {}", reason)),
         }
     }
+
+    /// 选中前面 count 个字符，然后用 new_text 替换选中内容。
+    ///
+    /// 比逐字退格再输入快得多：先 Shift+Left 选中，再直接输入（自动替换选中文字）。
+    /// 用户看到的是"文字被高亮→变成新文字"，没有逐字删除的视觉延迟。
+    pub fn select_backward_and_type(&mut self, select_count: usize, new_text: &str) -> Result<()> {
+        if select_count == 0 {
+            return self.type_text(new_text);
+        }
+        match &mut self.backend {
+            KeyboardBackend::Enigo(enigo) => {
+                use enigo::{Direction, Key, Keyboard as _};
+                enigo.key(Key::Shift, Direction::Press)?;
+                for _ in 0..select_count {
+                    enigo.key(Key::LeftArrow, Direction::Click)?;
+                }
+                enigo.key(Key::Shift, Direction::Release)?;
+                if !new_text.is_empty() {
+                    enigo.text(new_text)?;
+                } else {
+                    enigo.key(Key::Backspace, Direction::Click)?;
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            KeyboardBackend::LinuxCommand(backend) => {
+                backend.delete_backward(select_count)?;
+                if !new_text.is_empty() {
+                    backend.type_text(new_text)?;
+                }
+                Ok(())
+            }
+            KeyboardBackend::Unavailable(reason) => Err(anyhow!("键盘输入不可用: {}", reason)),
+        }
+    }
 }
 
 impl Default for Keyboard {
