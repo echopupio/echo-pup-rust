@@ -73,7 +73,7 @@ const STATUS_LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const STATUS_MICROPHONE_PNG: &[u8] = include_bytes!("../assets/mic.png");
 #[cfg(target_os = "macos")]
-const STATUS_ITEM_LENGTH_IDLE: f64 = 16.0;
+const STATUS_ITEM_LENGTH_IDLE: f64 = 28.0;
 #[cfg(target_os = "macos")]
 const STATUS_ITEM_LENGTH_ACTIVE: f64 = 40.0;
 #[cfg(target_os = "macos")]
@@ -643,7 +643,7 @@ unsafe fn apply_button_style(
     } else {
         1.6f64
     };
-    let vpad = 4.2f64;
+    let vpad = 2.0f64;
     let width = (bounds.size.width - hpad * 2.0).max(0.0);
     let height = (bounds.size.height - vpad * 2.0).max(0.0);
     let frame = NSRect::new(NSPoint::new(hpad, vpad), NSSize::new(width, height));
