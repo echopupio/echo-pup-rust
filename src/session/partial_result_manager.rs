@@ -37,18 +37,18 @@ impl Default for PartialResultManager {
     }
 }
 
-/// 频谱跳动帧（2 个 braille 字符，半角宽度，更窄更精致）
+/// 频谱跳动帧（4 个 braille 字符，模拟波峰波谷）
 const SPINNER_FRAMES: &[&str] = &[
-    "⡀⠄",
-    "⠆⡀",
-    "⡆⠒",
-    "⠒⡆",
-    "⠄⡀",
-    "⡀⠆",
+    "⣀⣤⣶⣤",
+    "⣤⣶⣤⣀",
+    "⣶⣤⣀⣤",
+    "⣤⣀⣤⣶",
+    "⣀⣶⣤⣶",
+    "⣶⣤⣶⣀",
 ];
 /// 每个 spinner 帧的字符数（所有帧等长）
 #[cfg(test)]
-const SPINNER_CHAR_COUNT: usize = 2;
+const SPINNER_CHAR_COUNT: usize = 4;
 const TAIL_CHAR_COUNT: usize = 5;
 
 impl PartialResultManager {
