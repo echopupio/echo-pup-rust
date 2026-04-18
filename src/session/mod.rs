@@ -40,6 +40,10 @@ impl RecognitionSession {
         self.partials.prepare_draft_commit(text)
     }
 
+    pub fn tick_stability(&mut self, text_changed: bool) -> Option<CommitAction> {
+        self.partials.tick_stability(text_changed)
+    }
+
     pub fn prepare_draft_clear(&mut self) -> Option<CommitAction> {
         self.partials.prepare_draft_clear()
     }

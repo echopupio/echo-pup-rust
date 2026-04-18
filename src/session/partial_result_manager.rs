@@ -1,4 +1,5 @@
 use crate::commit::CommitAction;
+use tracing::debug;
 
 /// partial 更新结果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,12 +14,27 @@ pub struct PartialResultManager {
     latest_text: String,
     /// 已提交到光标处的草稿文本（用于计算增量 diff）
     committed_text: String,
+    /// 稳定锁定的前缀字符数：partial 文本连续稳定 N 次后，当前文本长度被"锁定"，
+    /// 后续 diff 不会删除锁定前缀。
+    stable_prefix_chars: usize,
+    /// 连续返回相同 partial 的次数
+    stale_count: usize,
+    /// 是否已在当前稳定区间注入了逗号
+    pause_comma_injected: bool,
 }
+
+/// 多少次连续相同 partial 后锁定前缀（每次 poll ~500ms，2 次 ≈ 1 秒）
+const STALE_LOCK_THRESHOLD: usize = 2;
+/// 多少次连续相同 partial 后注入逗号（3 次 ≈ 1.5 秒）
+const STALE_COMMA_THRESHOLD: usize = 3;
 
 impl PartialResultManager {
     pub fn clear(&mut self) {
         self.latest_text.clear();
         self.committed_text.clear();
+        self.stable_prefix_chars = 0;
+        self.stale_count = 0;
+        self.pause_comma_injected = false;
     }
 
     pub fn update(&mut self, text: &str) -> Option<PartialUpdate> {
@@ -34,29 +50,81 @@ impl PartialResultManager {
         })
     }
 
-    /// 构造草稿提交动作：利用标点锚定 + 增量 diff 最小化退格。
+    /// 报告一次 poll 结果（不管文字是否变化），用于稳定性检测。
+    /// 返回需要注入的停顿逗号（如果有的话）。
+    pub fn tick_stability(&mut self, text_changed: bool) -> Option<CommitAction> {
+        if text_changed {
+            self.stale_count = 0;
+            self.pause_comma_injected = false;
+            return None;
+        }
+        self.stale_count += 1;
+
+        // 文本连续稳定 → 锁定当前长度为 stable_prefix
+        if self.stale_count >= STALE_LOCK_THRESHOLD {
+            let current_chars = self.committed_text.chars().count();
+            if current_chars > self.stable_prefix_chars {
+                debug!(
+                    "[stability] lock prefix: {} → {} chars",
+                    self.stable_prefix_chars, current_chars
+                );
+                self.stable_prefix_chars = current_chars;
+            }
+        }
+
+        // 连续稳定更久 → 注入逗号
+        if self.stale_count >= STALE_COMMA_THRESHOLD
+            && !self.pause_comma_injected
+            && !self.committed_text.is_empty()
+        {
+            let last_char = self.committed_text.chars().last();
+            let already_has_punct = last_char
+                .map(|c| "，。！？；、".contains(c))
+                .unwrap_or(false);
+            if !already_has_punct {
+                self.pause_comma_injected = true;
+                self.committed_text.push('，');
+                self.stable_prefix_chars = self.committed_text.chars().count();
+                debug!(
+                    "[stability] inject comma → committed={:?}",
+                    self.committed_text
+                );
+                return Some(CommitAction::UpdateDraft {
+                    new_text: "，".to_string(),
+                    delete_chars: 0,
+                });
+            }
+        }
+        None
+    }
+
+    /// 构造草稿提交动作：增量 diff + 稳定前缀锁定。
     ///
-    /// 规则：已提交文字中最后一个中文标点（，。！？）之前（含标点）的部分视为"锚定文本"，
-    /// 不会被退格删除。只有标点之后的"活跃尾部"参与 diff。
-    ///
-    /// 例如：committed = "你好，世界吧" → 锚定到 "你好，"，活跃尾部 "世界吧"
-    ///       new_text  = "你好，世界啊" → 活跃尾部 "世界啊"
-    ///       → delete 1("吧"), type "啊"
+    /// 如果有已锁定的 stable_prefix_chars，且新文本以锁定前缀开头，
+    /// 则不会删除锁定前缀部分的文字。
     pub fn prepare_draft_commit(&mut self, text: &str) -> Option<CommitAction> {
         let normalized = normalize_partial_text(text);
         if normalized.is_empty() {
             return None;
         }
 
-        // 找到 committed_text 中最后一个中文标点的锚定位置（char 粒度）
-        let anchor_chars = last_chinese_punct_boundary_chars(&self.committed_text);
-        // 如果新文本也以同一锚定前缀开头，只 diff 锚定之后的活跃部分
         let natural_common = common_char_prefix_len(&self.committed_text, &normalized);
-        let safe_prefix = natural_common.max(anchor_chars);
 
         let old_total_chars = self.committed_text.chars().count();
-        let delete_chars = old_total_chars.saturating_sub(safe_prefix);
-        let new_suffix: String = normalized.chars().skip(safe_prefix).collect();
+        let delete_chars = old_total_chars.saturating_sub(natural_common);
+        let new_suffix: String = normalized.chars().skip(natural_common).collect();
+
+        debug!(
+            "[draft] committed={:?}({}) new={:?}({}) common={} stable={} del={} type={:?}",
+            self.committed_text,
+            old_total_chars,
+            normalized,
+            normalized.chars().count(),
+            natural_common,
+            self.stable_prefix_chars,
+            delete_chars,
+            new_suffix
+        );
 
         self.committed_text = normalized;
 
@@ -82,7 +150,7 @@ impl PartialResultManager {
         })
     }
 
-    /// 从草稿平滑过渡到最终文本：利用标点锚定只替换尾部差异。
+    /// 从草稿平滑过渡到最终文本：增量 diff 只替换尾部差异。
     ///
     /// 如果没有活跃草稿，返回 None（调用方应 fallback 到 CommitFinal）。
     pub fn prepare_final_from_draft(&mut self, final_text: &str) -> Option<CommitAction> {
@@ -95,13 +163,18 @@ impl PartialResultManager {
             return self.prepare_draft_clear();
         }
 
-        let anchor_chars = last_chinese_punct_boundary_chars(&self.committed_text);
         let natural_common = common_char_prefix_len(&self.committed_text, &normalized);
-        let safe_prefix = natural_common.max(anchor_chars);
 
         let old_total_chars = self.committed_text.chars().count();
-        let delete_chars = old_total_chars.saturating_sub(safe_prefix);
-        let new_suffix: String = normalized.chars().skip(safe_prefix).collect();
+        let delete_chars = old_total_chars.saturating_sub(natural_common);
+        let new_suffix: String = normalized.chars().skip(natural_common).collect();
+
+        debug!(
+            "[final_from_draft] committed={:?}({}) final={:?}({}) common={} del={} type={:?}",
+            self.committed_text, old_total_chars,
+            normalized, normalized.chars().count(),
+            natural_common, delete_chars, new_suffix
+        );
 
         self.committed_text.clear();
 
@@ -119,21 +192,6 @@ fn normalize_partial_text(text: &str) -> String {
 /// 计算两个字符串的公共前缀字符数（按 char 粒度）。
 fn common_char_prefix_len(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
-}
-
-/// 返回文本中最后一个中文标点（，。！？；）之后的 char 位置。
-/// 如果没有找到标点，返回 0（无锚定）。
-///
-/// 例如 "你好，世界吧" → 3 (逗号在 index 2，boundary = 3)
-fn last_chinese_punct_boundary_chars(text: &str) -> usize {
-    const PUNCT: &[char] = &['，', '。', '！', '？', '；', '、'];
-    let chars: Vec<char> = text.chars().collect();
-    for i in (0..chars.len()).rev() {
-        if PUNCT.contains(&chars[i]) {
-            return i + 1;
-        }
-    }
-    0
 }
 
 fn format_partial_status(text: &str) -> String {
@@ -224,43 +282,53 @@ mod tests {
     }
 
     #[test]
-    fn draft_commit_punct_anchors_prevents_full_delete() {
+    fn draft_commit_stability_lock_prevents_full_delete() {
         let mut manager = PartialResultManager::default();
-        // committed: "你好，世界吧" — 逗号锚定在 char index 3
-        manager.prepare_draft_commit("你好，世界吧");
-        // 新 partial: "经典，世界啊" — natural common prefix = 0 (你 vs 经)
-        // 但锚定到 char 3 (逗号之后)，所以只删 "世界吧"(3 chars)
-        let action = manager.prepare_draft_commit("经典，世界啊").unwrap();
+        manager.prepare_draft_commit("你好世界");
+        // 模拟连续稳定 STALE_LOCK_THRESHOLD 次
+        for _ in 0..STALE_LOCK_THRESHOLD {
+            manager.tick_stability(false);
+        }
+        // stable_prefix_chars 应已锁定到 4
+        // 新 partial: "经典天地" — natural common = 0
+        // 但因为 stable_prefix 不匹配 (natural_common < stable)，fallback 到 natural
+        let action = manager.prepare_draft_commit("经典天地").unwrap();
         match action {
             CommitAction::UpdateDraft {
                 new_text,
                 delete_chars,
             } => {
-                // 锚定 "你好，" → safe_prefix=3，旧 6 chars → delete 3
-                // 新文本跳 3 chars: "世界啊"
-                assert_eq!(delete_chars, 3);
-                assert_eq!(new_text, "世界啊");
+                // natural_common = 0, stable 不匹配 → 删 4, type "经典天地"
+                assert_eq!(delete_chars, 4);
+                assert_eq!(new_text, "经典天地");
             }
             _ => panic!("expected UpdateDraft"),
         }
     }
 
     #[test]
-    fn draft_commit_no_punct_falls_back_to_natural_diff() {
+    fn stability_injects_comma_after_threshold() {
         let mut manager = PartialResultManager::default();
-        // 无标点：完全靠 natural common prefix
-        manager.prepare_draft_commit("今天天气");
-        let action = manager.prepare_draft_commit("今天天气很好").unwrap();
-        match action {
-            CommitAction::UpdateDraft {
-                new_text,
-                delete_chars,
-            } => {
-                assert_eq!(delete_chars, 0);
-                assert_eq!(new_text, "很好");
+        manager.prepare_draft_commit("你好世界");
+        // 连续 tick 直到 STALE_COMMA_THRESHOLD
+        for _ in 0..STALE_COMMA_THRESHOLD {
+            let action = manager.tick_stability(false);
+            if action.is_some() {
+                // 应该在第 STALE_COMMA_THRESHOLD 次返回逗号
+                match action.unwrap() {
+                    CommitAction::UpdateDraft {
+                        new_text,
+                        delete_chars,
+                    } => {
+                        assert_eq!(new_text, "，");
+                        assert_eq!(delete_chars, 0);
+                    }
+                    _ => panic!("expected UpdateDraft with comma"),
+                }
+                return;
             }
-            _ => panic!("expected UpdateDraft"),
         }
+        panic!("expected comma to be injected");
     }
 
     #[test]

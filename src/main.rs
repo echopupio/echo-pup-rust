@@ -1463,16 +1463,22 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                         break;
                                     }
 
-                                    let (update, draft_action) = {
+                                    let (update, draft_action, stability_action) = {
                                         let mut session_guard =
                                             recognition_session_for_callback.lock();
                                         let update = session_guard.update_partial(&text);
+                                        let text_changed = update.is_some();
                                         let draft_action = if draft_enabled {
                                             session_guard.prepare_draft_commit(&text)
                                         } else {
                                             None
                                         };
-                                        (update, draft_action)
+                                        let stability_action = if draft_enabled {
+                                            session_guard.tick_stability(text_changed)
+                                        } else {
+                                            None
+                                        };
+                                        (update, draft_action, stability_action)
                                     };
 
                                     if let Some(update) = update {
@@ -1490,8 +1496,30 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                             warn!("草稿提交失败: {}", err);
                                         }
                                     }
+
+                                    if let Some(action) = stability_action {
+                                        if let Err(err) =
+                                            text_commit_for_callback.lock().apply(action)
+                                        {
+                                            warn!("停顿逗号注入失败: {}", err);
+                                        }
+                                    }
                                 }
-                                Ok(None) => {}
+                                Ok(None) => {
+                                    // 无新 partial 也要 tick stability（文本未变化）
+                                    if draft_enabled {
+                                        let stability_action = recognition_session_for_callback
+                                            .lock()
+                                            .tick_stability(false);
+                                        if let Some(action) = stability_action {
+                                            if let Err(err) =
+                                                text_commit_for_callback.lock().apply(action)
+                                            {
+                                                warn!("停顿逗号注入失败: {}", err);
+                                            }
+                                        }
+                                    }
+                                }
                                 Err(err) => {
                                     warn!(
                                         "ASR 预览会话 partial 识别失败: backend={}, buffered_samples={}, err={}",
