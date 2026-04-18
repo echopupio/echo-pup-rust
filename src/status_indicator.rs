@@ -715,6 +715,7 @@ mod menu_bridge {
     pub const TAG_MODE_PRESS_TOGGLE: i64 = 1014;
     pub const TAG_LLM_FORM_CONFIRM: i64 = 2101;
     pub const TAG_LLM_FORM_CANCEL: i64 = 2102;
+    pub const TAG_LLM_PROVIDER_CHANGED: i64 = 2103;
 
     static MENU_EVENT_TX: OnceLock<Mutex<Option<std::sync::mpsc::Sender<i64>>>> = OnceLock::new();
 
@@ -734,7 +735,8 @@ mod menu_bridge {
         pub provider_input: id,
         pub model_input: id,
         pub api_base_input: id,
-        pub api_key_env_input: id,
+        pub api_key_input: id,
+        pub key_label: id,
     }
 
     extern "C" fn on_menu_item(this: &Object, _cmd: Sel, sender: id) {
@@ -916,18 +918,28 @@ mod menu_bridge {
         let _provider_label = add_label(
             content,
             NSRect::new(NSPoint::new(20.0, 226.0), NSSize::new(120.0, 20.0)),
-            "provider:",
+            "模型提供商:",
         );
-        let provider_input = add_input(
+        let provider_items: &[&str] = &[
+            "OpenAI 兼容接口",
+            "Anthropic 兼容接口",
+            "Ollama 本地",
+        ];
+        let selected_label = provider_key_to_label(&snapshot.llm_provider);
+        let provider_input = add_popup(
             content,
-            NSRect::new(NSPoint::new(140.0, 222.0), NSSize::new(460.0, 24.0)),
-            &snapshot.llm_provider,
+            NSRect::new(NSPoint::new(140.0, 222.0), NSSize::new(460.0, 26.0)),
+            provider_items,
+            &selected_label,
         );
+        let _: () = msg_send![provider_input, setTarget: target];
+        let _: () = msg_send![provider_input, setAction: sel!(onMenuItem:)];
+        let _: () = msg_send![provider_input, setTag: TAG_LLM_PROVIDER_CHANGED as isize];
 
         let _model_label = add_label(
             content,
             NSRect::new(NSPoint::new(20.0, 182.0), NSSize::new(120.0, 20.0)),
-            "model:",
+            "模型名称:",
         );
         let model_input = add_input(
             content,
@@ -938,7 +950,7 @@ mod menu_bridge {
         let _base_label = add_label(
             content,
             NSRect::new(NSPoint::new(20.0, 138.0), NSSize::new(120.0, 20.0)),
-            "api_base:",
+            "接口地址:",
         );
         let api_base_input = add_input(
             content,
@@ -946,16 +958,20 @@ mod menu_bridge {
             &snapshot.llm_api_base,
         );
 
-        let _key_label = add_label(
+        let key_label = add_label(
             content,
             NSRect::new(NSPoint::new(20.0, 94.0), NSSize::new(120.0, 20.0)),
-            "api_key_env:",
+            "API 密钥:",
         );
-        let api_key_env_input = add_input(
+        let api_key_input = add_secure_input(
             content,
             NSRect::new(NSPoint::new(140.0, 90.0), NSSize::new(460.0, 24.0)),
-            &snapshot.llm_api_key_env,
+            &snapshot.llm_api_key,
         );
+
+        let is_ollama = snapshot.llm_provider == "ollama";
+        let _: () = msg_send![key_label, setHidden: is_ollama as cocoa::base::BOOL];
+        let _: () = msg_send![api_key_input, setHidden: is_ollama as cocoa::base::BOOL];
 
         let _tip = add_label(
             content,
@@ -984,17 +1000,45 @@ mod menu_bridge {
             provider_input,
             model_input,
             api_base_input,
-            api_key_env_input,
+            api_key_input,
+            key_label,
         })
     }
 
+    pub unsafe fn update_key_field_visibility(dialog: &LlmFormDialog) {
+        let title: id = msg_send![dialog.provider_input, titleOfSelectedItem];
+        let label = nsstring_to_string(title).trim().to_string();
+        let is_ollama = label == "Ollama 本地";
+        let _: () = msg_send![dialog.key_label, setHidden: is_ollama as cocoa::base::BOOL];
+        let _: () = msg_send![dialog.api_key_input, setHidden: is_ollama as cocoa::base::BOOL];
+    }
+
     pub unsafe fn read_llm_form_values(dialog: &LlmFormDialog) -> (String, String, String, String) {
+        let provider_title: id = msg_send![dialog.provider_input, titleOfSelectedItem];
+        let label = nsstring_to_string(provider_title).trim().to_string();
+        let provider = provider_label_to_key(&label);
         (
-            text_of(dialog.provider_input),
+            provider,
             text_of(dialog.model_input),
             text_of(dialog.api_base_input),
-            text_of(dialog.api_key_env_input),
+            text_of(dialog.api_key_input),
         )
+    }
+
+    fn provider_key_to_label(key: &str) -> String {
+        match key {
+            "anthropic" => "Anthropic 兼容接口".to_string(),
+            "ollama" => "Ollama 本地".to_string(),
+            _ => "OpenAI 兼容接口".to_string(),
+        }
+    }
+
+    fn provider_label_to_key(label: &str) -> String {
+        match label {
+            "Anthropic 兼容接口" => "anthropic".to_string(),
+            "Ollama 本地" => "ollama".to_string(),
+            _ => "openai".to_string(),
+        }
     }
 
     pub unsafe fn close_llm_form_dialog(dialog: LlmFormDialog) {
@@ -1017,8 +1061,29 @@ mod menu_bridge {
         label
     }
 
+    unsafe fn add_popup(content: id, frame: NSRect, items: &[&str], selected: &str) -> id {
+        let popup: id = msg_send![class!(NSPopUpButton), alloc];
+        let popup: id = msg_send![popup, initWithFrame:frame pullsDown:NO];
+        for item in items {
+            let _: () = msg_send![popup, addItemWithTitle: nsstring(item)];
+        }
+        let _: () = msg_send![popup, selectItemWithTitle: nsstring(selected)];
+        let _: () = msg_send![content, addSubview: popup];
+        popup
+    }
+
     unsafe fn add_input(content: id, frame: NSRect, text: &str) -> id {
         let input: id = msg_send![class!(NSTextField), alloc];
+        let input: id = msg_send![input, initWithFrame: frame];
+        let _: () = msg_send![input, setEditable: YES];
+        let _: () = msg_send![input, setSelectable: YES];
+        let _: () = msg_send![input, setStringValue: nsstring(text)];
+        let _: () = msg_send![content, addSubview: input];
+        input
+    }
+
+    unsafe fn add_secure_input(content: id, frame: NSRect, text: &str) -> id {
+        let input: id = msg_send![class!(NSSecureTextField), alloc];
         let input: id = msg_send![input, initWithFrame: frame];
         let _: () = msg_send![input, setEditable: YES];
         let _: () = msg_send![input, setSelectable: YES];
@@ -1161,7 +1226,7 @@ fn empty_snapshot() -> MenuSnapshot {
         llm_provider: "openai".to_string(),
         llm_model: "gpt-4o-mini".to_string(),
         llm_api_base: "https://api.openai.com/v1".to_string(),
-        llm_api_key_env: "OPENAI_API_KEY".to_string(),
+        llm_api_key: String::new(),
     }
 }
 
@@ -1303,9 +1368,15 @@ pub fn run_status_indicator_process() -> Result<()> {
                         close_llm_form_popup(&mut llm_form_popup);
                         continue;
                     }
+                    menu_bridge::TAG_LLM_PROVIDER_CHANGED => {
+                        if let Some(dialog) = llm_form_popup.dialog {
+                            menu_bridge::update_key_field_visibility(&dialog);
+                        }
+                        continue;
+                    }
                     menu_bridge::TAG_LLM_FORM_CONFIRM => {
                         if let Some(dialog) = llm_form_popup.dialog {
-                            let (provider, model, api_base, api_key_env) =
+                            let (provider, model, api_base, api_key) =
                                 menu_bridge::read_llm_form_values(&dialog);
                             close_llm_form_popup(&mut llm_form_popup);
                             send_child_message(&ChildMessage::ActionRequest {
@@ -1313,7 +1384,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                                     provider,
                                     model,
                                     api_base,
-                                    api_key_env,
+                                    api_key,
                                 },
                             });
                         }
@@ -1902,38 +1973,35 @@ fn open_llm_form_popup_linux(
     grid.set_margin_end(10);
     content.pack_start(&grid, true, true, 0);
 
-    let provider_label = gtk::Label::new(Some("Provider"));
+    let provider_label = gtk::Label::new(Some("模型提供商"));
     provider_label.set_xalign(0.0);
     let provider_combo = gtk::ComboBoxText::new();
-    provider_combo.append(Some("openai"), "OpenAI");
-    provider_combo.append(Some("anthropic"), "Anthropic");
-    provider_combo.append(Some("azure_openai"), "Azure OpenAI");
-    provider_combo.append(Some("ollama"), "Ollama");
-    provider_combo.append(Some("custom"), "自定义");
+    provider_combo.append(Some("openai"), "OpenAI 兼容接口");
+    provider_combo.append(Some("anthropic"), "Anthropic 兼容接口");
+    provider_combo.append(Some("ollama"), "Ollama 本地");
     let provider_id = match snapshot.llm_provider.as_str() {
-        "openai" => "openai",
         "anthropic" => "anthropic",
-        "azure_openai" | "azure" => "azure_openai",
         "ollama" => "ollama",
-        "custom" => "custom",
-        _ => "custom",
+        _ => "openai",
     };
     provider_combo.set_active_id(Some(provider_id));
 
-    let model_label = gtk::Label::new(Some("Model"));
+    let model_label = gtk::Label::new(Some("模型名称"));
     model_label.set_xalign(0.0);
     let model_entry = gtk::Entry::new();
     model_entry.set_text(&snapshot.llm_model);
 
-    let api_base_label = gtk::Label::new(Some("API Base URL"));
+    let api_base_label = gtk::Label::new(Some("接口地址"));
     api_base_label.set_xalign(0.0);
     let api_base_entry = gtk::Entry::new();
     api_base_entry.set_text(&snapshot.llm_api_base);
 
-    let api_key_env_label = gtk::Label::new(Some("API Key 环境变量名"));
-    api_key_env_label.set_xalign(0.0);
-    let api_key_env_entry = gtk::Entry::new();
-    api_key_env_entry.set_text(&snapshot.llm_api_key_env);
+    let api_key_label = gtk::Label::new(Some("API 密钥"));
+    api_key_label.set_xalign(0.0);
+    let api_key_entry = gtk::Entry::new();
+    api_key_entry.set_visibility(false);
+    api_key_entry.set_invisible_char(Some('*'));
+    api_key_entry.set_text(&snapshot.llm_api_key);
 
     grid.attach(&provider_label, 0, 0, 1, 1);
     grid.attach(&provider_combo, 1, 0, 1, 1);
@@ -1941,8 +2009,24 @@ fn open_llm_form_popup_linux(
     grid.attach(&model_entry, 1, 1, 1, 1);
     grid.attach(&api_base_label, 0, 2, 1, 1);
     grid.attach(&api_base_entry, 1, 2, 1, 1);
-    grid.attach(&api_key_env_label, 0, 3, 1, 1);
-    grid.attach(&api_key_env_entry, 1, 3, 1, 1);
+    grid.attach(&api_key_label, 0, 3, 1, 1);
+    grid.attach(&api_key_entry, 1, 3, 1, 1);
+
+    let is_ollama = provider_id == "ollama";
+    api_key_label.set_visible(!is_ollama);
+    api_key_entry.set_visible(!is_ollama);
+
+    // Dynamic show/hide when provider changes
+    let key_label_clone = api_key_label.clone();
+    let key_entry_clone = api_key_entry.clone();
+    provider_combo.connect_changed(move |combo| {
+        let hide = combo
+            .active_id()
+            .map(|id| id.as_str() == "ollama")
+            .unwrap_or(false);
+        key_label_clone.set_visible(!hide);
+        key_entry_clone.set_visible(!hide);
+    });
 
     if let Some(widget) = dialog.widget_for_response(gtk::ResponseType::Ok) {
         widget.grab_default();
@@ -1956,14 +2040,14 @@ fn open_llm_form_popup_linux(
         .unwrap_or_else(|| snapshot.llm_provider.clone());
     let model = model_entry.text().trim().to_string();
     let api_base = api_base_entry.text().trim().to_string();
-    let api_key_env = api_key_env_entry.text().trim().to_string();
+    let api_key = api_key_entry.text().trim().to_string();
     dialog.close();
     popup.is_editing = false;
 
     if response != gtk::ResponseType::Ok {
         return None;
     }
-    Some((provider, model, api_base, api_key_env))
+    Some((provider, model, api_base, api_key))
 }
 
 #[cfg(target_os = "linux")]
@@ -2205,7 +2289,7 @@ pub fn run_status_indicator_process() -> Result<()> {
     while !should_exit {
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
             if event.id.as_ref() == MENU_ID_EDIT_LLM_FORM_LINUX {
-                if let Some((provider, model, api_base, api_key_env)) =
+                if let Some((provider, model, api_base, api_key)) =
                     open_llm_form_popup_linux(&snapshot, &mut llm_form_popup)
                 {
                     send_child_message(&ChildMessage::ActionRequest {
@@ -2213,7 +2297,7 @@ pub fn run_status_indicator_process() -> Result<()> {
                             provider,
                             model,
                             api_base,
-                            api_key_env,
+                            api_key,
                         },
                     });
                 }

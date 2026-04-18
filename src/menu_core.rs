@@ -20,7 +20,7 @@ pub enum EditableField {
     LlmProvider,
     LlmModel,
     LlmApiBase,
-    LlmApiKeyEnv,
+    LlmApiKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub enum MenuAction {
         provider: String,
         model: String,
         api_base: String,
-        api_key_env: String,
+        api_key: String,
     },
     SetHotkeyTriggerMode {
         mode: HotkeyTriggerMode,
@@ -60,7 +60,7 @@ pub struct MenuSnapshot {
     pub llm_provider: String,
     pub llm_model: String,
     pub llm_api_base: String,
-    pub llm_api_key_env: String,
+    pub llm_api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ impl MenuCore {
             llm_provider: self.config.llm.provider.clone(),
             llm_model: self.config.llm.model.clone(),
             llm_api_base: self.config.llm.api_base.clone(),
-            llm_api_key_env: self.config.llm.api_key_env.clone(),
+            llm_api_key: self.config.llm.api_key.clone(),
         }
     }
 
@@ -114,7 +114,7 @@ impl MenuCore {
             EditableField::LlmProvider => self.config.llm.provider.clone(),
             EditableField::LlmModel => self.config.llm.model.clone(),
             EditableField::LlmApiBase => self.config.llm.api_base.clone(),
-            EditableField::LlmApiKeyEnv => self.config.llm.api_key_env.clone(),
+            EditableField::LlmApiKey => self.config.llm.api_key.clone(),
         }
     }
 
@@ -183,7 +183,7 @@ impl MenuCore {
                     EditableField::LlmProvider => self.config.llm.provider = trimmed,
                     EditableField::LlmModel => self.config.llm.model = trimmed,
                     EditableField::LlmApiBase => self.config.llm.api_base = trimmed,
-                    EditableField::LlmApiKeyEnv => self.config.llm.api_key_env = trimmed,
+                    EditableField::LlmApiKey => self.config.llm.api_key = trimmed,
                 }
 
                 self.persist_config()?;
@@ -194,12 +194,12 @@ impl MenuCore {
                 provider,
                 model,
                 api_base,
-                api_key_env,
+                api_key,
             } => {
                 let provider = provider.trim().to_string();
                 let model = model.trim().to_string();
                 let api_base = api_base.trim().to_string();
-                let api_key_env = api_key_env.trim().to_string();
+                let api_key = api_key.trim().to_string();
 
                 if provider.is_empty() || model.is_empty() || api_base.is_empty() {
                     return Err(anyhow!("LLM 配置中 provider/model/api_base 不能为空"));
@@ -208,7 +208,7 @@ impl MenuCore {
                 self.config.llm.provider = provider;
                 self.config.llm.model = model;
                 self.config.llm.api_base = api_base;
-                self.config.llm.api_key_env = api_key_env;
+                self.config.llm.api_key = api_key;
 
                 self.persist_config()?;
                 self.status = "LLM 配置已更新（已自动保存）".to_string();
@@ -340,7 +340,7 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt-4.1-mini".to_string(),
             api_base: "https://api.openai.com/v1".to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key: "test-key".to_string(),
         });
         assert!(r.ok);
 
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(reloaded.llm.provider, "openai");
         assert_eq!(reloaded.llm.model, "gpt-4.1-mini");
         assert_eq!(reloaded.llm.api_base, "https://api.openai.com/v1");
-        assert_eq!(reloaded.llm.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(reloaded.llm.api_key, "test-key");
 
         let _ = std::fs::remove_file(&config_path);
     }

@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::env;
 
 /// LLM 文本整理
 pub struct LLMRewrite {
@@ -62,10 +61,22 @@ struct OllamaResponse {
     response: String,
 }
 
+/// Anthropic Messages API 响应
+#[derive(Deserialize)]
+struct AnthropicResponse {
+    content: Vec<AnthropicContent>,
+}
+
+/// Anthropic 内容块
+#[derive(Deserialize)]
+struct AnthropicContent {
+    text: String,
+}
+
 impl LLMRewrite {
     /// 创建新的 LLM 整理器
-    pub fn new(provider: &str, api_base: &str, api_key_env: &str, model: &str) -> Result<Self> {
-        let api_key = env::var(api_key_env).unwrap_or_else(|_| String::new());
+    pub fn new(provider: &str, api_base: &str, api_key: &str, model: &str) -> Result<Self> {
+        let api_key = api_key.to_string();
 
         let enabled = !api_key.is_empty();
 
@@ -92,6 +103,7 @@ impl LLMRewrite {
 
         match self.provider.as_str() {
             "ollama" => self.rewrite_ollama(&prompt),
+            "anthropic" => self.rewrite_anthropic(&prompt),
             _ => self.rewrite_openai(&prompt),
         }
     }
@@ -162,6 +174,43 @@ impl LLMRewrite {
         let ollama_response: OllamaResponse = response.json().context("解析 Ollama 响应失败")?;
 
         Ok(ollama_response.response)
+    }
+
+    /// 使用 Anthropic Messages API 整理文本
+    fn rewrite_anthropic(&self, prompt: &str) -> Result<String> {
+        let url = format!("{}/messages", self.api_base);
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": prompt}]
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .context("Anthropic API 请求失败")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().unwrap_or_default();
+            return Err(anyhow::anyhow!("Anthropic API 错误: {} - {}", status, text));
+        }
+
+        let resp: AnthropicResponse = response.json().context("解析 Anthropic 响应失败")?;
+
+        let result = resp
+            .content
+            .first()
+            .map(|c| c.text.clone())
+            .unwrap_or_else(|| prompt.to_string());
+
+        Ok(result)
     }
 
     /// 检查是否启用

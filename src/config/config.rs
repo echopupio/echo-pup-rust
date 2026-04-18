@@ -233,8 +233,9 @@ pub struct LLMConfig {
     pub model: String,
     /// API 地址
     pub api_base: String,
-    /// API Key 环境变量名
-    pub api_key_env: String,
+    /// API Key
+    #[serde(alias = "api_key_env")]
+    pub api_key: String,
 }
 
 impl Default for LLMConfig {
@@ -244,7 +245,7 @@ impl Default for LLMConfig {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
             api_base: "https://api.openai.com/v1".to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key: String::new(),
         }
     }
 }
@@ -316,13 +317,13 @@ impl Config {
             return false;
         }
 
-        // 对于 Ollama（api_key_env 为空），不需要检查环境变量
-        if self.llm.api_key_env.is_empty() {
+        // Ollama 不需要 API 密钥
+        if self.llm.provider == "ollama" {
             return true;
         }
 
-        // 检查环境变量是否存在
-        std::env::var(&self.llm.api_key_env).is_ok()
+        // 其他 provider 必须填写 api_key
+        !self.llm.api_key.is_empty()
     }
 
     /// 加载配置
