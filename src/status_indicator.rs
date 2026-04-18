@@ -787,9 +787,11 @@ mod menu_bridge {
 
             add_separator(menu);
 
-            let toggle_llm = add_action_item(menu, target, TAG_TOGGLE_LLM, "切换 LLM 开关");
+            let toggle_llm = add_action_item(menu, target, TAG_TOGGLE_LLM, "启用 LLM 润色");
+            let edit_llm_form =
+                add_action_item(menu, target, TAG_EDIT_LLM_FORM, "编辑 LLM 配置...");
             let toggle_correction =
-                add_action_item(menu, target, TAG_TOGGLE_CORRECTION, "切换文本纠错开关");
+                add_action_item(menu, target, TAG_TOGGLE_CORRECTION, "启用文本纠错");
 
             add_separator(menu);
 
@@ -806,8 +808,6 @@ mod menu_bridge {
                 TAG_MODE_PRESS_TOGGLE,
                 "按压切换模式（按住 1 秒开始，再按结束）",
             );
-            let edit_llm_form =
-                add_action_item(menu, target, TAG_EDIT_LLM_FORM, "编辑 LLM 配置...");
 
             add_separator(menu);
 
@@ -862,6 +862,7 @@ mod menu_bridge {
     pub fn update_menu(handles: &MenuHandles, snapshot: &MenuSnapshot) {
         unsafe {
             set_check_state(handles.toggle_llm, snapshot.llm_enabled);
+            let _: () = msg_send![handles.edit_llm_form, setHidden: !snapshot.llm_enabled as cocoa::base::BOOL];
             set_check_state(handles.toggle_correction, snapshot.text_correction_enabled);
             set_check_state(
                 handles.mode_hold,
@@ -1169,7 +1170,7 @@ mod menu_bridge {
         CStr::from_ptr(cstr).to_string_lossy().into_owned()
     }
 
-    unsafe fn nsstring(value: &str) -> id {
+    pub unsafe fn nsstring(value: &str) -> id {
         NSString::alloc(nil).init_str(value)
     }
 
@@ -1288,15 +1289,95 @@ fn open_path_in_finder(path: &std::path::Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn show_about_popup() {
-    let text = "EchoPup 主要功能:\\n- 支持长按模式与按压切换模式\\n- 长按阈值 1 秒启动录音\\n- 语音转写并自动输入\\n- 支持模型下载与切换\\n\\n开发者: liupx\\n开源地址: https://github.com/pupkit-labs/echo-pup-rust";
-    let script = format!(
-        "display dialog \"{}\" buttons {{\"确定\"}} default button \"确定\" with title \"关于 EchoPup\"",
-        text
-    );
-    let _ = std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
+    use cocoa::appkit::{NSWindow, NSWindowStyleMask, NSBackingStoreType};
+    use cocoa::base::{id, nil, YES, NO};
+    use cocoa::foundation::{NSRect, NSPoint, NSSize};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 340.0)),
+            NSWindowStyleMask::NSTitledWindowMask | NSWindowStyleMask::NSClosableWindowMask,
+            NSBackingStoreType::NSBackingStoreBuffered,
+            NO,
+        );
+        if window == nil {
+            return;
+        }
+        let _: () = msg_send![window, setReleasedWhenClosed: YES];
+        let _: () = msg_send![window, setTitle: menu_bridge::nsstring("关于 EchoPup")];
+        let _: () = msg_send![window, center];
+
+        let content: id = msg_send![window, contentView];
+        if content == nil {
+            return;
+        }
+
+        // Title: "EchoPup" centered at top
+        let title: id = msg_send![class!(NSTextField), alloc];
+        let title: id = msg_send![title, initWithFrame: NSRect::new(NSPoint::new(0.0, 280.0), NSSize::new(360.0, 30.0))];
+        let _: () = msg_send![title, setBezeled: NO];
+        let _: () = msg_send![title, setDrawsBackground: NO];
+        let _: () = msg_send![title, setEditable: NO];
+        let _: () = msg_send![title, setSelectable: NO];
+        let _: () = msg_send![title, setAlignment: 1i64]; // NSTextAlignmentCenter
+        let _: () = msg_send![title, setStringValue: menu_bridge::nsstring("EchoPup")];
+        let font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 20.0f64];
+        let _: () = msg_send![title, setFont: font];
+        let _: () = msg_send![content, addSubview: title];
+
+        // Logo: centered, 128x128
+        let logo_data = STATUS_LOGO_PNG;
+        let ns_data: id = msg_send![class!(NSData), dataWithBytes:logo_data.as_ptr() length:logo_data.len()];
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithData: ns_data];
+        if image != nil {
+            let _: () = msg_send![image, setSize: NSSize::new(128.0, 128.0)];
+            let image_view: id = msg_send![class!(NSImageView), alloc];
+            let image_view: id = msg_send![image_view, initWithFrame: NSRect::new(NSPoint::new(116.0, 140.0), NSSize::new(128.0, 128.0))];
+            let _: () = msg_send![image_view, setImage: image];
+            let _: () = msg_send![content, addSubview: image_view];
+        }
+
+        // Version
+        let ver_text = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let ver: id = msg_send![class!(NSTextField), alloc];
+        let ver: id = msg_send![ver, initWithFrame: NSRect::new(NSPoint::new(0.0, 110.0), NSSize::new(360.0, 20.0))];
+        let _: () = msg_send![ver, setBezeled: NO];
+        let _: () = msg_send![ver, setDrawsBackground: NO];
+        let _: () = msg_send![ver, setEditable: NO];
+        let _: () = msg_send![ver, setSelectable: NO];
+        let _: () = msg_send![ver, setAlignment: 1i64];
+        let _: () = msg_send![ver, setStringValue: menu_bridge::nsstring(&ver_text)];
+        let _: () = msg_send![content, addSubview: ver];
+
+        // Developer
+        let dev: id = msg_send![class!(NSTextField), alloc];
+        let dev: id = msg_send![dev, initWithFrame: NSRect::new(NSPoint::new(0.0, 80.0), NSSize::new(360.0, 20.0))];
+        let _: () = msg_send![dev, setBezeled: NO];
+        let _: () = msg_send![dev, setDrawsBackground: NO];
+        let _: () = msg_send![dev, setEditable: NO];
+        let _: () = msg_send![dev, setSelectable: NO];
+        let _: () = msg_send![dev, setAlignment: 1i64];
+        let _: () = msg_send![dev, setStringValue: menu_bridge::nsstring("开发者: liupx")];
+        let small_font: id = msg_send![class!(NSFont), systemFontOfSize: 12.0f64];
+        let _: () = msg_send![dev, setFont: small_font];
+        let _: () = msg_send![content, addSubview: dev];
+
+        // GitHub URL
+        let url: id = msg_send![class!(NSTextField), alloc];
+        let url: id = msg_send![url, initWithFrame: NSRect::new(NSPoint::new(0.0, 55.0), NSSize::new(360.0, 20.0))];
+        let _: () = msg_send![url, setBezeled: NO];
+        let _: () = msg_send![url, setDrawsBackground: NO];
+        let _: () = msg_send![url, setEditable: NO];
+        let _: () = msg_send![url, setSelectable: YES];
+        let _: () = msg_send![url, setAlignment: 1i64];
+        let _: () = msg_send![url, setStringValue: menu_bridge::nsstring("https://github.com/pupkit-labs/echo-pup-rust")];
+        let _: () = msg_send![url, setFont: small_font];
+        let _: () = msg_send![content, addSubview: url];
+
+        menu_bridge::show_window(window);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2056,17 +2137,16 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
 
     let status_line = muda::MenuItem::new("状态: 就绪", false, None);
     let llm_enabled =
-        muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM", true, false, None);
+        muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM 润色", true, false, None);
     let correction_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
 
     menu.append(&status_line)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
+    menu.append(&llm_enabled)?;
     let edit_llm_form =
         muda::MenuItem::with_id(MENU_ID_EDIT_LLM_FORM_LINUX, "编辑 LLM 配置", true, None);
     menu.append(&edit_llm_form)?;
-    menu.append(&muda::PredefinedMenuItem::separator())?;
-    menu.append(&llm_enabled)?;
     menu.append(&correction_enabled)?;
     menu.append(&muda::PredefinedMenuItem::separator())?;
 
@@ -2097,6 +2177,8 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
         true,
         None,
     ))?;
+    menu.append(&muda::PredefinedMenuItem::separator())?;
+    menu.append(&muda::MenuItem::new("关于 EchoPup", false, None))?;
     menu.append(&muda::MenuItem::with_id(
         MENU_ID_QUIT_UI,
         "退出",
@@ -2132,6 +2214,7 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state:
         snapshot.llm_provider, snapshot.llm_model
     ));
     handles.llm_enabled.set_checked(snapshot.llm_enabled);
+    handles.edit_llm_form.set_enabled(snapshot.llm_enabled);
     handles
         .correction_enabled
         .set_checked(snapshot.text_correction_enabled);

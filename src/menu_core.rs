@@ -8,8 +8,8 @@ use crate::config::HotkeyTriggerMode;
 
 #[allow(dead_code)]
 pub const MENU_ITEMS: [&str; 4] = [
-    "切换 LLM 开关",
-    "切换文本纠错开关",
+    "启用 LLM 润色",
+    "启用文本纠错",
     "编辑 LLM 配置",
     "退出",
 ];
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn test_phase_e_menu_contract_order() {
         assert_eq!(MENU_ITEMS.len(), 4);
-        assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
+        assert_eq!(MENU_ITEMS[0], "启用 LLM 润色");
         assert_eq!(MENU_ITEMS[3], "退出");
     }
 
