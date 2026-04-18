@@ -1063,6 +1063,128 @@ pub fn paraformer_model_download_url(file_name: &str) -> String {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleFileDownloadOutcome {
+    Downloaded,
+    Skipped,
+}
+
+fn paraformer_tmp_path(dest_path: &Path) -> PathBuf {
+    let file_name = dest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("model");
+    dest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{}.part", file_name))
+}
+
+fn should_reuse_existing_download(existing_size: u64, total_size: Option<u64>) -> bool {
+    existing_size > 0 && total_size.is_some_and(|total| existing_size == total)
+}
+
+fn cleanup_empty_file(path: &Path, tx: &mpsc::Sender<DownloadEvent>) {
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if meta.len() > 0 {
+        return;
+    }
+    if fs::remove_file(path).is_ok() {
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[clean] 下载失败后已删除空文件: {}",
+            path.display()
+        )));
+    }
+}
+
+fn probe_single_file_remote_size(
+    client: &mut reqwest::blocking::Client,
+    using_direct_client: &mut bool,
+    url: &str,
+    tx: &mpsc::Sender<DownloadEvent>,
+) -> Option<u64> {
+    let mut total_size = None;
+
+    loop {
+        match client.head(url).send() {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    total_size = normalize_content_length(resp.content_length());
+                    let _ = tx.send(DownloadEvent::Log(format!(
+                        "[head] {} - size: {}",
+                        url,
+                        total_size
+                            .map(|s| format_bytes(s))
+                            .unwrap_or_else(|| "未知".to_string())
+                    )));
+                }
+                break;
+            }
+            Err(err) => {
+                if !*using_direct_client && is_likely_proxy_error(&err) {
+                    *client = build_http_client(true).ok()?;
+                    *using_direct_client = true;
+                    continue;
+                }
+                let _ = tx.send(DownloadEvent::Log(format!("[head] 探测失败: {}", err)));
+                break;
+            }
+        }
+    }
+
+    if total_size.is_some() {
+        return total_size;
+    }
+
+    loop {
+        match client.get(url).header(RANGE, "bytes=0-0").send() {
+            Ok(resp) => {
+                let status = resp.status();
+                total_size = resp
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_total_from_content_range)
+                    .or_else(|| {
+                        if status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+                            normalize_content_length(resp.content_length())
+                        } else {
+                            None
+                        }
+                    });
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[probe-size] status={} content-range={} total={}",
+                    status,
+                    resp.headers()
+                        .get(CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("无"),
+                    total_size
+                        .map(|s| format_bytes(s))
+                        .unwrap_or_else(|| "未知".to_string())
+                )));
+                break;
+            }
+            Err(err) => {
+                if !*using_direct_client && is_likely_proxy_error(&err) {
+                    *client = build_http_client(true).ok()?;
+                    *using_direct_client = true;
+                    continue;
+                }
+                let _ = tx.send(DownloadEvent::Log(format!(
+                    "[probe-size] 探测失败: {}",
+                    err
+                )));
+                break;
+            }
+        }
+    }
+
+    total_size
+}
+
 pub fn start_paraformer_model_download() -> Result<DownloadStart> {
     let model_dir = paraformer_model_dir();
     let (tx, rx) = mpsc::channel();
@@ -1115,28 +1237,17 @@ fn download_paraformer_model_files(
             file_name
         )));
 
-        // Check if file already exists
-        if file_path.exists() {
-            let metadata = fs::metadata(&file_path)?;
-            if metadata.len() > 0 {
-                let _ = tx.send(DownloadEvent::Log(format!(
-                    "[skip] 文件已存在: {} ({})",
-                    file_name,
-                    format_bytes(metadata.len())
-                )));
-                continue;
-            }
-        }
-
-        // Download the file
         match download_single_file(&url, &file_path, tx.clone()) {
-            Ok(()) => {
+            Ok(SingleFileDownloadOutcome::Downloaded) => {
                 let _ = tx.send(DownloadEvent::Log(format!(
                     "[done] 下载完成: {}",
                     file_name
                 )));
             }
+            Ok(SingleFileDownloadOutcome::Skipped) => {}
             Err(err) => {
+                cleanup_empty_file(&file_path, &tx);
+                cleanup_empty_file(&paraformer_tmp_path(&file_path), &tx);
                 let _ = tx.send(DownloadEvent::Log(format!(
                     "[error] 下载失败: {} - {}",
                     file_name, err
@@ -1154,46 +1265,101 @@ fn download_single_file(
     url: &str,
     dest_path: &Path,
     tx: mpsc::Sender<DownloadEvent>,
-) -> Result<()> {
+) -> Result<SingleFileDownloadOutcome> {
     let mut client = build_http_client(false)?;
     let mut using_direct_client = false;
 
     // Probe for file size
-    let mut total_size = None;
-    match client.head(url).send() {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                total_size = normalize_content_length(resp.content_length());
-                let _ = tx.send(DownloadEvent::Log(format!(
-                    "[head] {} - size: {}",
-                    url,
-                    total_size
-                        .map(|s| format_bytes(s))
-                        .unwrap_or_else(|| "未知".to_string())
-                )));
-            }
+    let mut total_size =
+        probe_single_file_remote_size(&mut client, &mut using_direct_client, url, &tx);
+
+    let tmp_path = paraformer_tmp_path(dest_path);
+    if dest_path.exists() {
+        let existing_size = fs::metadata(dest_path)
+            .with_context(|| format!("读取目标文件元数据失败: {}", dest_path.display()))?
+            .len();
+        if should_reuse_existing_download(existing_size, total_size) {
+            let _ = tx.send(DownloadEvent::Log(format!(
+                "[skip] 文件已完整存在: {} ({})",
+                dest_path.display(),
+                format_bytes(existing_size)
+            )));
+            return Ok(SingleFileDownloadOutcome::Skipped);
         }
-        Err(err) => {
-            if is_likely_proxy_error(&err) {
-                client = build_http_client(true)?;
-                using_direct_client = true;
-            }
-            let _ = tx.send(DownloadEvent::Log(format!("[head] 探测失败: {}", err)));
-        }
+
+        let reason = if existing_size == 0 {
+            "文件为空"
+        } else if total_size.is_some_and(|total| existing_size != total) {
+            "文件大小与远端不一致"
+        } else {
+            "无法确认远端大小"
+        };
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[clean] 删除不完整目标文件: {} ({}, 当前大小 {})",
+            dest_path.display(),
+            reason,
+            format_bytes(existing_size)
+        )));
+        fs::remove_file(dest_path)
+            .with_context(|| format!("删除不完整目标文件失败: {}", dest_path.display()))?;
+    }
+
+    let mut resume_size = fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+    if resume_size > 0 && should_reuse_existing_download(resume_size, total_size) {
+        fs::rename(&tmp_path, dest_path).with_context(|| {
+            format!(
+                "恢复已完成的临时文件失败: {} -> {}",
+                tmp_path.display(),
+                dest_path.display()
+            )
+        })?;
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[save] 复用已完成临时文件: {}",
+            dest_path.display()
+        )));
+        return Ok(SingleFileDownloadOutcome::Downloaded);
+    }
+    if resume_size == 0 && tmp_path.exists() {
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[clean] 删除空临时文件: {}",
+            tmp_path.display()
+        )));
+        let _ = fs::remove_file(&tmp_path);
+    } else if total_size.is_some_and(|total| resume_size > total) {
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[clean] 删除异常临时文件: {} (当前大小 {} 超过远端大小 {})",
+            tmp_path.display(),
+            format_bytes(resume_size),
+            format_bytes(total_size.unwrap_or(0))
+        )));
+        fs::remove_file(&tmp_path)
+            .with_context(|| format!("删除异常临时文件失败: {}", tmp_path.display()))?;
+        resume_size = 0;
+    } else if resume_size > 0 {
+        let _ = tx.send(DownloadEvent::Log(format!(
+            "[resume] 继续下载临时文件: {} ({})",
+            tmp_path.display(),
+            format_bytes(resume_size)
+        )));
     }
 
     let mut writer = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
-        .open(dest_path)
-        .context("打开目标文件失败")?;
+        .append(resume_size > 0)
+        .truncate(resume_size == 0)
+        .open(&tmp_path)
+        .with_context(|| format!("打开临时文件失败: {}", tmp_path.display()))?;
 
-    let mut downloaded: u64 = 0;
+    let mut downloaded: u64 = resume_size;
     let mut buf = [0u8; 64 * 1024];
     let mut last_emit = Instant::now();
 
     loop {
+        if total_size.is_some_and(|t| downloaded >= t) {
+            break;
+        }
+
         let chunk_end = downloaded
             .saturating_add(DOWNLOAD_CHUNK_SIZE)
             .saturating_sub(1);
@@ -1210,7 +1376,7 @@ fn download_single_file(
                     using_direct_client = true;
                     continue;
                 }
-                return Err(anyhow!("下载请求失败: {}", err));
+                return Err(anyhow!("下载请求失败: {} ({})", err, url));
             }
         };
 
@@ -1231,7 +1397,7 @@ fn download_single_file(
         loop {
             let n = match response.read(&mut buf) {
                 Ok(n) => n,
-                Err(err) => return Err(anyhow!("读取失败: {}", err)),
+                Err(err) => return Err(anyhow!("读取失败: {} ({})", err, url)),
             };
             if n == 0 {
                 break;
@@ -1254,7 +1420,31 @@ fn download_single_file(
         }
     }
 
-    Ok(())
+    if downloaded == 0 {
+        return Err(anyhow!("下载失败：未接收到任何数据"));
+    }
+
+    writer
+        .flush()
+        .with_context(|| format!("刷新临时文件失败: {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, dest_path).with_context(|| {
+        format!(
+            "保存文件失败: {} -> {}",
+            tmp_path.display(),
+            dest_path.display()
+        )
+    })?;
+    let _ = tx.send(DownloadEvent::Progress {
+        downloaded,
+        total: total_size.or(Some(downloaded)),
+    });
+    let _ = tx.send(DownloadEvent::Log(format!(
+        "[save] 文件已保存: {} ({})",
+        dest_path.display(),
+        format_bytes(downloaded)
+    )));
+
+    Ok(SingleFileDownloadOutcome::Downloaded)
 }
 
 pub fn parse_total_from_content_range(content_range: &str) -> Option<u64> {
@@ -1393,5 +1583,18 @@ mod tests {
         assert_eq!((plans[2].start, plans[2].end), (8, 9));
         assert!(plans[0].path.ends_with("part-0000"));
         assert!(plans[2].path.ends_with("part-0002"));
+    }
+
+    #[test]
+    fn test_paraformer_tmp_path_and_reuse_check() {
+        let dest = Path::new("/tmp/paraformer/encoder.onnx");
+        assert_eq!(
+            paraformer_tmp_path(dest),
+            PathBuf::from("/tmp/paraformer/encoder.onnx.part")
+        );
+        assert!(should_reuse_existing_download(1024, Some(1024)));
+        assert!(!should_reuse_existing_download(0, Some(1024)));
+        assert!(!should_reuse_existing_download(512, Some(1024)));
+        assert!(!should_reuse_existing_download(1024, None));
     }
 }
