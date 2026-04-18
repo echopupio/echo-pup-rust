@@ -79,7 +79,7 @@ const STATUS_ITEM_LENGTH_ACTIVE: f64 = 40.0;
 #[cfg(target_os = "macos")]
 const STATUS_ICON_SIZE: f64 = 28.0;
 #[cfg(target_os = "macos")]
-const STATUS_LOGO_VISUAL_SCALE: f64 = 0.85;
+const STATUS_LOGO_VISUAL_SCALE: f64 = 1.0;
 #[cfg(target_os = "macos")]
 const STATUS_MIC_VISUAL_SCALE: f64 = 0.92;
 #[cfg(target_os = "macos")]
@@ -481,21 +481,13 @@ unsafe fn compose_status_image(
         (logo, STATUS_LOGO_VISUAL_SCALE)
     };
 
-    let clip_rect = NSRect::new(
+    let draw_area = NSRect::new(
         NSPoint::new(STATUS_ICON_H_INSET, STATUS_ICON_V_INSET),
         NSSize::new(
             (STATUS_ICON_SIZE - STATUS_ICON_H_INSET * 2.0).max(1.0),
             (STATUS_ICON_SIZE - STATUS_ICON_V_INSET * 2.0).max(1.0),
         ),
     );
-    let clip_radius = (clip_rect.size.height * 0.36).max(4.0);
-    let clip_path: id = msg_send![
-        class!(NSBezierPath),
-        bezierPathWithRoundedRect: clip_rect
-        xRadius: clip_radius
-        yRadius: clip_radius
-    ];
-    let _: () = msg_send![clip_path, addClip];
 
     let src_size: NSSize = msg_send![image, size];
     let src_w = if src_size.width > 0.0 {
@@ -508,13 +500,13 @@ unsafe fn compose_status_image(
     } else {
         STATUS_ICON_SIZE
     };
-    let scale = (clip_rect.size.width / src_w).min(clip_rect.size.height / src_h) * visual_scale;
+    let scale = (draw_area.size.width / src_w).min(draw_area.size.height / src_h) * visual_scale;
     let draw_w = src_w * scale;
     let draw_h = src_h * scale;
     let draw_rect = NSRect::new(
         NSPoint::new(
-            clip_rect.origin.x + (clip_rect.size.width - draw_w) * 0.5,
-            clip_rect.origin.y + (clip_rect.size.height - draw_h) * 0.5,
+            draw_area.origin.x + (draw_area.size.width - draw_w) * 0.5,
+            draw_area.origin.y + (draw_area.size.height - draw_h) * 0.5,
         ),
         NSSize::new(draw_w, draw_h),
     );
