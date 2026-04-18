@@ -1047,6 +1047,142 @@ pub fn paraformer_model_files() -> &'static [&'static str] {
     &["encoder.onnx", "decoder.onnx", "tokens.txt"]
 }
 
+/// Punctuation model directory
+pub fn punctuation_model_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".echopup")
+        .join("models")
+        .join("punctuation")
+}
+
+/// Punctuation model file path
+pub fn punctuation_model_path() -> PathBuf {
+    punctuation_model_dir().join("model.onnx")
+}
+
+const PUNCTUATION_ARCHIVE_NAME: &str =
+    "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12";
+
+fn punctuation_archive_url() -> String {
+    format!(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/{}.tar.bz2",
+        PUNCTUATION_ARCHIVE_NAME
+    )
+}
+
+/// Start punctuation model download (async with channel, same pattern as paraformer)
+pub fn start_punctuation_model_download() -> Result<DownloadStart> {
+    let model_dir = punctuation_model_dir();
+    let (tx, rx) = mpsc::channel();
+
+    let initial_logs = vec![
+        "[start] 准备下载标点恢复模型".to_string(),
+        format!("[dir] 模型目录: {}", model_dir.display()),
+    ];
+
+    let state = DownloadState {
+        model_size: "punctuation".to_string(),
+        model_file_name: "model.onnx".to_string(),
+        downloaded: 0,
+        total: None,
+        in_progress: true,
+    };
+
+    std::thread::spawn(move || {
+        if let Err(err) = download_punctuation_model_files(&model_dir, tx.clone()) {
+            let _ = tx.send(DownloadEvent::Failed(err.to_string()));
+        }
+    });
+
+    Ok(DownloadStart {
+        state,
+        rx,
+        initial_logs,
+    })
+}
+
+fn download_punctuation_model_files(
+    model_dir: &Path,
+    tx: mpsc::Sender<DownloadEvent>,
+) -> Result<()> {
+    let model_path = model_dir.join("model.onnx");
+
+    // Check if already exists
+    if model_path.exists() && fs::metadata(&model_path).map(|m| m.len() > 0).unwrap_or(false) {
+        let _ = tx.send(DownloadEvent::Log("[skip] 标点模型已存在".to_string()));
+        let _ = tx.send(DownloadEvent::Finished);
+        return Ok(());
+    }
+
+    fs::create_dir_all(model_dir).context("创建标点模型目录失败")?;
+
+    let archive_url = punctuation_archive_url();
+    let tmp_dir = std::env::temp_dir();
+    let archive_path = tmp_dir.join(format!("{}.tar.bz2", PUNCTUATION_ARCHIVE_NAME));
+
+    let _ = tx.send(DownloadEvent::Log(format!(
+        "[info] 下载地址: {}",
+        archive_url
+    )));
+
+    // Download archive using download_single_file
+    download_single_file(&archive_url, &archive_path, tx.clone())?;
+
+    // Extract using tar
+    let _ = tx.send(DownloadEvent::Log("[info] 解压中...".to_string()));
+    let output = std::process::Command::new("tar")
+        .args([
+            "-xjf",
+            &archive_path.to_string_lossy(),
+            "-C",
+            &tmp_dir.to_string_lossy(),
+        ])
+        .output()
+        .context("执行 tar 命令失败")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("解压失败: {}", stderr);
+    }
+
+    // Copy model.onnx
+    let extracted_model = tmp_dir.join(PUNCTUATION_ARCHIVE_NAME).join("model.onnx");
+    if !extracted_model.exists() {
+        anyhow::bail!("解压后未找到 model.onnx");
+    }
+
+    fs::copy(&extracted_model, &model_path).context("复制 model.onnx 失败")?;
+
+    // Cleanup
+    let _ = fs::remove_dir_all(tmp_dir.join(PUNCTUATION_ARCHIVE_NAME));
+    let _ = fs::remove_file(&archive_path);
+
+    let _ = tx.send(DownloadEvent::Log("[done] 标点模型下载完成".to_string()));
+    let _ = tx.send(DownloadEvent::Finished);
+    Ok(())
+}
+
+/// Check which required models are missing. Returns list of descriptions.
+pub fn check_missing_models() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+
+    let asr_dir = paraformer_model_dir();
+    for file in paraformer_model_files() {
+        if !asr_dir.join(file).exists() {
+            missing.push("ASR 模型 (Paraformer)");
+            break;
+        }
+    }
+
+    let punct_path = punctuation_model_path();
+    if !punct_path.exists() || fs::metadata(&punct_path).map(|m| m.len() == 0).unwrap_or(true) {
+        missing.push("标点恢复模型");
+    }
+
+    missing
+}
+
 pub fn paraformer_model_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

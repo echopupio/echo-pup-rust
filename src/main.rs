@@ -647,16 +647,65 @@ fn send_desktop_notify(title: &str, body: &str) -> Result<()> {
 }
 
 fn download_paraformer_model_cli() -> Result<()> {
-    use model_download::{start_paraformer_model_download, DownloadEvent, DownloadStart};
+    info!("开始下载所有必需模型...");
+    ensure_all_models_downloaded()
+}
 
-    info!("开始下载 Sherpa Paraformer 模型...");
+fn ensure_all_models_downloaded() -> Result<()> {
+    use model_download::{
+        check_missing_models, start_paraformer_model_download, start_punctuation_model_download,
+    };
 
-    let DownloadStart {
+    let missing = check_missing_models();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    println!("检测到以下模型缺失，开始自动下载：");
+    for m in &missing {
+        println!("  ⚠ {}", m);
+    }
+    println!();
+
+    // Download ASR if missing
+    let asr_dir = model_download::paraformer_model_dir();
+    let asr_missing = model_download::paraformer_model_files()
+        .iter()
+        .any(|f| !asr_dir.join(f).exists());
+
+    if asr_missing {
+        println!("📦 下载 ASR 模型 (Paraformer)...");
+        download_model_with_cli_progress(start_paraformer_model_download()?)?;
+        println!();
+    }
+
+    // Download punctuation if missing
+    let punct_path = model_download::punctuation_model_path();
+    let punct_missing = !punct_path.exists()
+        || std::fs::metadata(&punct_path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+
+    if punct_missing {
+        println!("📦 下载标点恢复模型...");
+        download_model_with_cli_progress(start_punctuation_model_download()?)?;
+        println!();
+    }
+
+    println!("✅ 所有模型已就绪！");
+    Ok(())
+}
+
+/// Helper: consume a DownloadStart and print CLI progress
+fn download_model_with_cli_progress(start: model_download::DownloadStart) -> Result<()> {
+    use model_download::DownloadEvent;
+
+    let model_download::DownloadStart {
         rx, initial_logs, ..
-    } = start_paraformer_model_download()?;
+    } = start;
 
     for line in initial_logs {
-        println!("{}", line);
+        println!("  {}", line);
     }
 
     let mut latest_total = None::<u64>;
@@ -673,7 +722,7 @@ fn download_paraformer_model_cli() -> Result<()> {
                     progress_active = false;
                 }
                 println!(
-                    "[started] 已下载 {}，总大小 {}",
+                    "  [started] 已下载 {}，总大小 {}",
                     model_download::format_bytes(downloaded),
                     total
                         .map(model_download::format_bytes)
@@ -696,7 +745,7 @@ fn download_paraformer_model_cli() -> Result<()> {
                     }
                     _ => format!("已下载 {}", model_download::format_bytes(downloaded)),
                 };
-                print!("\r[progress] {}", progress_text);
+                print!("\r  [progress] {}", progress_text);
                 let _ = std::io::stdout().flush();
                 progress_active = true;
             }
@@ -704,8 +753,7 @@ fn download_paraformer_model_cli() -> Result<()> {
                 if progress_active {
                     println!();
                 }
-                println!("[finished] 下载完成！");
-                println!("模型已保存到 ~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/");
+                println!("  ✅ 下载完成");
                 return Ok(());
             }
             Ok(DownloadEvent::Failed(err)) => {
@@ -719,7 +767,7 @@ fn download_paraformer_model_cli() -> Result<()> {
                     println!();
                     progress_active = false;
                 }
-                println!("{}", line);
+                println!("  {}", line);
             }
             Err(_) => {
                 if progress_active {
@@ -1138,6 +1186,12 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     }
 
     let config = config::Config::load(config_path)?;
+
+    // ===== 自动下载缺失模型 =====
+    if let Err(err) = ensure_all_models_downloaded() {
+        warn!("模型自动下载失败: {}，部分功能可能不可用", err);
+    }
+
     let mut menu_runtime = menu_core::MenuCore::new(config_path)?;
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
 
@@ -1777,12 +1831,6 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         if shutdown_requested {
             info!("收到菜单退出指令，准备退出主进程");
             break;
-        }
-
-        if menu_runtime.poll_download_events() {
-            let snapshot = menu_runtime.snapshot();
-            let mut guard = status_indicator.lock();
-            guard.send_snapshot(&snapshot);
         }
 
         match rx.recv_timeout(Duration::from_millis(500)) {

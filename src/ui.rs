@@ -1,7 +1,6 @@
 //! 终端管理界面（TUI）
 
 use crate::menu_core::{EditableField, MenuAction, MenuCore, MENU_ITEMS};
-use crate::model_download;
 use anyhow::{anyhow, Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
@@ -14,7 +13,7 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::Stdout;
 use std::time::Duration;
@@ -123,7 +122,6 @@ pub fn run_ui(config_path: &str) -> Result<()> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut AppState) -> Result<()> {
     while !app.should_quit {
-        let _ = app.menu.poll_download_events();
         if app.menu.should_quit_ui() {
             app.should_quit = true;
         }
@@ -183,29 +181,8 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
     state.select(Some(app.selected));
     frame.render_stateful_widget(menu, body_chunks[0], &mut state);
 
-    let models = if snapshot.local_models.is_empty() {
-        "（未发现本地模型）".to_string()
-    } else {
-        snapshot.local_models.join("\n")
-    };
-    let download_logs = if snapshot.download_logs.is_empty() {
-        "（暂无下载日志）".to_string()
-    } else {
-        snapshot
-            .download_logs
-            .iter()
-            .rev()
-            .take(10)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
     let summary = format!(
-        "当前配置\n\nhotkey: ctrl (固定)\nllm.enabled: {}\ntext_correction.enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}\n\n本地模型:\n{}\n\n下载日志:\n{}",
+        "当前配置\n\nhotkey: ctrl (固定)\nllm.enabled: {}\ntext_correction.enabled: {}\nllm.provider: {}\nllm.model: {}\nllm.api_base: {}\nllm.api_key_env: {}\ndirty: {}",
         snapshot.llm_enabled,
         snapshot.text_correction_enabled,
         snapshot.llm_provider,
@@ -213,8 +190,6 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
         snapshot.llm_api_base,
         snapshot.llm_api_key_env,
         snapshot.dirty,
-        models,
-        download_logs
     );
     let detail = Paragraph::new(summary)
         .block(Block::default().borders(Borders::ALL).title("详情"))
@@ -235,31 +210,9 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppState) {
         )
     };
 
-    if let Some(download) = snapshot.download.as_ref() {
-        let bottom_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(3)])
-            .split(chunks[2]);
-
-        let status =
-            Paragraph::new(bottom_text).block(Block::default().borders(Borders::ALL).title("状态"));
-        frame.render_widget(status, bottom_chunks[0]);
-
-        let (ratio, label) = model_download::download_ratio_label(download);
-        let gauge = Gauge::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("下载进度 ({})", download.model_size)),
-            )
-            .ratio(ratio)
-            .label(label);
-        frame.render_widget(gauge, bottom_chunks[1]);
-    } else {
-        let bottom =
-            Paragraph::new(bottom_text).block(Block::default().borders(Borders::ALL).title("状态"));
-        frame.render_widget(bottom, chunks[2]);
-    }
+    let bottom =
+        Paragraph::new(bottom_text).block(Block::default().borders(Borders::ALL).title("状态"));
+    frame.render_widget(bottom, chunks[2]);
 }
 
 fn handle_menu_mode_key(app: &mut AppState, code: KeyCode) -> Result<()> {
@@ -317,9 +270,6 @@ fn execute_menu_action(app: &mut AppState) {
         }
         2 => start_llm_form(app),
         3 => {
-            app.menu.execute(MenuAction::DownloadModel);
-        }
-        4 => {
             let result = app.menu.execute(MenuAction::QuitUi);
             if result.quit_ui {
                 app.should_quit = true;

@@ -2,17 +2,14 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::config::Config;
 use crate::config::HotkeyTriggerMode;
-use crate::model_download::{self, DownloadEvent, DownloadState, DOWNLOAD_LOG_MAX_LINES};
 
-pub const MENU_ITEMS: [&str; 5] = [
+pub const MENU_ITEMS: [&str; 4] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
     "编辑 LLM 配置",
-    "下载 ASR 模型",
     "退出",
 ];
 
@@ -45,7 +42,6 @@ pub enum MenuAction {
     SetHotkeyTriggerMode {
         mode: HotkeyTriggerMode,
     },
-    DownloadModel,
     ReloadConfig,
     QuitUi,
 }
@@ -64,10 +60,6 @@ pub struct MenuSnapshot {
     pub llm_model: String,
     pub llm_api_base: String,
     pub llm_api_key_env: String,
-
-    pub local_models: Vec<String>,
-    pub download: Option<DownloadState>,
-    pub download_logs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,10 +76,6 @@ pub struct MenuCore {
     status: String,
     dirty: bool,
     should_quit_ui: bool,
-    local_models: Vec<String>,
-    download_logs: Vec<String>,
-    download: Option<DownloadState>,
-    download_rx: Option<Receiver<DownloadEvent>>,
 }
 
 impl MenuCore {
@@ -99,10 +87,6 @@ impl MenuCore {
             status: "就绪。方向键选择，Enter执行，q退出。".to_string(),
             dirty: false,
             should_quit_ui: false,
-            local_models: model_download::list_local_models(),
-            download_logs: Vec::new(),
-            download: None,
-            download_rx: None,
         })
     }
 
@@ -120,10 +104,6 @@ impl MenuCore {
             llm_model: self.config.llm.model.clone(),
             llm_api_base: self.config.llm.api_base.clone(),
             llm_api_key_env: self.config.llm.api_key_env.clone(),
-
-            local_models: self.local_models.clone(),
-            download: self.download.clone(),
-            download_logs: self.download_logs.clone(),
         }
     }
 
@@ -238,26 +218,8 @@ impl MenuCore {
                 self.status = format!("热键触发模式已切换为 {}（已自动保存）", mode.label());
                 Ok(self.status.clone())
             }
-            MenuAction::DownloadModel => {
-                use model_download::start_paraformer_model_download;
-                match start_paraformer_model_download() {
-                    Ok(start) => {
-                        self.download = Some(start.state);
-                        self.download_rx = Some(start.rx);
-                        self.download_logs.clear();
-                        self.download_logs.extend(start.initial_logs);
-                        self.status = "正在下载 Sherpa Paraformer 模型...".to_string();
-                        Ok(self.status.clone())
-                    }
-                    Err(err) => {
-                        self.status = format!("启动下载失败: {}", err);
-                        Err(anyhow!("启动下载失败: {}", err))
-                    }
-                }
-            }
             MenuAction::ReloadConfig => {
                 self.config = Config::load(&self.config_path)?;
-                self.local_models = model_download::list_local_models();
                 self.status = "配置文件已重载".to_string();
                 Ok(self.status.clone())
             }
@@ -266,106 +228,6 @@ impl MenuCore {
                 self.status = "收到退出指令".to_string();
                 Ok(self.status.clone())
             }
-        }
-    }
-
-    pub fn poll_download_events(&mut self) -> bool {
-        let mut changed = false;
-        let mut clear_rx = false;
-
-        loop {
-            let recv_result = {
-                let Some(rx) = self.download_rx.as_ref() else {
-                    break;
-                };
-                rx.try_recv()
-            };
-
-            match recv_result {
-                Ok(event) => {
-                    changed = true;
-                    match event {
-                        DownloadEvent::Started {
-                            model_size,
-                            model_file_name,
-                            downloaded,
-                            total,
-                        } => {
-                            self.download = Some(DownloadState {
-                                model_size: model_size.clone(),
-                                model_file_name,
-                                downloaded,
-                                total,
-                                in_progress: true,
-                            });
-                            self.status = format!("正在下载模型 {} ...", model_size);
-                            self.append_download_log(format!(
-                                "[started] 已下载 {}，总大小 {}",
-                                model_download::format_bytes(downloaded),
-                                total
-                                    .map(model_download::format_bytes)
-                                    .unwrap_or_else(|| "未知".to_string())
-                            ));
-                        }
-                        DownloadEvent::Progress { downloaded, total } => {
-                            if let Some(download) = self.download.as_mut() {
-                                download.downloaded = downloaded;
-                                if total.is_some() {
-                                    download.total = total;
-                                }
-                            }
-                        }
-                        DownloadEvent::Finished => {
-                            let mut model_size = "unknown".to_string();
-                            if let Some(download) = self.download.as_mut() {
-                                model_size = download.model_size.clone();
-                                download.in_progress = false;
-                                if download.total.is_none() {
-                                    download.total = Some(download.downloaded);
-                                }
-                            }
-                            self.local_models = model_download::list_local_models();
-                            self.status = format!("模型 {} 下载完成", model_size);
-                            self.append_download_log("[finished] 下载完成".to_string());
-                            clear_rx = true;
-                        }
-                        DownloadEvent::Failed(err) => {
-                            if let Some(download) = self.download.as_mut() {
-                                download.in_progress = false;
-                            }
-                            self.status = format!("下载失败: {}", err);
-                            self.append_download_log(format!("[error] {}", err));
-                            clear_rx = true;
-                        }
-                        DownloadEvent::Log(line) => {
-                            self.append_download_log(line);
-                        }
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if let Some(download) = self.download.as_mut() {
-                        download.in_progress = false;
-                    }
-                    clear_rx = true;
-                    break;
-                }
-            }
-        }
-
-        if clear_rx {
-            self.download_rx = None;
-            changed = true;
-        }
-
-        changed
-    }
-
-    fn append_download_log(&mut self, line: String) {
-        self.download_logs.push(line);
-        if self.download_logs.len() > DOWNLOAD_LOG_MAX_LINES {
-            let drain_len = self.download_logs.len() - DOWNLOAD_LOG_MAX_LINES;
-            self.download_logs.drain(0..drain_len);
         }
     }
 
@@ -390,6 +252,7 @@ mod tests {
         std::env::temp_dir().join(file).display().to_string()
     }
 
+    #[allow(dead_code)]
     fn temp_model_path(file_name: &str) -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -441,10 +304,9 @@ mod tests {
 
     #[test]
     fn test_phase_e_menu_contract_order() {
-        assert_eq!(MENU_ITEMS.len(), 5);
+        assert_eq!(MENU_ITEMS.len(), 4);
         assert_eq!(MENU_ITEMS[0], "切换 LLM 开关");
-        assert_eq!(MENU_ITEMS[3], "下载 ASR 模型");
-        assert_eq!(MENU_ITEMS[4], "退出");
+        assert_eq!(MENU_ITEMS[3], "退出");
     }
 
     #[test]
