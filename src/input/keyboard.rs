@@ -185,6 +185,8 @@ impl Keyboard {
     ///
     /// 比逐字退格再输入快得多：先 Shift+Left 选中，再直接输入（自动替换选中文字）。
     /// 用户看到的是"文字被高亮→变成新文字"，没有逐字删除的视觉延迟。
+    /// 注意：在终端中 Shift+Left 可能产生转义序列，仅适用于 GUI 文本框。
+    #[allow(dead_code)]
     pub fn select_backward_and_type(&mut self, select_count: usize, new_text: &str) -> Result<()> {
         if select_count == 0 {
             return self.type_text(new_text);

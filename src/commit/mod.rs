@@ -73,8 +73,12 @@ impl TextCommitBackend for InsertOnlyTextCommit {
                 new_text,
                 delete_chars,
             } => {
-                self.keyboard
-                    .select_backward_and_type(delete_chars, &new_text)?;
+                if delete_chars > 0 {
+                    self.keyboard.delete_backward(delete_chars)?;
+                }
+                if !new_text.is_empty() {
+                    self.keyboard.type_text(&new_text)?;
+                }
                 self.draft_char_count = 0;
                 Ok(())
             }
