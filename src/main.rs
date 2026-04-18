@@ -1979,6 +1979,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         result.snapshot = menu_runtime.snapshot();
                     }
                 }
+                // 同步共享快照，确保录音回调等异步路径拿到最新状态
+                *menu_snapshot_state.lock() = result.snapshot.clone();
                 guard.send_action_result(&result);
                 if result.quit_ui {
                     guard.close_ui();
