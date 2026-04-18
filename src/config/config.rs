@@ -22,6 +22,8 @@ pub struct Config {
     pub text_correction: TextCorrectionConfig,
     /// 反馈配置（通知/声音）
     pub feedback: FeedbackConfig,
+    /// 文本提交配置
+    pub commit: CommitConfig,
 }
 
 impl Default for Config {
@@ -33,6 +35,7 @@ impl Default for Config {
             llm: LLMConfig::default(),
             text_correction: TextCorrectionConfig::default(),
             feedback: FeedbackConfig::default(),
+            commit: CommitConfig::default(),
         }
     }
 }
@@ -253,6 +256,22 @@ impl Default for LLMConfig {
             model: "gpt-4o-mini".to_string(),
             api_base: "https://api.openai.com/v1".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
+        }
+    }
+}
+
+/// 文本提交配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommitConfig {
+    /// 是否启用流式草稿输入（边说边出文字）
+    pub streaming_draft: bool,
+}
+
+impl Default for CommitConfig {
+    fn default() -> Self {
+        Self {
+            streaming_draft: true,
         }
     }
 }

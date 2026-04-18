@@ -36,6 +36,14 @@ impl RecognitionSession {
         self.partials.update(text)
     }
 
+    pub fn prepare_draft_commit(&mut self, text: &str) -> Option<CommitAction> {
+        self.partials.prepare_draft_commit(text)
+    }
+
+    pub fn prepare_draft_clear(&mut self) -> Option<CommitAction> {
+        self.partials.prepare_draft_clear()
+    }
+
     pub fn prepare_final_commit(&mut self, text: &str) -> Option<CommitAction> {
         self.finals.prepare_commit(text)
     }

@@ -6,7 +6,15 @@ use anyhow::Result;
 /// 文本提交动作。
 #[derive(Debug, Clone)]
 pub enum CommitAction {
+    /// 最终提交文本（录音结束后）
     CommitFinal { text: String },
+    /// 更新草稿：先删旧草稿再输入新草稿
+    UpdateDraft {
+        new_text: String,
+        delete_chars: usize,
+    },
+    /// 清除草稿（不输入新文字）
+    ClearDraft { delete_chars: usize },
 }
 
 /// 文本提交后端接口。
@@ -20,15 +28,17 @@ pub trait TextCommitBackend: Send {
     fn apply(&mut self, action: CommitAction) -> Result<()>;
 }
 
-/// 基于现有键盘输入能力的 insert-only 提交实现。
+/// 基于现有键盘输入能力的 insert-only 提交实现，支持草稿替换。
 pub struct InsertOnlyTextCommit {
     keyboard: Keyboard,
+    draft_char_count: usize,
 }
 
 impl InsertOnlyTextCommit {
     pub fn new() -> Result<Self> {
         Ok(Self {
             keyboard: Keyboard::new()?,
+            draft_char_count: 0,
         })
     }
 }
@@ -38,9 +48,37 @@ impl TextCommitBackend for InsertOnlyTextCommit {
         self.keyboard.backend_name().to_string()
     }
 
+    fn supports_draft_replacement(&self) -> bool {
+        true
+    }
+
     fn apply(&mut self, action: CommitAction) -> Result<()> {
         match action {
-            CommitAction::CommitFinal { text } => self.keyboard.type_text(&text),
+            CommitAction::CommitFinal { text } => {
+                if self.draft_char_count > 0 {
+                    self.keyboard.delete_backward(self.draft_char_count)?;
+                    self.draft_char_count = 0;
+                }
+                self.keyboard.type_text(&text)
+            }
+            CommitAction::UpdateDraft {
+                new_text,
+                delete_chars,
+            } => {
+                if delete_chars > 0 {
+                    self.keyboard.delete_backward(delete_chars)?;
+                }
+                self.keyboard.type_text(&new_text)?;
+                self.draft_char_count = new_text.chars().count();
+                Ok(())
+            }
+            CommitAction::ClearDraft { delete_chars } => {
+                if delete_chars > 0 {
+                    self.keyboard.delete_backward(delete_chars)?;
+                }
+                self.draft_char_count = 0;
+                Ok(())
+            }
         }
     }
 }

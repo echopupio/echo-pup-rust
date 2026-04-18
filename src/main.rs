@@ -1285,6 +1285,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let partial_stt_callback_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
     let recognition_session = Arc::new(Mutex::new(session::RecognitionSession::new()));
+    let streaming_draft_enabled = config.commit.streaming_draft;
 
     // 录音动画控制
     let recording_animation = Arc::new(AtomicBool::new(false));
@@ -1337,6 +1338,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_handle_on_start = partial_stt_handle.clone();
     let partial_stt_callback_handle_on_start = partial_stt_callback_handle.clone();
     let recognition_session_on_start = recognition_session.clone();
+    let text_commit_on_start = text_commit.clone();
+    let streaming_draft_on_start = streaming_draft_enabled;
     let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
@@ -1369,6 +1372,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     let is_recording_callback = is_recording_start.clone();
                     let partial_stt_stop_callback = partial_stt_stop_on_start.clone();
                     let recognition_session_for_callback = recognition_session_on_start.clone();
+                    let text_commit_for_callback = text_commit_on_start.clone();
+                    let streaming_draft_for_callback = streaming_draft_on_start;
                     let poll_interval = Duration::from_millis(500);
                     let min_samples = (recorder_callback.target_sample_rate() as usize)
                         .saturating_mul(800)
@@ -1402,6 +1407,11 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             }
                         };
 
+                        let draft_enabled = streaming_draft_for_callback
+                            && text_commit_for_callback
+                                .lock()
+                                .supports_draft_replacement();
+
                         let mut preview_cursor: audio::AudioChunkCursor =
                             recorder_callback.incremental_cursor();
 
@@ -1432,10 +1442,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                         break;
                                     }
 
-                                    let update = {
+                                    let (update, draft_action) = {
                                         let mut session_guard =
                                             recognition_session_for_callback.lock();
-                                        session_guard.update_partial(&text)
+                                        let update = session_guard.update_partial(&text);
+                                        let draft_action = if draft_enabled {
+                                            session_guard.prepare_draft_commit(&text)
+                                        } else {
+                                            None
+                                        };
+                                        (update, draft_action)
                                     };
 
                                     if let Some(update) = update {
@@ -1444,6 +1460,14 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                             &menu_snapshot_callback,
                                             update.status_text,
                                         );
+                                    }
+
+                                    if let Some(action) = draft_action {
+                                        if let Err(err) =
+                                            text_commit_for_callback.lock().apply(action)
+                                        {
+                                            warn!("草稿提交失败: {}", err);
+                                        }
                                     }
                                 }
                                 Ok(None) => {}
@@ -1513,6 +1537,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                 }
             };
             info!("stop_recording_action: recorder.stop() 返回成功");
+            // 清除草稿：先从光标处删掉已输入的草稿文字，再清空 partial 状态
+            {
+                let draft_clear = recognition_session_on_stop.lock().prepare_draft_clear();
+                if let Some(action) = draft_clear {
+                    if let Err(err) = text_commit_stop.lock().apply(action) {
+                        warn!("清除草稿失败: {}", err);
+                    }
+                }
+            }
             recognition_session_on_stop.lock().clear_partials();
             info!("stop_recording_action: 预览线程转为后台回收");
             detach_thread_handle(&partial_stt_handle_on_stop);
@@ -1688,6 +1721,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     return;
                 }
             };
+            // 清除草稿（必须在 clear_partials 之前，否则 committed_char_count 已被重置）
+            {
+                let draft_clear = recognition_session_on_vad.lock().prepare_draft_clear();
+                if let Some(action) = draft_clear {
+                    if let Err(err) = vad_text_commit.lock().apply(action) {
+                        warn!("VAD 清除草稿失败: {}", err);
+                    }
+                }
+            }
             recognition_session_on_vad.lock().clear_partials();
             detach_thread_handle(&partial_stt_handle_on_vad);
             detach_thread_handle(&partial_stt_callback_handle_on_vad);

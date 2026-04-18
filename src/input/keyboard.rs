@@ -1,6 +1,8 @@
 //! 键盘输入模拟
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 use enigo::Enigo;
 use tracing::{error, info, warn};
 
@@ -51,6 +53,37 @@ impl LinuxTypingBackend {
             .with_context(|| format!("执行 {} 失败", self.label()))?;
         if !status.success() {
             return Err(anyhow!("{} 返回非零状态: {}", self.label(), status));
+        }
+        Ok(())
+    }
+
+    fn delete_backward(self, count: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let mut command = match self {
+            Self::Xdotool => {
+                let mut command = std::process::Command::new("xdotool");
+                command
+                    .arg("key")
+                    .arg("--repeat")
+                    .arg(count.to_string())
+                    .arg("BackSpace");
+                command
+            }
+            Self::Wtype => {
+                let mut command = std::process::Command::new("wtype");
+                for _ in 0..count {
+                    command.arg("-k").arg("BackSpace");
+                }
+                command
+            }
+        };
+        let status = command
+            .status()
+            .with_context(|| format!("执行 {} 退格失败", self.label()))?;
+        if !status.success() {
+            return Err(anyhow!("{} 退格返回非零状态: {}", self.label(), status));
         }
         Ok(())
     }
@@ -125,6 +158,25 @@ impl Keyboard {
             }
             #[cfg(target_os = "linux")]
             KeyboardBackend::LinuxCommand(backend) => backend.type_text(text),
+            KeyboardBackend::Unavailable(reason) => Err(anyhow!("键盘输入不可用: {}", reason)),
+        }
+    }
+
+    /// 向前删除指定数量的字符（发送退格键）
+    pub fn delete_backward(&mut self, count: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        match &mut self.backend {
+            KeyboardBackend::Enigo(enigo) => {
+                use enigo::Keyboard as _;
+                for _ in 0..count {
+                    enigo.key(enigo::Key::Backspace, enigo::Direction::Click)?;
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            KeyboardBackend::LinuxCommand(backend) => backend.delete_backward(count),
             KeyboardBackend::Unavailable(reason) => Err(anyhow!("键盘输入不可用: {}", reason)),
         }
     }
