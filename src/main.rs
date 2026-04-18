@@ -1417,7 +1417,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     let recognition_session_for_callback = recognition_session_on_start.clone();
                     let text_commit_for_callback = text_commit_on_start.clone();
                     let streaming_draft_for_callback = streaming_draft_on_start;
-                    let poll_interval = Duration::from_millis(500);
+                    let spinner_interval = Duration::from_millis(150);
+                    let asr_poll_every_n: u32 = 3; // 每 3 个 spinner tick poll 一次 ASR (~450ms)
                     let min_samples = (recorder_callback.target_sample_rate() as usize)
                         .saturating_mul(800)
                         / 1000;
@@ -1458,19 +1459,54 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                         let mut preview_cursor: audio::AudioChunkCursor =
                             recorder_callback.incremental_cursor();
 
+                        let mut tick_count: u32 = 0;
+
                         while is_recording_callback.load(Ordering::SeqCst)
                             && !partial_stt_stop_callback.load(Ordering::SeqCst)
                         {
-                            std::thread::sleep(poll_interval);
+                            std::thread::sleep(spinner_interval);
                             if !is_recording_callback.load(Ordering::SeqCst)
                                 || partial_stt_stop_callback.load(Ordering::SeqCst)
                             {
                                 break;
                             }
 
+                            tick_count += 1;
+                            let should_poll_asr = tick_count % asr_poll_every_n == 0;
+
+                            if !should_poll_asr {
+                                // 非 ASR poll tick：只旋转 spinner
+                                if draft_enabled {
+                                    let action = recognition_session_for_callback
+                                        .lock()
+                                        .tick_stability(false);
+                                    if let Some(action) = action {
+                                        if let Err(err) =
+                                            text_commit_for_callback.lock().apply(action)
+                                        {
+                                            warn!("spinner 旋转失败: {}", err);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
                             let new_samples = recorder_callback
                                 .read_incremental_target_samples(&mut preview_cursor);
                             if new_samples.is_empty() {
+                                // 即使无新音频，也旋转 spinner
+                                if draft_enabled {
+                                    let action = recognition_session_for_callback
+                                        .lock()
+                                        .tick_stability(false);
+                                    if let Some(action) = action {
+                                        if let Err(err) =
+                                            text_commit_for_callback.lock().apply(action)
+                                        {
+                                            warn!("spinner 旋转失败: {}", err);
+                                        }
+                                    }
+                                }
                                 continue;
                             }
 
@@ -1485,22 +1521,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                         break;
                                     }
 
-                                    let (update, draft_action, stability_action) = {
+                                    let (update, draft_action) = {
                                         let mut session_guard =
                                             recognition_session_for_callback.lock();
                                         let update = session_guard.update_partial(&text);
-                                        let text_changed = update.is_some();
                                         let draft_action = if draft_enabled {
                                             session_guard.prepare_draft_commit(&text)
                                         } else {
                                             None
                                         };
-                                        let stability_action = if draft_enabled {
-                                            session_guard.tick_stability(text_changed)
-                                        } else {
-                                            None
-                                        };
-                                        (update, draft_action, stability_action)
+                                        (update, draft_action)
                                     };
 
                                     if let Some(update) = update {
@@ -1518,26 +1548,18 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                                             warn!("草稿提交失败: {}", err);
                                         }
                                     }
-
-                                    if let Some(action) = stability_action {
-                                        if let Err(err) =
-                                            text_commit_for_callback.lock().apply(action)
-                                        {
-                                            warn!("停顿逗号注入失败: {}", err);
-                                        }
-                                    }
                                 }
                                 Ok(None) => {
-                                    // 无新 partial 也要 tick stability（文本未变化）
+                                    // 无新 partial：旋转 spinner
                                     if draft_enabled {
-                                        let stability_action = recognition_session_for_callback
+                                        let action = recognition_session_for_callback
                                             .lock()
                                             .tick_stability(false);
-                                        if let Some(action) = stability_action {
+                                        if let Some(action) = action {
                                             if let Err(err) =
                                                 text_commit_for_callback.lock().apply(action)
                                             {
-                                                warn!("停顿逗号注入失败: {}", err);
+                                                warn!("spinner 旋转失败: {}", err);
                                             }
                                         }
                                     }
