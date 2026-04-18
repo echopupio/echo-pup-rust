@@ -10,7 +10,6 @@ use std::thread;
 use std::time::Duration;
 
 const RUN_LOCK_FILE_NAME: &str = "echopup.lock";
-const UI_LOCK_FILE_NAME: &str = "echopup-ui.pid";
 const RUN_LOG_FILE_NAME: &str = "echopup.log";
 const STOP_WAIT_RETRY: usize = 50;
 const STOP_WAIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -80,29 +79,9 @@ impl InstanceGuard {
     }
 }
 
-pub struct UiGuard {
-    lock_path: PathBuf,
-    pid: u32,
-}
-
-pub enum UiAcquireMode {
-    Fresh,
-    TookOverPrevious,
-}
-
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
         let _ = self.file.unlock();
-    }
-}
-
-impl Drop for UiGuard {
-    fn drop(&mut self) {
-        if let Ok(Some(pid)) = read_pid_file(&self.lock_path) {
-            if pid == self.pid {
-                let _ = std::fs::remove_file(&self.lock_path);
-            }
-        }
     }
 }
 
@@ -139,18 +118,6 @@ fn read_pid_file(path: &PathBuf) -> Result<Option<u32>> {
     Ok(pid)
 }
 
-fn write_pid_file_create_new(path: &PathBuf, pid: u32) -> Result<bool> {
-    match OpenOptions::new().create_new(true).write(true).open(path) {
-        Ok(mut file) => {
-            writeln!(file, "{}", pid).context("写入 UI 锁文件失败")?;
-            file.flush().ok();
-            Ok(true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("创建 UI 锁文件失败: {}", path.display())),
-    }
-}
-
 fn process_command(pid: u32) -> Option<String> {
     let output = Command::new("ps")
         .arg("-p")
@@ -183,10 +150,6 @@ fn classify_process(pid: u32, mode_fragment: &str) -> ProcessIdentity {
     }
 
     ProcessIdentity::Unknown
-}
-
-fn ui_process_identity(pid: u32) -> ProcessIdentity {
-    classify_process(pid, " ui")
 }
 
 fn run_process_identity(pid: u32) -> ProcessIdentity {
@@ -238,107 +201,6 @@ pub fn stop_running_instance() -> Result<Option<u32>> {
     }
 
     Err(anyhow!("停止 echopup 超时: pid={}", pid))
-}
-
-pub fn ui_running_pid() -> Result<Option<u32>> {
-    let lock_path = lock_file_path(UI_LOCK_FILE_NAME)?;
-    if !lock_path.exists() {
-        return Ok(None);
-    }
-
-    let Some(pid) = read_pid_file(&lock_path)? else {
-        let _ = std::fs::remove_file(&lock_path);
-        return Ok(None);
-    };
-
-    Ok(Some(pid))
-}
-
-pub fn stop_ui_instance() -> Result<Option<u32>> {
-    let Some(pid) = ui_running_pid()? else {
-        return Ok(None);
-    };
-
-    match ui_process_identity(pid) {
-        ProcessIdentity::Match | ProcessIdentity::Unknown => {}
-        ProcessIdentity::Mismatch => {
-            let lock_path = lock_file_path(UI_LOCK_FILE_NAME)?;
-            let _ = std::fs::remove_file(&lock_path);
-            return Ok(None);
-        }
-    }
-
-    send_term(pid)?;
-
-    for _ in 0..STOP_WAIT_RETRY {
-        if ui_process_identity(pid) == ProcessIdentity::Mismatch {
-            let lock_path = lock_file_path(UI_LOCK_FILE_NAME)?;
-            if lock_path.exists() {
-                let _ = std::fs::remove_file(&lock_path);
-            }
-            return Ok(Some(pid));
-        }
-        thread::sleep(STOP_WAIT_INTERVAL);
-    }
-
-    Err(anyhow!("停止 echopup ui 超时: pid={}", pid))
-}
-
-/// 获取 UI 锁；若已有 UI，则接管到当前终端
-pub fn acquire_ui_guard_for_foreground() -> Result<(UiGuard, UiAcquireMode)> {
-    let lock_path = lock_file_path(UI_LOCK_FILE_NAME)?;
-    let current_pid = std::process::id();
-
-    if write_pid_file_create_new(&lock_path, current_pid)? {
-        return Ok((
-            UiGuard {
-                lock_path,
-                pid: current_pid,
-            },
-            UiAcquireMode::Fresh,
-        ));
-    }
-
-    if let Ok(Some(pid)) = read_pid_file(&lock_path) {
-        if pid != std::process::id() {
-            match ui_process_identity(pid) {
-                ProcessIdentity::Match => {
-                    let _ = Command::new("kill")
-                        .arg("-TERM")
-                        .arg(pid.to_string())
-                        .status();
-                }
-                ProcessIdentity::Mismatch => {
-                    let _ = std::fs::remove_file(&lock_path);
-                }
-                ProcessIdentity::Unknown => {}
-            }
-        }
-    } else {
-        let _ = std::fs::remove_file(&lock_path);
-    }
-
-    for _ in 0..STOP_WAIT_RETRY {
-        if write_pid_file_create_new(&lock_path, current_pid)? {
-            return Ok((
-                UiGuard {
-                    lock_path,
-                    pid: current_pid,
-                },
-                UiAcquireMode::TookOverPrevious,
-            ));
-        }
-        if let Ok(Some(pid)) = read_pid_file(&lock_path) {
-            if pid != current_pid && ui_process_identity(pid) == ProcessIdentity::Mismatch {
-                let _ = std::fs::remove_file(&lock_path);
-            }
-        } else {
-            let _ = std::fs::remove_file(&lock_path);
-        }
-        thread::sleep(STOP_WAIT_INTERVAL);
-    }
-
-    anyhow::bail!("echopup ui 正在运行，且当前无法接管")
 }
 
 /// 后台启动 echopup run

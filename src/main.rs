@@ -14,9 +14,7 @@ mod runtime;
 mod session;
 mod status_indicator;
 mod text_processor;
-mod ui;
 
-use crate::commit::TextCommitBackend as _;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use parking_lot::Mutex;
@@ -51,31 +49,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(hide = true)]
     Run,
     Start,
     Stop,
     Status,
     Restart,
-    Ui {
-        #[command(subcommand)]
-        command: Option<UiCommands>,
-    },
-    Test,
     Config {
-        show: bool,
-        init: bool,
+        #[command(subcommand)]
+        command: Option<ConfigCommands>,
     },
+    /// 列出可用的音频输入设备
+    Devices,
+    /// 查看后台运行日志
+    Log {
+        /// 显示最后 N 行（默认 50）
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+        /// 持续跟踪日志（类似 tail -f）
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// 系统环境诊断
+    Doctor,
+    /// 显示版本信息
+    Version,
     DownloadModel,
     #[command(hide = true)]
     StatusIndicator,
 }
 
 #[derive(Subcommand)]
-enum UiCommands {
-    Start,
-    Stop,
-    Status,
-    Restart,
+enum ConfigCommands {
+    /// 显示当前配置
+    Show,
+    /// 初始化默认配置文件
+    Init,
+    /// 显示配置文件路径
+    Path,
+    /// 用编辑器打开配置文件
+    Edit,
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -797,18 +810,12 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Stop) => stop_background_mode()?,
         Some(Commands::Status) => show_background_status()?,
         Some(Commands::Restart) => restart_background_mode(&cli.config)?,
-        Some(Commands::Ui { command }) => handle_ui_command(&cli.config, command)?,
-        Some(Commands::Test) => test_modules(&cli.config)?,
-        Some(Commands::Config { show, init }) => {
-            if init {
-                let config = config::Config::default();
-                config.save(&cli.config)?;
-                info!("默认配置已保存到: {}", cli.config);
-            }
-            if show {
-                let config = config::Config::load(&cli.config)?;
-                println!("{:#?}", config);
-            }
+        Some(Commands::Config { command }) => handle_config_command(&cli.config, command)?,
+        Some(Commands::Devices) => list_audio_devices()?,
+        Some(Commands::Log { lines, follow }) => show_log(lines, follow)?,
+        Some(Commands::Doctor) => run_doctor(&cli.config)?,
+        Some(Commands::Version) => {
+            println!("echopup {}", env!("CARGO_PKG_VERSION"));
         }
         Some(Commands::StatusIndicator) => status_indicator::run_status_indicator_process()?,
         Some(Commands::DownloadModel) => download_paraformer_model_cli()?,
@@ -827,7 +834,7 @@ fn start_background_mode(config_path: &str) -> Result<()> {
         } else {
             println!("echopup 已在后台运行，不会重复创建进程。");
         }
-        println!("可使用 `echopup ui` 管理配置。");
+        println!("可使用 `echopup config` 管理配置。");
         return Ok(());
     }
 
@@ -837,7 +844,7 @@ fn start_background_mode(config_path: &str) -> Result<()> {
     println!("日志文件: {}", log_path.display());
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
 
-    println!("可使用 `echopup ui` 管理配置。");
+    println!("可使用 `echopup config` 管理配置。");
     Ok(())
 }
 
@@ -874,44 +881,183 @@ fn restart_background_mode(config_path: &str) -> Result<()> {
     println!("echopup 已重启并在后台运行 (pid: {})", pid);
     println!("日志文件: {}", log_path.display());
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
-    println!("可使用 `echopup ui` 管理配置。");
+    println!("可使用 `echopup config` 管理配置。");
     Ok(())
 }
 
-fn handle_ui_command(config_path: &str, command: Option<UiCommands>) -> Result<()> {
-    match command.unwrap_or(UiCommands::Start) {
-        UiCommands::Start => run_ui_foreground(config_path),
-        UiCommands::Stop => {
-            match runtime::stop_ui_instance()? {
-                Some(pid) => println!("echopup ui 已停止 (pid: {})", pid),
-                None => println!("echopup ui 未运行。"),
-            }
-            Ok(())
+fn handle_config_command(config_path: &str, command: Option<ConfigCommands>) -> Result<()> {
+    let resolved = config_path.replace("~", &dirs::home_dir().unwrap_or_default().display().to_string());
+    match command.unwrap_or(ConfigCommands::Show) {
+        ConfigCommands::Show => {
+            let config = config::Config::load(config_path)?;
+            println!("{:#?}", config);
         }
-        UiCommands::Status => {
-            match runtime::ui_running_pid()? {
-                Some(pid) => println!("echopup ui 正在运行 (pid: {})", pid),
-                None => println!("echopup ui 未运行。"),
-            }
-            Ok(())
+        ConfigCommands::Init => {
+            let config = config::Config::default();
+            config.save(config_path)?;
+            println!("默认配置已保存到: {}", resolved);
         }
-        UiCommands::Restart => {
-            if let Some(pid) = runtime::stop_ui_instance()? {
-                println!("已停止旧的 echopup ui (pid: {})", pid);
+        ConfigCommands::Path => {
+            println!("{}", resolved);
+        }
+        ConfigCommands::Edit => {
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                if cfg!(target_os = "macos") { "open -e".to_string() } else { "vi".to_string() }
+            });
+            let path = std::path::Path::new(&resolved);
+            if !path.exists() {
+                let config = config::Config::default();
+                config.save(config_path)?;
+                println!("配置文件不存在，已创建默认配置: {}", resolved);
             }
-            run_ui_foreground(config_path)
+            let parts: Vec<&str> = editor.split_whitespace().collect();
+            let status = std::process::Command::new(parts[0])
+                .args(&parts[1..])
+                .arg(&resolved)
+                .status()
+                .with_context(|| format!("启动编辑器 '{}' 失败", editor))?;
+            if !status.success() {
+                anyhow::bail!("编辑器退出码: {}", status);
+            }
         }
     }
+    Ok(())
 }
 
-fn run_ui_foreground(config_path: &str) -> Result<()> {
-    let (ui_guard, acquire_mode) = runtime::acquire_ui_guard_for_foreground()?;
-    if matches!(acquire_mode, runtime::UiAcquireMode::TookOverPrevious) {
-        println!("检测到已有 echopup ui，已切换到当前终端。");
+fn list_audio_devices() -> Result<()> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_device = host.default_input_device();
+    let default_name = default_device.as_ref().and_then(|d| d.name().ok()).unwrap_or_default();
+
+    println!("可用音频输入设备：\n");
+    match host.input_devices() {
+        Ok(devices) => {
+            let mut count = 0;
+            for device in devices {
+                let name = device.name().unwrap_or_else(|_| "(未知)".to_string());
+                let is_default = name == default_name;
+                let config_info = device.default_input_config()
+                    .map(|c| format!("{}Hz, {}ch, {:?}", c.sample_rate().0, c.channels(), c.sample_format()))
+                    .unwrap_or_else(|_| "无法获取配置".to_string());
+                println!("  {} {} ({})", if is_default { "►" } else { " " }, name, config_info);
+                count += 1;
+            }
+            if count == 0 {
+                println!("  (无可用设备)");
+            }
+        }
+        Err(e) => println!("获取设备列表失败: {}", e),
     }
-    let ui_result = ui::run_ui(config_path);
-    drop(ui_guard);
-    ui_result
+    Ok(())
+}
+
+fn show_log(lines: usize, follow: bool) -> Result<()> {
+    let log_path = runtime::background_log_path()?;
+    if !log_path.exists() {
+        println!("日志文件不存在: {}", log_path.display());
+        println!("提示: 先运行 `echopup start` 启动后台服务");
+        return Ok(());
+    }
+
+    if follow {
+        let status = std::process::Command::new("tail")
+            .arg("-f")
+            .arg("-n")
+            .arg(lines.to_string())
+            .arg(&log_path)
+            .status()
+            .context("执行 tail -f 失败")?;
+        if !status.success() {
+            anyhow::bail!("tail 退出码: {}", status);
+        }
+    } else {
+        let content = std::fs::read_to_string(&log_path)
+            .with_context(|| format!("读取日志失败: {}", log_path.display()))?;
+        let all_lines: Vec<&str> = content.lines().collect();
+        let start = if all_lines.len() > lines { all_lines.len() - lines } else { 0 };
+        for line in &all_lines[start..] {
+            println!("{}", line);
+        }
+    }
+    Ok(())
+}
+
+fn run_doctor(config_path: &str) -> Result<()> {
+    println!("🔍 EchoPup 系统诊断\n");
+    let mut issues = 0;
+
+    // 1. 配置文件
+    print!("[配置] ");
+    match config::Config::load(config_path) {
+        Ok(config) => {
+            println!("✅ 配置加载成功");
+            // LLM 配置
+            print!("[LLM ] ");
+            if config.is_llm_configured() {
+                println!("✅ 已配置 (provider={}, model={})", config.llm.provider, config.llm.model);
+            } else {
+                println!("⚠️  未配置（仅基础语音转文字）");
+            }
+        }
+        Err(e) => {
+            println!("❌ 加载失败: {}", e);
+            issues += 1;
+        }
+    }
+
+    // 2. 音频设备
+    print!("[音频] ");
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        match host.default_input_device() {
+            Some(device) => {
+                let name = device.name().unwrap_or_else(|_| "(未知)".to_string());
+                match device.default_input_config() {
+                    Ok(config) => println!("✅ {} ({}Hz, {}ch)", name, config.sample_rate().0, config.channels()),
+                    Err(e) => {
+                        println!("⚠️  设备 {} 无法获取配置: {}", name, e);
+                        issues += 1;
+                    }
+                }
+            }
+            None => {
+                println!("❌ 未找到音频输入设备");
+                issues += 1;
+            }
+        }
+    }
+
+    // 3. ASR 模型
+    print!("[模型] ");
+    let missing = model_download::check_missing_models();
+    if missing.is_empty() {
+        println!("✅ 所有模型文件已就绪");
+    } else {
+        println!("❌ 缺失 {} 个模型文件:", missing.len());
+        for m in &missing {
+            println!("       - {}", m);
+        }
+        issues += 1;
+    }
+
+    // 4. 运行状态
+    print!("[运行] ");
+    match runtime::running_instance_pid() {
+        Ok(Some(pid)) => println!("✅ 后台服务运行中 (pid: {})", pid),
+        Ok(None) => println!("⚠️  后台服务未运行"),
+        Err(e) => println!("⚠️  无法检查: {}", e),
+    }
+
+    println!();
+    if issues == 0 {
+        println!("✅ 所有检查通过！");
+    } else {
+        println!("⚠️  发现 {} 个问题", issues);
+    }
+
+    Ok(())
 }
 
 fn build_sherpa_paraformer_asr_engine(
@@ -1124,7 +1270,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         Some(guard) => guard,
         None => {
             println!("echopup 已在运行，不会启动新实例。");
-            println!("可使用 `echopup ui` 管理配置。");
+            println!("可使用 `echopup config` 管理配置。");
             return Ok(());
         }
     };
@@ -1854,48 +2000,5 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
 
     info!("EchoPup 已退出");
-    Ok(())
-}
-
-fn test_modules(config_path: &str) -> Result<()> {
-    println!("=== 测试各模块 ===\n");
-
-    println!("[1/4] 测试配置模块...");
-    let config = config::Config::load(config_path)?;
-    println!("  ✓ 配置加载成功");
-
-    println!("\n[2/4] 测试音频录制器...");
-    match audio::AudioRecorder::new(config.audio.sample_rate, config.audio.channels) {
-        Ok(_) => println!("  ✓ 音频录制器创建成功"),
-        Err(e) => println!("  ✗ 音频录制器创建失败: {}", e),
-    }
-
-    println!("\n[3/4] 测试当前 ASR 后端...");
-    match build_asr_engine_with_fallback(&config, false) {
-        Ok(engine) => {
-            let runtime = engine.runtime_info();
-            println!(
-                "  ✓ ASR 运行时已就绪: backend={}, model={}",
-                runtime.backend.label(),
-                runtime.model
-            );
-        }
-        Err(e) => println!("  ~ ASR: {}", e),
-    }
-
-    println!("\n[4/4] 测试文本提交后端...");
-    match commit::InsertOnlyTextCommit::new() {
-        Ok(mut backend) => {
-            println!("  ✓ 文本提交后端初始化成功");
-            println!("    - 后端: {}", backend.backend_name());
-            backend.apply(commit::CommitAction::CommitFinal {
-                text: "Test".to_string(),
-            })?;
-            println!("    - 测试文本已输入");
-        }
-        Err(e) => println!("  ✗ 文本提交后端初始化失败: {}", e),
-    }
-
-    println!("\n=== 测试完成 ===");
     Ok(())
 }

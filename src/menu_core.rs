@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::config::HotkeyTriggerMode;
 
+#[allow(dead_code)]
 pub const MENU_ITEMS: [&str; 4] = [
     "切换 LLM 开关",
     "切换文本纠错开关",
@@ -117,6 +118,7 @@ impl MenuCore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn should_quit_ui(&self) -> bool {
         self.should_quit_ui
     }
