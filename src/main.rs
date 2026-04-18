@@ -1279,15 +1279,14 @@ fn apply_runtime_menu_action(
 }
 
 fn run_voice_input(config_path: &str) -> Result<()> {
-    print_banner();
     let _instance_guard = match runtime::InstanceGuard::try_acquire()? {
         Some(guard) => guard,
         None => {
-            println!("echopup 已在运行，不会启动新实例。");
-            println!("可使用 `echopup config` 管理配置。");
+            info!("实例已在运行，本次启动退出");
             return Ok(());
         }
     };
+    print_banner();
 
     // ===== 首次运行引导 =====
     if config::Config::is_first_run(config_path) {
