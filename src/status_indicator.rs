@@ -79,7 +79,7 @@ const STATUS_ITEM_LENGTH_ACTIVE: f64 = 40.0;
 #[cfg(target_os = "macos")]
 const STATUS_ICON_SIZE: f64 = 28.0;
 #[cfg(target_os = "macos")]
-const STATUS_LOGO_VISUAL_SCALE: f64 = 2.0;
+const STATUS_LOGO_VISUAL_SCALE: f64 = 1.0;
 #[cfg(target_os = "macos")]
 const STATUS_MIC_VISUAL_SCALE: f64 = 0.92;
 #[cfg(target_os = "macos")]
@@ -1520,7 +1520,7 @@ fn apply_linux_dialog_icon(dialog: &gtk::Dialog) {
 #[cfg(target_os = "linux")]
 const LINUX_TRAY_ICON_SIZE: u32 = 96;
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_IDLE_MAX_WIDTH_RATIO: f32 = 1.36;
+const LINUX_TRAY_IDLE_MAX_WIDTH_RATIO: f32 = 0.92;
 #[cfg(target_os = "linux")]
 const LINUX_TRAY_IDLE_MAX_HEIGHT_RATIO: f32 = 0.92;
 #[cfg(target_os = "linux")]
