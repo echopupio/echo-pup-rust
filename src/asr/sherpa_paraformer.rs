@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::asr::types::{AsrBackendKind, AsrEngine, AsrRuntimeInfo, AsrSession, AsrSessionConfig};
+use crate::audio::buffer::AudioRingBuffer;
 use crate::config::SherpaParaformerConfig;
 use anyhow::{Context, Result};
 use sherpa_onnx::{
@@ -17,6 +18,7 @@ struct SherpaParaformerSession {
     recognizer: OnlineRecognizer,
     sample_rate: i32,
     full_audio: Vec<f32>,
+    partial_window: AudioRingBuffer,
     min_partial_samples: usize,
     has_pending_audio: bool,
 }
@@ -62,6 +64,7 @@ impl AsrEngine for SherpaParaformerEngine {
             recognizer: build_online_recognizer(&self.cfg)?,
             sample_rate: 16000, // Paraformer expects 16kHz
             full_audio: Vec::new(),
+            partial_window: AudioRingBuffer::with_capacity(config.max_partial_window_samples),
             min_partial_samples: config.min_partial_samples,
             has_pending_audio: false,
         }))
@@ -84,6 +87,7 @@ impl AsrSession for SherpaParaformerSession {
         }
 
         self.full_audio.extend_from_slice(audio);
+        self.partial_window.push_samples(audio);
         self.has_pending_audio = true;
         Ok(())
     }
@@ -93,12 +97,13 @@ impl AsrSession for SherpaParaformerSession {
             return Ok(None);
         }
 
-        if !self.has_pending_audio || self.full_audio.len() < self.min_partial_samples {
+        if !self.has_pending_audio || self.partial_window.len() < self.min_partial_samples {
             return Ok(None);
         }
 
+        let preview_audio = self.partial_window.snapshot();
         self.has_pending_audio = false;
-        let text = decode_audio(&self.recognizer, self.sample_rate, &self.full_audio)?;
+        let text = decode_audio(&self.recognizer, self.sample_rate, &preview_audio)?;
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(None);
