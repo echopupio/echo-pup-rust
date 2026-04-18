@@ -792,6 +792,21 @@ fn download_model_with_cli_progress(start: model_download::DownloadStart) -> Res
     }
 }
 
+fn print_banner() {
+    let ver = env!("CARGO_PKG_VERSION");
+    eprintln!(
+        r#"
+  █▀▀ █▀▀ █ █ █▀█ █▀█ █ █ █▀█"#
+    );
+    eprintln!(
+        "  █▀▀ █\x1b[38;2;255;200;0m⡄\x1b[38;2;60;120;255m⡆\x1b[0m █▀█ █ █ █▀▀ █ █ █▀▀"
+    );
+    eprintln!(
+        "  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀ ▀   ▀▀▀ ▀\x1b[38;2;255;200;0m⡀\x1b[38;2;60;120;255m⡇\x1b[38;2;0;200;100m⡆\x1b[38;2;160;50;200m⡄\x1b[0m"
+    );
+    eprintln!("  🎙  AI Voice Dictation  v{}\n", ver);
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -799,8 +814,6 @@ fn main() -> anyhow::Result<()> {
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
-
-    info!("EchoPup 启动中...");
 
     let cli = Cli::parse();
 
@@ -826,6 +839,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn start_background_mode(config_path: &str) -> Result<()> {
+    print_banner();
     let config = config::Config::load(config_path)?;
 
     if runtime::is_running()? {
@@ -1266,6 +1280,7 @@ fn apply_runtime_menu_action(
 }
 
 fn run_voice_input(config_path: &str) -> Result<()> {
+    print_banner();
     let _instance_guard = match runtime::InstanceGuard::try_acquire()? {
         Some(guard) => guard,
         None => {
