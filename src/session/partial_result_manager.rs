@@ -37,19 +37,19 @@ impl Default for PartialResultManager {
     }
 }
 
-/// 频谱跳动帧（3 条竖线，高低交替）
+/// 频谱跳动帧（2 个 braille 字符，半角宽度，更窄更精致）
 const SPINNER_FRAMES: &[&str] = &[
-    "▃▅▂",
-    "▅▂▆",
-    "▂▆▃",
-    "▆▃▅",
-    "▃▆▂",
-    "▅▃▆",
+    "⡀⠄",
+    "⠆⡀",
+    "⡆⠒",
+    "⠒⡆",
+    "⠄⡀",
+    "⡀⠆",
 ];
 /// 每个 spinner 帧的字符数（所有帧等长）
 #[cfg(test)]
-const SPINNER_CHAR_COUNT: usize = 3;
-const TAIL_CHAR_COUNT: usize = 4;
+const SPINNER_CHAR_COUNT: usize = 2;
+const TAIL_CHAR_COUNT: usize = 5;
 
 impl PartialResultManager {
     pub fn clear(&mut self) {
@@ -221,7 +221,7 @@ mod tests {
         match action {
             CommitAction::UpdateDraft { new_text, delete_chars, .. } => {
                 assert_eq!(delete_chars, 0);
-                // spinner(3) + 4 tail chars = 7
+                // spinner(2) + 4 chars (text shorter than TAIL=5) = 6
                 assert_eq!(new_text.chars().count(), SPINNER_CHAR_COUNT + 4);
                 assert!(new_text.ends_with("你好世界"));
             }
@@ -237,7 +237,6 @@ mod tests {
         match action {
             CommitAction::UpdateDraft { new_text, delete_chars, .. } => {
                 assert_eq!(delete_chars, 0);
-                // spinner(3) + 2 chars = 5
                 assert_eq!(new_text.chars().count(), SPINNER_CHAR_COUNT + 2);
                 assert!(new_text.ends_with("你好"));
             }
@@ -249,13 +248,14 @@ mod tests {
     #[test]
     fn draft_update_replaces_with_new_tail() {
         let mut manager = PartialResultManager::default();
-        manager.prepare_draft_commit("你好世界");
+        manager.prepare_draft_commit("你好世界真美丽");
+        // text has 7 chars, tail=5 → first display: spinner(2) + "世界真美丽"(5) = 7
         let action = manager.prepare_draft_commit("今天天气很好我们").unwrap();
         match action {
             CommitAction::UpdateDraft { new_text, delete_chars, .. } => {
-                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 4); // 退格之前的
-                assert_eq!(new_text.chars().count(), SPINNER_CHAR_COUNT + 4);
-                assert!(new_text.ends_with("好我们")); // 最后4字: 很好我们
+                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 5);
+                assert_eq!(new_text.chars().count(), SPINNER_CHAR_COUNT + 5);
+                assert!(new_text.ends_with("很好我们")); // 最后5字: 气很好我们
             }
             _ => panic!("expected UpdateDraft"),
         }
@@ -264,11 +264,11 @@ mod tests {
     #[test]
     fn draft_clear_removes_displayed() {
         let mut manager = PartialResultManager::default();
-        manager.prepare_draft_commit("你好世界");
+        manager.prepare_draft_commit("你好世界真美丽");
         let action = manager.prepare_draft_clear().unwrap();
         match action {
             CommitAction::ClearDraft { delete_chars } => {
-                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 4);
+                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 5);
             }
             _ => panic!("expected ClearDraft"),
         }
@@ -284,13 +284,13 @@ mod tests {
     #[test]
     fn tick_rotates_spinner() {
         let mut manager = PartialResultManager::default();
-        manager.prepare_draft_commit("你好世界");
+        manager.prepare_draft_commit("你好世界真美丽");
         let action = manager.tick_stability(false).unwrap();
         match action {
             CommitAction::UpdateDraft { new_text, delete_chars, .. } => {
-                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 4);
-                assert_eq!(new_text.chars().count(), SPINNER_CHAR_COUNT + 4);
-                assert!(new_text.ends_with("你好世界"));
+                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 5);
+                assert_eq!(new_text.chars().count(), SPINNER_CHAR_COUNT + 5);
+                assert!(new_text.ends_with("世界真美丽"));
             }
             _ => panic!("expected UpdateDraft"),
         }
@@ -313,13 +313,13 @@ mod tests {
     fn final_from_draft_replaces_all() {
         let mut manager = PartialResultManager::default();
         manager.prepare_draft_commit("今天天气很好我们去公园");
-        // displayed = SPINNER_CHAR_COUNT + 4
+        // displayed = SPINNER_CHAR_COUNT + 5
         let action = manager
             .prepare_final_from_draft("今天天气很好，我们去公园。")
             .unwrap();
         match action {
             CommitAction::CommitFinalFromDraft { new_text, delete_chars } => {
-                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 4);
+                assert_eq!(delete_chars, SPINNER_CHAR_COUNT + 5);
                 assert_eq!(new_text, "今天天气很好，我们去公园。");
             }
             _ => panic!("expected CommitFinalFromDraft"),
