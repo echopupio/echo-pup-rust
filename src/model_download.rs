@@ -1109,7 +1109,11 @@ fn download_punctuation_model_files(
     let model_path = model_dir.join("model.onnx");
 
     // Check if already exists
-    if model_path.exists() && fs::metadata(&model_path).map(|m| m.len() > 0).unwrap_or(false) {
+    if model_path.exists()
+        && fs::metadata(&model_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         let _ = tx.send(DownloadEvent::Log("[skip] 标点模型已存在".to_string()));
         let _ = tx.send(DownloadEvent::Finished);
         return Ok(());
@@ -1176,7 +1180,11 @@ pub fn check_missing_models() -> Vec<&'static str> {
     }
 
     let punct_path = punctuation_model_path();
-    if !punct_path.exists() || fs::metadata(&punct_path).map(|m| m.len() == 0).unwrap_or(true) {
+    if !punct_path.exists()
+        || fs::metadata(&punct_path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true)
+    {
         missing.push("标点恢复模型");
     }
 

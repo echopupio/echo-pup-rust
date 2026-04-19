@@ -14,10 +14,16 @@ use std::process::Command;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info};
 
 const MAX_HOTKEY_KEYS: usize = 3;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const LOW_LEVEL_PENDING_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+// X11 会把长按功能键自动重复成一串 release/press 对，而且不同桌面的重复间隔
+// 波动很大。这里要求有一段稳定静默期后，才把 release 当成真正松手。
+const FUNCTION_KEY_RELEASE_GRACE: Duration = Duration::from_millis(180);
 
 /// 热键事件类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -58,6 +64,7 @@ struct LowLevelListenerRuntime {
     callbacks: LowLevelCallbacks,
     pressed: bool,
     pressed_count: u8,
+    pending_release_deadline: Option<Instant>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -68,6 +75,7 @@ impl Default for LowLevelListenerRuntime {
             callbacks: LowLevelCallbacks::default(),
             pressed: false,
             pressed_count: 0,
+            pending_release_deadline: None,
         }
     }
 }
@@ -341,6 +349,7 @@ impl HotkeyListener {
             runtime.target = LowLevelTarget::Inactive;
             runtime.pressed = false;
             runtime.pressed_count = 0;
+            runtime.pending_release_deadline = None;
         }
         *self.is_pressed.lock() = false;
     }
@@ -360,6 +369,7 @@ impl HotkeyListener {
             runtime.target = target;
             runtime.pressed = false;
             runtime.pressed_count = 0;
+            runtime.pending_release_deadline = None;
             runtime.callbacks.event_callback = self.callback.clone();
             runtime.callbacks.press_callback = self.press_callback.clone();
             runtime.callbacks.release_callback = self.release_callback.clone();
@@ -380,7 +390,57 @@ impl HotkeyListener {
                 error!("低层热键监听失败: {:?}", err);
             }
         });
+
+        let runtime = self.low_level_runtime.clone();
+        let is_pressed = self.is_pressed.clone();
+        thread::spawn(move || loop {
+            dispatch_pending_low_level_release(&runtime, &is_pressed);
+            thread::sleep(LOW_LEVEL_PENDING_RELEASE_POLL_INTERVAL);
+        });
         self.low_level_listener_started = true;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn dispatch_pending_low_level_release(
+    runtime: &Arc<Mutex<LowLevelListenerRuntime>>,
+    is_pressed: &Arc<Mutex<bool>>,
+) {
+    let callbacks = {
+        let mut runtime = runtime.lock();
+        let Some(deadline) = runtime.pending_release_deadline else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        runtime.pending_release_deadline = None;
+        if !runtime.pressed {
+            return;
+        }
+        runtime.pressed = false;
+        runtime.callbacks.clone()
+    };
+
+    *is_pressed.lock() = false;
+    if let Some(ref cb) = callbacks.event_callback {
+        cb(HotkeyEvent::Released);
+    }
+    if let Some(ref cb) = callbacks.release_callback {
+        cb();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn should_defer_release(target: LowLevelTarget) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(target, LowLevelTarget::FunctionKey(_))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = target;
+        false
     }
 }
 
@@ -431,7 +491,17 @@ fn handle_low_level_event(
             },
             LowLevelTarget::FunctionKey(target_key) => match event_type {
                 EventType::KeyPress(key) if key == target_key => {
-                    if !runtime.pressed {
+                    let suppressed_repeat = runtime.pending_release_deadline.take().is_some();
+                    debug!(
+                        "FunctionKey KeyPress: key={:?}, pressed={} suppressed_repeat={}",
+                        key, runtime.pressed, suppressed_repeat
+                    );
+                    if suppressed_repeat {
+                        debug!(
+                            "忽略 X11 自动重复产生的功能键伪 press/release 对: {:?}",
+                            key
+                        );
+                    } else if !runtime.pressed {
                         runtime.pressed = true;
                         callbacks = runtime.callbacks.clone();
                         fired_event = Some(HotkeyEvent::Pressed);
@@ -439,7 +509,19 @@ fn handle_low_level_event(
                     }
                 }
                 EventType::KeyRelease(key) if key == target_key => {
-                    if runtime.pressed {
+                    debug!(
+                        "FunctionKey KeyRelease: key={:?}, pressed={}, pending_release={}",
+                        key,
+                        runtime.pressed,
+                        runtime.pending_release_deadline.is_some()
+                    );
+                    if !runtime.pressed {
+                        return;
+                    }
+                    if should_defer_release(runtime.target) {
+                        runtime.pending_release_deadline =
+                            Some(Instant::now() + FUNCTION_KEY_RELEASE_GRACE);
+                    } else {
                         runtime.pressed = false;
                         callbacks = runtime.callbacks.clone();
                         fired_event = Some(HotkeyEvent::Released);
@@ -735,7 +817,8 @@ mod tests {
     use super::parse_macos_fn_state_output;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::{
-        handle_low_level_event, LowLevelCallbacks, LowLevelListenerRuntime, LowLevelTarget,
+        dispatch_pending_low_level_release, handle_low_level_event, LowLevelCallbacks,
+        LowLevelListenerRuntime, LowLevelTarget, FUNCTION_KEY_RELEASE_GRACE,
     };
     use super::{is_right_ctrl_alias, validate_hotkey_config_for_session};
     use global_hotkey::hotkey::HotKey;
@@ -750,6 +833,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::sync::Arc;
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
 
     #[test]
     fn test_right_ctrl_aliases() {
@@ -860,6 +945,7 @@ mod tests {
             },
             pressed: false,
             pressed_count: 0,
+            pending_release_deadline: None,
         }));
         let is_pressed = Arc::new(Mutex::new(false));
 
@@ -891,8 +977,133 @@ mod tests {
         assert!(*is_pressed.lock());
 
         handle_low_level_event(&runtime, &is_pressed, EventType::KeyRelease(Key::F1));
+        #[cfg(target_os = "linux")]
+        {
+            std::thread::sleep(FUNCTION_KEY_RELEASE_GRACE + Duration::from_millis(20));
+            dispatch_pending_low_level_release(&runtime, &is_pressed);
+        }
         assert_eq!(release_count.load(Ordering::SeqCst), 2);
         assert!(!*is_pressed.lock());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_function_key_autorepeat_release_press_pair_is_suppressed() {
+        let press_count = Arc::new(AtomicUsize::new(0));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let press_counter = press_count.clone();
+        let release_counter = release_count.clone();
+
+        let runtime = Arc::new(Mutex::new(LowLevelListenerRuntime {
+            target: LowLevelTarget::FunctionKey(Key::F6),
+            callbacks: LowLevelCallbacks {
+                event_callback: None,
+                press_callback: Some(Arc::new(move || {
+                    press_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+                release_callback: Some(Arc::new(move || {
+                    release_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+            },
+            pressed: false,
+            pressed_count: 0,
+            pending_release_deadline: None,
+        }));
+        let is_pressed = Arc::new(Mutex::new(false));
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::F6));
+        assert_eq!(press_count.load(Ordering::SeqCst), 1);
+        assert!(*is_pressed.lock());
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyRelease(Key::F6));
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        assert!(*is_pressed.lock());
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::F6));
+        assert_eq!(press_count.load(Ordering::SeqCst), 1);
+        assert!(*is_pressed.lock());
+
+        std::thread::sleep(FUNCTION_KEY_RELEASE_GRACE + Duration::from_millis(20));
+        dispatch_pending_low_level_release(&runtime, &is_pressed);
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        assert!(*is_pressed.lock());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_function_key_release_fires_after_grace_window() {
+        let press_count = Arc::new(AtomicUsize::new(0));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let press_counter = press_count.clone();
+        let release_counter = release_count.clone();
+
+        let runtime = Arc::new(Mutex::new(LowLevelListenerRuntime {
+            target: LowLevelTarget::FunctionKey(Key::F6),
+            callbacks: LowLevelCallbacks {
+                event_callback: None,
+                press_callback: Some(Arc::new(move || {
+                    press_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+                release_callback: Some(Arc::new(move || {
+                    release_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+            },
+            pressed: false,
+            pressed_count: 0,
+            pending_release_deadline: None,
+        }));
+        let is_pressed = Arc::new(Mutex::new(false));
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::F6));
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyRelease(Key::F6));
+        assert_eq!(press_count.load(Ordering::SeqCst), 1);
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        assert!(*is_pressed.lock());
+
+        std::thread::sleep(FUNCTION_KEY_RELEASE_GRACE + Duration::from_millis(20));
+        dispatch_pending_low_level_release(&runtime, &is_pressed);
+        assert_eq!(release_count.load(Ordering::SeqCst), 1);
+        assert!(!*is_pressed.lock());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_function_key_slow_autorepeat_gap_is_still_suppressed() {
+        let press_count = Arc::new(AtomicUsize::new(0));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let press_counter = press_count.clone();
+        let release_counter = release_count.clone();
+
+        let runtime = Arc::new(Mutex::new(LowLevelListenerRuntime {
+            target: LowLevelTarget::FunctionKey(Key::F6),
+            callbacks: LowLevelCallbacks {
+                event_callback: None,
+                press_callback: Some(Arc::new(move || {
+                    press_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+                release_callback: Some(Arc::new(move || {
+                    release_counter.fetch_add(1, Ordering::SeqCst);
+                })),
+            },
+            pressed: false,
+            pressed_count: 0,
+            pending_release_deadline: None,
+        }));
+        let is_pressed = Arc::new(Mutex::new(false));
+
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::F6));
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyRelease(Key::F6));
+        std::thread::sleep(Duration::from_millis(80));
+        handle_low_level_event(&runtime, &is_pressed, EventType::KeyPress(Key::F6));
+
+        assert_eq!(press_count.load(Ordering::SeqCst), 1);
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        assert!(*is_pressed.lock());
+
+        std::thread::sleep(FUNCTION_KEY_RELEASE_GRACE + Duration::from_millis(20));
+        dispatch_pending_low_level_release(&runtime, &is_pressed);
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        assert!(*is_pressed.lock());
     }
 
     #[cfg(target_os = "linux")]

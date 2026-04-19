@@ -6,6 +6,7 @@ mod commit;
 mod config;
 mod hotkey;
 mod input;
+mod linux_desktop;
 mod llm;
 mod menu_core;
 mod model_download;
@@ -14,6 +15,7 @@ mod runtime;
 mod session;
 mod status_indicator;
 mod text_processor;
+mod trigger;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "macos")]
 const MAC_OSASCRIPT_PATH: &str = "/usr/bin/osascript";
@@ -75,8 +77,20 @@ enum Commands {
     /// 显示版本信息
     Version,
     DownloadModel,
+    /// 发送外部触发动作（主要用于 Linux/Wayland 桌面快捷键绑定）
+    Trigger {
+        #[command(subcommand)]
+        action: TriggerCommands,
+    },
     #[command(hide = true)]
     StatusIndicator,
+}
+
+#[derive(Subcommand, Clone, Copy, Debug)]
+enum TriggerCommands {
+    Press,
+    Release,
+    Toggle,
 }
 
 #[derive(Subcommand)]
@@ -800,17 +814,206 @@ fn print_banner() {
     eprintln!(
         "  █▀▀ █\x1b[38;2;255;200;0m⣤\x1b[38;2;0;200;100m⣿\x1b[0m █▀█ █ █ \x1b[38;2;255;200;0m⣀\x1b[38;2;0;200;100m⣿\x1b[38;2;160;50;200m⣤\x1b[38;2;60;120;255m⣶\x1b[0m █▀▀ █ █ █▀▀"
     );
-    eprintln!(
-        "  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀      ▀   ▀▀▀ ▀"
-    );
+    eprintln!("  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀      ▀   ▀▀▀ ▀");
     eprintln!("  🎙  AI Voice Dictation  v{}\n", ver);
+}
+
+fn status_indicator_surface_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS 菜单栏"
+    } else if cfg!(target_os = "linux") {
+        "Linux 托盘"
+    } else {
+        "状态栏"
+    }
+}
+
+fn default_trigger_key() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "ctrl"
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        "f6"
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "ctrl"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_wayland_session() -> bool {
+    std::env::var("XDG_SESSION_TYPE")
+        .map(|v| v.eq_ignore_ascii_case("wayland"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_wayland_session() -> bool {
+    false
+}
+
+fn uses_external_trigger_backend() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        is_wayland_session()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+fn trigger_backend_description() -> String {
+    if uses_external_trigger_backend() {
+        format!(
+            "外部触发 (CLI/IPC，建议桌面快捷键 {} -> `echopup trigger toggle`)",
+            default_trigger_key().to_uppercase()
+        )
+    } else {
+        format!("应用内热键 ({})", default_trigger_key())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn internal_hotkey_conflict_warning() -> Option<String> {
+    if uses_external_trigger_backend() {
+        return None;
+    }
+
+    let binding = default_trigger_key().to_uppercase();
+    match linux_desktop::find_echopup_shortcut_conflict(&binding) {
+        Ok(Some(conflict)) => Some(format!(
+            "检测到 GNOME 自定义快捷键 {} -> {}，当前 X11 会话已使用应用内热键；请删除或改键该桌面快捷键以避免重复触发",
+            conflict.binding,
+            conflict
+                .name
+                .as_deref()
+                .unwrap_or("echopup trigger toggle")
+        )),
+        Ok(None) => None,
+        Err(err) => {
+            debug!("检查 GNOME 自定义快捷键冲突失败: {}", err);
+            None
+        }
+    }
+}
+
+fn shell_escape_arg(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+
+    if !input.contains([' ', '\t', '\n', '\'', '"', '\\']) {
+        return input.to_string();
+    }
+
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_wayland_trigger_command(config_path: &str) -> Result<String> {
+    let exe = std::env::current_exe().context("获取当前可执行文件路径失败")?;
+    Ok(format!(
+        "{} --config {} trigger toggle",
+        shell_escape_arg(&exe.display().to_string()),
+        shell_escape_arg(config_path)
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_wayland_trigger_command(_config_path: &str) -> Result<String> {
+    anyhow::bail!("仅 Linux 支持 Wayland 外部触发命令");
+}
+
+fn maybe_setup_linux_wayland_shortcut(config_path: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let command_line = linux_wayland_trigger_command(config_path)?;
+        match linux_desktop::maybe_install_gnome_wayland_shortcut(
+            &command_line,
+            &default_trigger_key().to_uppercase(),
+        )? {
+            linux_desktop::ShortcutInstallResult::Installed => {
+                println!(
+                    "检测到 GNOME Wayland，已自动创建系统快捷键: {} -> EchoPup 切换录音",
+                    default_trigger_key().to_uppercase()
+                );
+                println!("对应命令: {}", command_line);
+                println!("说明: 该快捷键通过 `echopup trigger toggle` 触发后台服务。");
+            }
+            linux_desktop::ShortcutInstallResult::AlreadyInstalled { .. }
+            | linux_desktop::ShortcutInstallResult::UnsupportedEnvironment => {}
+            linux_desktop::ShortcutInstallResult::BindingConflict {
+                binding,
+                shortcut_name,
+            } => {
+                println!(
+                    "检测到 GNOME Wayland，但 {} 已被现有快捷键{}占用，未自动覆盖。",
+                    binding,
+                    shortcut_name
+                        .as_deref()
+                        .map(|name| format!(" `{}`", name))
+                        .unwrap_or_default()
+                );
+                println!("请手动将以下命令绑定到其他按键: {}", command_line);
+            }
+            linux_desktop::ShortcutInstallResult::GsettingsUnavailable => {
+                println!(
+                    "检测到 Linux Wayland，但当前无法通过 gsettings 自动写入 GNOME 自定义快捷键。"
+                );
+                println!(
+                    "请手动将以下命令绑定到系统快捷键 {}: {}",
+                    default_trigger_key().to_uppercase(),
+                    command_line
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_background_launch_supported() -> Result<()> {
+    if uses_external_trigger_backend() {
+        return Ok(());
+    }
+
+    hotkey::listener::validate_hotkey_config(default_trigger_key())
+        .context("当前环境无法启动 EchoPup 后台服务")?;
+    Ok(())
+}
+
+fn ensure_background_started(pid: u32, log_path: &std::path::Path) -> Result<()> {
+    runtime::wait_for_background_start(pid).map_err(|err| {
+        let recent_log = runtime::read_recent_background_log(20).unwrap_or_default();
+        if recent_log.trim().is_empty() {
+            anyhow::anyhow!(
+                "后台服务启动失败: {}\n日志文件: {}",
+                err,
+                log_path.display()
+            )
+        } else {
+            anyhow::anyhow!(
+                "后台服务启动失败: {}\n日志文件: {}\n最近日志:\n{}",
+                err,
+                log_path.display(),
+                recent_log
+            )
+        }
+    })
 }
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+                .add_directive(tracing::Level::DEBUG.into()),
         )
         .init();
 
@@ -829,6 +1032,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Version) => {
             println!("echopup {}", env!("CARGO_PKG_VERSION"));
         }
+        Some(Commands::Trigger { action }) => handle_trigger_command(&cli.config, action)?,
         Some(Commands::StatusIndicator) => status_indicator::run_status_indicator_process()?,
         Some(Commands::DownloadModel) => download_paraformer_model_cli()?,
         None => start_background_mode(&cli.config)?,
@@ -851,14 +1055,45 @@ fn start_background_mode(config_path: &str) -> Result<()> {
         return Ok(());
     }
 
+    ensure_background_launch_supported()?;
+    maybe_setup_linux_wayland_shortcut(config_path)?;
     let pid = runtime::spawn_background(config_path)?;
     let log_path = runtime::background_log_path()?;
+    ensure_background_started(pid, &log_path)?;
     println!("echopup 已在后台启动 (pid: {})", pid);
     println!("日志文件: {}", log_path.display());
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
 
     println!("可使用 `echopup config` 管理配置。");
     Ok(())
+}
+
+fn handle_trigger_command(_config_path: &str, action: TriggerCommands) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if !uses_external_trigger_backend() {
+            return Ok(());
+        }
+
+        if runtime::running_instance_pid()?.is_none() {
+            anyhow::bail!("后台服务未运行，请先执行 `echopup start`");
+        }
+
+        let trigger_action = match action {
+            TriggerCommands::Press => trigger::ExternalTriggerAction::Press,
+            TriggerCommands::Release => trigger::ExternalTriggerAction::Release,
+            TriggerCommands::Toggle => trigger::ExternalTriggerAction::Toggle,
+        };
+        let socket_path = runtime::trigger_socket_path()?;
+        trigger::send_action(&socket_path, trigger_action)?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = action;
+        anyhow::bail!("`echopup trigger` 当前仅用于 Linux 外部快捷键集成");
+    }
 }
 
 fn stop_background_mode() -> Result<()> {
@@ -884,6 +1119,7 @@ fn show_background_status() -> Result<()> {
 
 fn restart_background_mode(config_path: &str) -> Result<()> {
     let config = config::Config::load(config_path)?;
+    ensure_background_launch_supported()?;
 
     if let Some(pid) = runtime::stop_running_instance()? {
         println!("已停止旧实例 (pid: {})", pid);
@@ -891,6 +1127,7 @@ fn restart_background_mode(config_path: &str) -> Result<()> {
 
     let pid = runtime::spawn_background(config_path)?;
     let log_path = runtime::background_log_path()?;
+    ensure_background_started(pid, &log_path)?;
     println!("echopup 已重启并在后台运行 (pid: {})", pid);
     println!("日志文件: {}", log_path.display());
     print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
@@ -899,7 +1136,10 @@ fn restart_background_mode(config_path: &str) -> Result<()> {
 }
 
 fn handle_config_command(config_path: &str, command: Option<ConfigCommands>) -> Result<()> {
-    let resolved = config_path.replace("~", &dirs::home_dir().unwrap_or_default().display().to_string());
+    let resolved = config_path.replace(
+        "~",
+        &dirs::home_dir().unwrap_or_default().display().to_string(),
+    );
     match command.unwrap_or(ConfigCommands::Show) {
         ConfigCommands::Show => {
             let config = config::Config::load(config_path)?;
@@ -915,7 +1155,11 @@ fn handle_config_command(config_path: &str, command: Option<ConfigCommands>) -> 
         }
         ConfigCommands::Edit => {
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-                if cfg!(target_os = "macos") { "open -e".to_string() } else { "vi".to_string() }
+                if cfg!(target_os = "macos") {
+                    "open -e".to_string()
+                } else {
+                    "vi".to_string()
+                }
             });
             let path = std::path::Path::new(&resolved);
             if !path.exists() {
@@ -941,7 +1185,10 @@ fn list_audio_devices() -> Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let default_device = host.default_input_device();
-    let default_name = default_device.as_ref().and_then(|d| d.name().ok()).unwrap_or_default();
+    let default_name = default_device
+        .as_ref()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
 
     println!("可用音频输入设备：\n");
     match host.input_devices() {
@@ -950,10 +1197,23 @@ fn list_audio_devices() -> Result<()> {
             for device in devices {
                 let name = device.name().unwrap_or_else(|_| "(未知)".to_string());
                 let is_default = name == default_name;
-                let config_info = device.default_input_config()
-                    .map(|c| format!("{}Hz, {}ch, {:?}", c.sample_rate().0, c.channels(), c.sample_format()))
+                let config_info = device
+                    .default_input_config()
+                    .map(|c| {
+                        format!(
+                            "{}Hz, {}ch, {:?}",
+                            c.sample_rate().0,
+                            c.channels(),
+                            c.sample_format()
+                        )
+                    })
                     .unwrap_or_else(|_| "无法获取配置".to_string());
-                println!("  {} {} ({})", if is_default { "►" } else { " " }, name, config_info);
+                println!(
+                    "  {} {} ({})",
+                    if is_default { "►" } else { " " },
+                    name,
+                    config_info
+                );
                 count += 1;
             }
             if count == 0 {
@@ -988,7 +1248,11 @@ fn show_log(lines: usize, follow: bool) -> Result<()> {
         let content = std::fs::read_to_string(&log_path)
             .with_context(|| format!("读取日志失败: {}", log_path.display()))?;
         let all_lines: Vec<&str> = content.lines().collect();
-        let start = if all_lines.len() > lines { all_lines.len() - lines } else { 0 };
+        let start = if all_lines.len() > lines {
+            all_lines.len() - lines
+        } else {
+            0
+        };
         for line in &all_lines[start..] {
             println!("{}", line);
         }
@@ -999,6 +1263,7 @@ fn show_log(lines: usize, follow: bool) -> Result<()> {
 fn run_doctor(config_path: &str) -> Result<()> {
     println!("🔍 EchoPup 系统诊断\n");
     let mut issues = 0;
+    let mut warnings = 0;
 
     // 1. 配置文件
     print!("[配置] ");
@@ -1008,9 +1273,13 @@ fn run_doctor(config_path: &str) -> Result<()> {
             // LLM 配置
             print!("[LLM ] ");
             if config.is_llm_configured() {
-                println!("✅ 已配置 (provider={}, model={})", config.llm.provider, config.llm.model);
+                println!(
+                    "✅ 已配置 (provider={}, model={})",
+                    config.llm.provider, config.llm.model
+                );
             } else {
                 println!("⚠️  未配置（仅基础语音转文字）");
+                warnings += 1;
             }
         }
         Err(e) => {
@@ -1028,7 +1297,12 @@ fn run_doctor(config_path: &str) -> Result<()> {
             Some(device) => {
                 let name = device.name().unwrap_or_else(|_| "(未知)".to_string());
                 match device.default_input_config() {
-                    Ok(config) => println!("✅ {} ({}Hz, {}ch)", name, config.sample_rate().0, config.channels()),
+                    Ok(config) => println!(
+                        "✅ {} ({}Hz, {}ch)",
+                        name,
+                        config.sample_rate().0,
+                        config.channels()
+                    ),
                     Err(e) => {
                         println!("⚠️  设备 {} 无法获取配置: {}", name, e);
                         issues += 1;
@@ -1055,19 +1329,73 @@ fn run_doctor(config_path: &str) -> Result<()> {
         issues += 1;
     }
 
-    // 4. 运行状态
+    // 4. Linux 会话 / 热键约束
+    #[cfg(target_os = "linux")]
+    {
+        print!("[会话] ");
+        let session_type =
+            std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string());
+        if session_type.eq_ignore_ascii_case("wayland") {
+            println!(
+                "✅ {}（使用外部触发 backend，建议将桌面快捷键 {} 绑定到 `echopup trigger toggle`）",
+                session_type,
+                default_trigger_key().to_uppercase()
+            );
+
+            print!("[输入] ");
+            match (
+                input::keyboard::preferred_linux_command_backend_label(),
+                input::keyboard::preferred_linux_command_backend_note(),
+            ) {
+                (Some("eitype"), Some(note)) => {
+                    println!("✅ Wayland 文本输入将优先使用 eitype（{}）", note);
+                }
+                (Some(backend), Some(note)) => {
+                    println!("⚠️  Wayland 文本输入将优先使用 {}（{}）", backend, note);
+                    warnings += 1;
+                }
+                (Some(backend), None) => {
+                    println!("✅ Wayland 文本输入将优先使用 {}", backend);
+                }
+                (None, _) => {
+                    println!("⚠️  未检测到 eitype/wtype/xdotool；Wayland 下文本输入可能失败");
+                    warnings += 1;
+                }
+            }
+        } else {
+            println!("✅ {}", session_type);
+
+            if let Some(warning) = internal_hotkey_conflict_warning() {
+                print!("[热键] ");
+                println!("⚠️  {}", warning);
+                warnings += 1;
+            }
+        }
+    }
+
+    // 5. 运行状态
     print!("[运行] ");
     match runtime::running_instance_pid() {
         Ok(Some(pid)) => println!("✅ 后台服务运行中 (pid: {})", pid),
-        Ok(None) => println!("⚠️  后台服务未运行"),
-        Err(e) => println!("⚠️  无法检查: {}", e),
+        Ok(None) => {
+            println!("⚠️  后台服务未运行");
+            warnings += 1;
+        }
+        Err(e) => {
+            println!("⚠️  无法检查: {}", e);
+            warnings += 1;
+        }
     }
 
     println!();
-    if issues == 0 {
+    if issues == 0 && warnings == 0 {
         println!("✅ 所有检查通过！");
-    } else {
+    } else if issues == 0 {
+        println!("⚠️  核心环境可用，但有 {} 个注意项", warnings);
+    } else if warnings == 0 {
         println!("⚠️  发现 {} 个问题", issues);
+    } else {
+        println!("⚠️  发现 {} 个问题，{} 个注意项", issues, warnings);
     }
 
     Ok(())
@@ -1200,7 +1528,7 @@ fn build_llm_runtime(llm_cfg: &config::config::LLMConfig) -> Option<llm::LLMRewr
 fn apply_runtime_menu_action(
     action: &menu_core::MenuAction,
     snapshot: &menu_core::MenuSnapshot,
-    hotkey_listener: &mut hotkey::HotkeyListener,
+    hotkey_listener: Option<&mut hotkey::HotkeyListener>,
     hotkey_trigger_mode_runtime: &Arc<Mutex<config::HotkeyTriggerMode>>,
     asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
     preview_asr_runtime: &Arc<Mutex<Option<Box<dyn asr::AsrEngine>>>>,
@@ -1243,8 +1571,12 @@ fn apply_runtime_menu_action(
         menu_core::MenuAction::ReloadConfig => {
             let cfg = config::Config::load(&snapshot.config_path)?;
 
-            hotkey_listener.set_hotkey("ctrl")?;
-            hotkey_listener.start()?;
+            if let Some(hotkey_listener) = hotkey_listener {
+                hotkey_listener.set_hotkey(default_trigger_key())?;
+                hotkey_listener.start()?;
+            } else if uses_external_trigger_backend() {
+                info!("当前会话使用外部触发 backend，跳过应用内热键重载");
+            }
             *hotkey_trigger_mode_runtime.lock() = cfg.hotkey.trigger_mode;
 
             match build_asr_engine_with_fallback(&cfg, false) {
@@ -1364,20 +1696,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         guard.is_enabled()
     };
     if status_indicator_enabled {
-        let indicator_surface = if cfg!(target_os = "macos") {
-            "macOS 菜单栏"
-        } else if cfg!(target_os = "linux") {
-            "Linux 托盘"
-        } else {
-            "状态栏"
-        };
-        info!("状态栏反馈已启用: {}", indicator_surface);
+        info!("状态栏反馈已启用: {}", status_indicator_surface_name());
         set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
         let snapshot = menu_snapshot_state.lock().clone();
         let mut guard = status_indicator.lock();
         guard.send_snapshot(&snapshot);
     } else if config.feedback.status_bar_enabled {
-        warn!("状态栏反馈未启用（macOS 菜单栏子进程未启动）");
+        warn!(
+            "状态栏反馈未启用（{} 子进程未启动）",
+            status_indicator_surface_name()
+        );
     } else {
         info!("状态栏反馈已关闭（feedback.status_bar_enabled=false）");
     }
@@ -1449,15 +1777,16 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         info!("谐音纠错未启用");
     }
 
-    let punct_restorer: Arc<Mutex<Option<punctuation::PunctuationRestorer>>> = Arc::new(
-        Mutex::new(match punctuation::PunctuationRestorer::new(&config.punctuation) {
-            Ok(restorer) => restorer,
-            Err(e) => {
-                warn!("离线标点恢复初始化失败: {}，继续运行", e);
-                None
-            }
-        }),
-    );
+    let punct_restorer: Arc<Mutex<Option<punctuation::PunctuationRestorer>>> =
+        Arc::new(Mutex::new(
+            match punctuation::PunctuationRestorer::new(&config.punctuation) {
+                Ok(restorer) => restorer,
+                Err(e) => {
+                    warn!("离线标点恢复初始化失败: {}，继续运行", e);
+                    None
+                }
+            },
+        ));
 
     let text_commit = Arc::new(Mutex::new(
         Box::new(commit::InsertOnlyTextCommit::new().map_err(|e| {
@@ -1472,6 +1801,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             commit_guard.backend_name(),
             commit_guard.supports_draft_replacement()
         );
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(note) = input::keyboard::preferred_linux_command_backend_note() {
+        info!("Linux 文本输入提示: {}", note);
     }
 
     let (desktop_notify_enabled, notify_desc) = detect_desktop_notify_capability();
@@ -1532,9 +1865,15 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         sequence: u64,
         started_by_hold_on_current_press: bool,
     }
+    #[derive(Default)]
+    struct ExternalToggleBurstState {
+        sequence: u64,
+    }
     let hold_to_record_duration = Duration::from_secs(1);
     let stop_press_debounce_window = Duration::from_millis(500);
+    let external_toggle_burst_gap = Duration::from_millis(250);
     let hotkey_press_state = Arc::new(Mutex::new(HotkeyPressState::default()));
+    let external_toggle_burst_state = Arc::new(Mutex::new(ExternalToggleBurstState::default()));
     let stop_debounce_until = Arc::new(Mutex::new(None::<Instant>));
     let hotkey_trigger_mode = Arc::new(Mutex::new(config.hotkey.trigger_mode));
 
@@ -1553,6 +1892,10 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let recognition_session_on_start = recognition_session.clone();
     let text_commit_on_start = text_commit.clone();
     let start_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        info!(
+            "start_recording_action 被调用, is_recording_start={}",
+            is_recording_start.load(Ordering::SeqCst)
+        );
         if !is_recording_start.load(Ordering::SeqCst) {
             clear_terminal_artifacts_if_tty();
             recording_animation_start.store(true, Ordering::SeqCst);
@@ -1619,9 +1962,8 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                             }
                         };
 
-                        let draft_enabled = text_commit_for_callback
-                                .lock()
-                                .supports_draft_replacement();
+                        let draft_enabled =
+                            text_commit_for_callback.lock().supports_draft_replacement();
 
                         let mut preview_cursor: audio::AudioChunkCursor =
                             recorder_callback.incremental_cursor();
@@ -1775,7 +2117,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let partial_stt_callback_handle_on_stop = partial_stt_callback_handle.clone();
     let recognition_session_on_stop = recognition_session.clone();
     let stop_recording_action: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        info!("stop_recording_action 开始执行");
+        info!("stop_recording_action 被调用");
         if is_recording_stop.load(Ordering::SeqCst) {
             *stop_debounce_on_stop.lock() = None;
             is_recording_stop.store(false, Ordering::SeqCst);
@@ -1844,8 +2186,13 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         let seq = {
             let mut state = press_state_on_press.lock();
             if state.pressed {
+                debug!("press_callback: state.pressed is true, returning early");
                 return;
             }
+            debug!(
+                "press_callback: setting pressed=true, seq={}",
+                state.sequence.wrapping_add(1)
+            );
             state.pressed = true;
             state.sequence = state.sequence.wrapping_add(1);
             state.started_by_hold_on_current_press = false;
@@ -1891,7 +2238,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     let stop_action_on_release = stop_recording_action.clone();
     let mode_on_release = hotkey_trigger_mode.clone();
     let release_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        info!("release_callback triggered");
+        info!("release_callback 被调用");
         let started_by_hold = {
             let mut state = press_state_on_release.lock();
             if !state.pressed {
@@ -1919,12 +2266,75 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         }
     });
 
-    // ===== 初始化热键监听器 =====
-    let mut hotkey = hotkey::HotkeyListener::new()?;
-    hotkey.set_hotkey("ctrl")?;
-    hotkey.on_press(press_callback);
-    hotkey.on_release(release_callback);
-    hotkey.start()?;
+    let toggle_recording_action: Arc<dyn Fn() + Send + Sync> = {
+        let is_recording_toggle = is_recording.clone();
+        let start_recording_toggle = start_recording_action.clone();
+        let stop_recording_toggle = stop_recording_action.clone();
+        Arc::new(move || {
+            if is_recording_toggle.load(Ordering::SeqCst) {
+                stop_recording_toggle();
+            } else {
+                start_recording_toggle();
+            }
+        })
+    };
+    let external_toggle_action: Arc<dyn Fn() + Send + Sync> = if uses_external_trigger_backend() {
+        let burst_state = external_toggle_burst_state.clone();
+        let toggle_action = toggle_recording_action.clone();
+        Arc::new(move || {
+            let sequence = {
+                let mut state = burst_state.lock();
+                state.sequence = state.sequence.wrapping_add(1);
+                state.sequence
+            };
+            let burst_state_for_wait = burst_state.clone();
+            let toggle_action_for_wait = toggle_action.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(external_toggle_burst_gap);
+                let should_fire = burst_state_for_wait.lock().sequence == sequence;
+                if should_fire {
+                    toggle_action_for_wait();
+                }
+            });
+        })
+    } else {
+        toggle_recording_action.clone()
+    };
+
+    // ===== 初始化热键监听器 / 外部触发 =====
+    let external_trigger_enabled = uses_external_trigger_backend();
+    let mut hotkey = if external_trigger_enabled {
+        None
+    } else {
+        let mut hotkey = hotkey::HotkeyListener::new()?;
+        hotkey.set_hotkey(default_trigger_key())?;
+        hotkey.on_press(press_callback.clone());
+        hotkey.on_release(release_callback.clone());
+        hotkey.start()?;
+        Some(hotkey)
+    };
+
+    #[cfg(target_os = "linux")]
+    let external_trigger_server = if external_trigger_enabled {
+        let socket_path = runtime::trigger_socket_path()?;
+        let press_action = press_callback.clone();
+        let release_action = release_callback.clone();
+        let toggle_action = external_toggle_action.clone();
+        Some(trigger::ExternalTriggerServer::start(
+            socket_path.clone(),
+            move |action| match action {
+                trigger::ExternalTriggerAction::Press => press_action(),
+                trigger::ExternalTriggerAction::Release => release_action(),
+                trigger::ExternalTriggerAction::Toggle => toggle_action(),
+            },
+        )?)
+    } else {
+        None
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let external_trigger_server: Option<trigger::ExternalTriggerServer> = None;
+
     spawn_background_asr_runtime_init(
         config.clone(),
         asr_runtime.clone(),
@@ -1941,16 +2351,31 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     info!("===========================================");
     info!("🎤 EchoPup 语音输入已启动");
-    info!("   热键: ctrl (固定)");
+    info!("   触发后端: {}", trigger_backend_description());
     info!("   模式: {}", config.hotkey.trigger_mode.label());
-    info!("   长按 1 秒开始录音");
-    match config.hotkey.trigger_mode {
-        config::HotkeyTriggerMode::HoldToRecord => {
-            info!("   松开热键后停止录音并开始转写");
+    if external_trigger_enabled {
+        info!(
+            "   桌面快捷键建议: {} -> `echopup trigger toggle`",
+            default_trigger_key().to_uppercase()
+        );
+        if config.hotkey.trigger_mode == config::HotkeyTriggerMode::HoldToRecord {
+            info!("   注: 当前外部快捷键默认使用 toggle 语义；长按语义仅对 `trigger press/release` 生效");
         }
-        config::HotkeyTriggerMode::PressToToggle => {
-            info!("   松开后继续录音，下一次按下热键结束并转写");
+    } else {
+        info!("   热键: {} (固定)", default_trigger_key());
+        info!("   长按 1 秒开始录音");
+        match config.hotkey.trigger_mode {
+            config::HotkeyTriggerMode::HoldToRecord => {
+                info!("   松开热键后停止录音并开始转写");
+            }
+            config::HotkeyTriggerMode::PressToToggle => {
+                info!("   松开后继续录音，下一次按下热键结束并转写");
+            }
         }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(warning) = internal_hotkey_conflict_warning() {
+        warn!("{}", warning);
     }
     info!("   按 Ctrl+C 退出");
     info!("===========================================");
@@ -1967,7 +2392,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
                     if let Err(err) = apply_runtime_menu_action(
                         &action_for_runtime,
                         &result.snapshot,
-                        &mut hotkey,
+                        hotkey.as_mut(),
                         &hotkey_trigger_mode,
                         &asr_runtime,
                         &preview_asr_runtime,
@@ -2013,6 +2438,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
     recording_animation.store(false, Ordering::SeqCst);
     let _ = animation_handle.join();
     set_status_indicator_state(&status_indicator, status_indicator::IndicatorState::Idle);
+    drop(external_trigger_server);
 
     info!("EchoPup 已退出");
     Ok(())

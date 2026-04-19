@@ -1,7 +1,7 @@
 # R-016 Wayland 热键触发与文本提交兼容方案
 
-最后更新：2026-04-17
-状态：规划中
+最后更新：2026-04-18
+状态：部分完成（Linux Wayland Phase 1 已落地）
 
 ## 1. 需求背景
 
@@ -95,3 +95,26 @@
 - `docs/requirements/PRD.md`
 - `docs/architecture/technical-solution-v1.md`
 - `docs/operations/runbook.md`
+
+## 8. 当前实现状态（2026-04-18）
+
+### 已落地
+
+- Linux Wayland 启动路径已切换为“桌面快捷键 -> `echopup trigger ...` -> 后台服务”的外部触发架构。
+- 新增 `echopup trigger press|release|toggle` 子命令，Linux 后台服务通过本地 Unix socket 接收外部触发动作。
+- Linux Wayland 会话下，运行时不再创建应用内全局热键监听器，避免继续依赖 X11 风格的键盘监听。
+- GNOME Wayland 下，首次启动 `echopup` / `echopup start` 时会尝试自动创建系统快捷键：
+  - `F6 -> echopup --config ~/.echopup/config.toml trigger toggle`
+- Linux 默认触发键调整为 `F6`；macOS 现有 `ctrl` 逻辑保持不变。
+- Linux 后台启动已改为独立会话启动，避免 `start` 拉起的后台进程被父终端或父进程生命周期连带终止。
+- `doctor` 已补充 Wayland 会话说明，明确当前 trigger backend 与推荐快捷键绑定方式。
+
+### 当前语义
+
+- Linux Wayland 默认外部快捷键采用 `toggle` 语义。
+- `hold_to_record` 仅在 `trigger press/release` 组合被调用时才能完整表达；普通 GNOME 自定义快捷键默认只适合 `toggle`。
+
+### 已知边界
+
+- `GlobalShortcuts` portal backend 仍未接入，当前实现优先保证 GNOME Wayland 可落地而不是追求 portal 优先。
+- Linux 托盘图标显示仍受桌面环境与托盘支持情况影响，不属于本次 Wayland 触发链路改造的阻塞项。

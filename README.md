@@ -90,15 +90,20 @@ cargo build --release
 
 1. 运行 `./target/release/echopup`（默认后台启动，单实例）
 2. 需要管理配置和模型时，运行 `./target/release/echopup ui`（UI 也是单实例）
-3. 在需要输入文本的应用中长按 Control 键 1 秒（左右 Ctrl 均可）
+3. 触发方式按平台区分：
+   - macOS：在需要输入文本的应用中长按 `Control` 键 1 秒（左右 `Ctrl` 均可）
+   - Linux X11：在需要输入文本的应用中长按 `F6` 1 秒
+   - Linux Wayland：首次运行会尝试自动创建系统快捷键 `F6 -> echopup trigger toggle`
 4. 按触发模式结束录音并转写：
    - 长按模式：松开热键即结束并输入
    - 按压切换模式（默认）：松开后继续录音，下次按下结束并输入
 
 ### Linux / Wayland 说明
 
-- 当前仓库中的应用内热键实现主要面向 macOS 与 X11 兼容路径。
-- 在 Wayland 桌面中，不应默认假设应用可以像 X11 一样直接全局监听按键。
+- 当前 Linux/Wayland 默认走“桌面快捷键 -> `echopup trigger ...` -> 后台服务”的外部触发路径。
+- 在 GNOME Wayland 下，首次运行 `echopup` 会尝试自动创建系统快捷键 `F6`。
+- 若自动创建失败，可手动将以下命令绑定到系统快捷键：
+  - `echopup trigger toggle`
 - 当前 Linux 文本输入在失败时会回退到 `wtype`，这是 Wayland 路径下更现实的文本提交方式之一。
 - 关于 Wayland 下更优雅的热键与文本提交方案，请参考：
   - `docs/architecture/wayland-compatibility-plan-v1.md`
@@ -186,6 +191,7 @@ Commands:
   stop             停止后台服务
   status           查看后台服务状态
   restart          重启后台服务
+  trigger          发送外部触发动作（Linux 桌面快捷键集成）
   ui               打开管理 TUI（仅管理，不执行语音输入）
   test             测试各模块
   config           配置管理

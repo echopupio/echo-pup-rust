@@ -4,6 +4,8 @@ use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -11,6 +13,8 @@ use std::time::Duration;
 
 const RUN_LOCK_FILE_NAME: &str = "echopup.lock";
 const RUN_LOG_FILE_NAME: &str = "echopup.log";
+const START_WAIT_RETRY: usize = 40;
+const START_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_WAIT_RETRY: usize = 50;
 const STOP_WAIT_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -40,6 +44,23 @@ pub fn model_dir() -> Result<PathBuf> {
 
 pub fn background_log_path() -> Result<PathBuf> {
     Ok(runtime_dir_path()?.join(RUN_LOG_FILE_NAME))
+}
+
+pub fn trigger_socket_path() -> Result<PathBuf> {
+    Ok(runtime_dir()?.join("trigger.sock"))
+}
+
+pub fn read_recent_background_log(lines: usize) -> Result<String> {
+    let path = background_log_path()?;
+    if !path.exists() {
+        return Ok(String::new());
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取后台日志失败: {}", path.display()))?;
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start = all_lines.len().saturating_sub(lines);
+    Ok(all_lines[start..].join("\n"))
 }
 
 fn lock_file_path(name: &str) -> Result<PathBuf> {
@@ -214,17 +235,59 @@ pub fn spawn_background(config_path: &str) -> Result<u32> {
         .with_context(|| format!("打开后台日志文件失败: {}", log_path.display()))?;
     let log_file_stderr = log_file.try_clone().context("克隆后台日志文件句柄失败")?;
 
-    let child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("--config")
         .arg(config_path)
         .arg("run")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_stderr))
-        .spawn()
-        .context("后台启动 echopup 失败")?;
+        .stderr(Stdio::from(log_file_stderr));
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // Linux 后台模式需要脱离当前会话，避免终端/父进程退出时将子进程一并带走。
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = command.spawn().context("后台启动 echopup 失败")?;
 
     Ok(child.id())
+}
+
+pub fn wait_for_background_start(expected_pid: u32) -> Result<()> {
+    for _ in 0..START_WAIT_RETRY {
+        if let Some(pid) = running_instance_pid()? {
+            if pid == expected_pid || run_process_identity(pid) != ProcessIdentity::Mismatch {
+                return Ok(());
+            }
+        }
+
+        match process_command(expected_pid) {
+            Some(cmd) if cmd.contains("echopup") => {
+                thread::sleep(START_WAIT_INTERVAL);
+            }
+            Some(_) => {
+                return Err(anyhow!(
+                    "后台子进程 pid {} 已不再是 echopup 进程",
+                    expected_pid
+                ));
+            }
+            None => {
+                return Err(anyhow!("后台进程启动后立即退出: pid={}", expected_pid));
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "后台进程未在预期时间内进入运行态: pid={}",
+        expected_pid
+    ))
 }
 
 #[cfg(test)]

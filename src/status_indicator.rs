@@ -691,10 +691,7 @@ unsafe fn apply_button_style(
 #[cfg(target_os = "macos")]
 mod menu_bridge {
     use super::*;
-    use cocoa::appkit::{
-        NSApp, NSBackingStoreType, NSWindow,
-        NSWindowStyleMask,
-    };
+    use cocoa::appkit::{NSApp, NSBackingStoreType, NSWindow, NSWindowStyleMask};
     use cocoa::base::{id, nil, NO, YES};
     use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
     use objc::declare::ClassDecl;
@@ -922,11 +919,7 @@ mod menu_bridge {
             NSRect::new(NSPoint::new(20.0, 226.0), NSSize::new(120.0, 20.0)),
             "模型提供商:",
         );
-        let provider_items: &[&str] = &[
-            "OpenAI 兼容接口",
-            "Anthropic 兼容接口",
-            "Ollama 本地",
-        ];
+        let provider_items: &[&str] = &["OpenAI 兼容接口", "Anthropic 兼容接口", "Ollama 本地"];
         let selected_label = provider_key_to_label(&snapshot.llm_provider);
         let provider_input = add_popup(
             content,
@@ -1290,9 +1283,9 @@ fn open_path_in_finder(path: &std::path::Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn show_about_popup() {
-    use cocoa::appkit::{NSWindow, NSWindowStyleMask, NSBackingStoreType};
-    use cocoa::base::{id, nil, YES, NO};
-    use cocoa::foundation::{NSRect, NSPoint, NSSize};
+    use cocoa::appkit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
+    use cocoa::base::{id, nil, NO, YES};
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{class, msg_send, sel, sel_impl};
 
     unsafe {
@@ -1329,7 +1322,8 @@ fn show_about_popup() {
 
         // Logo: centered, 128x128
         let logo_data = STATUS_LOGO_PNG;
-        let ns_data: id = msg_send![class!(NSData), dataWithBytes:logo_data.as_ptr() length:logo_data.len()];
+        let ns_data: id =
+            msg_send![class!(NSData), dataWithBytes:logo_data.as_ptr() length:logo_data.len()];
         let image: id = msg_send![class!(NSImage), alloc];
         let image: id = msg_send![image, initWithData: ns_data];
         if image != nil {
@@ -1982,8 +1976,8 @@ fn linux_point_in_rounded_rect(px: f32, py: f32, geom: &LinuxRoundedRectGeometry
     let inner_right = geom.right - geom.radius;
     let inner_top = geom.top + geom.radius;
     let inner_bottom = geom.bottom - geom.radius;
-    let nearest_x = px.clamp(inner_left, inner_right);
-    let nearest_y = py.clamp(inner_top, inner_bottom);
+    let nearest_x = px.clamp(inner_left.min(inner_right), inner_left.max(inner_right));
+    let nearest_y = py.clamp(inner_top.min(inner_bottom), inner_top.max(inner_bottom));
     let dx = px - nearest_x;
     let dy = py - nearest_y;
     dx * dx + dy * dy <= geom.radius * geom.radius
@@ -2560,5 +2554,20 @@ mod tests {
         assert_ne!(first_width.round() as i32, second_width.round() as i32);
         assert!(first.fill.is_some());
         assert!(second.fill.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_point_in_rounded_rect_handles_float_inversion() {
+        let geom = LinuxRoundedRectGeometry {
+            left: 0.0,
+            top: 10.5,
+            right: 96.0,
+            bottom: 85.5,
+            radius: 48.000_004,
+        };
+
+        let inside = linux_point_in_rounded_rect(48.0, 48.0, &geom);
+        assert!(inside);
     }
 }

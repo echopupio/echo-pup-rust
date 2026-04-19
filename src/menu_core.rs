@@ -7,12 +7,7 @@ use crate::config::Config;
 use crate::config::HotkeyTriggerMode;
 
 #[allow(dead_code)]
-pub const MENU_ITEMS: [&str; 4] = [
-    "启用 LLM 润色",
-    "启用文本纠错",
-    "编辑 LLM 配置",
-    "退出",
-];
+pub const MENU_ITEMS: [&str; 4] = ["启用 LLM 润色", "启用文本纠错", "编辑 LLM 配置", "退出"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

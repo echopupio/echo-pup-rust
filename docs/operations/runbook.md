@@ -61,10 +61,14 @@ echopup ui status
 tail -n 200 ~/.echopup/echopup.log
 echo "$XDG_SESSION_TYPE"
 echo "$XDG_CURRENT_DESKTOP"
+command -v eitype
 command -v wtype
 command -v xdotool
 gdbus introspect --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop
 ```
+
+补充说明：
+- 如果之前在 GNOME Wayland 下绑定过 `F6 -> echopup trigger toggle`，切回 X11 后要删除或改键；否则会与 X11 应用内热键冲突。
 
 ## 7. Wayland 排障要点
 
@@ -72,7 +76,9 @@ gdbus introspect --session --dest org.freedesktop.portal.Desktop --object-path /
    - `echo "$XDG_SESSION_TYPE"`
 2. 若是 Wayland，不要再默认假设应用内全局热键一定可用；优先检查当前是否已经采用桌面快捷键绑定到 EchoPup 的外部触发接口。
 3. 文本提交失败时优先检查：
+   - GNOME / KDE Wayland 是否已安装 `eitype`（当前版本会优先尝试它）
    - `wtype` 是否存在于 `PATH`
+   - 若只检测到 `xdotool`，需注意它通常只对 XWayland 窗口可靠
    - 日志中最终选中的 text commit backend 是什么
 4. 若需检查 portal 能力，优先查看：
    - `org.freedesktop.portal.RemoteDesktop`
