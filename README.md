@@ -32,7 +32,7 @@ cargo install --git https://github.com/pupkit-labs/echo-pup-rust.git
 ## 功能特性
 
 - 🎤 **语音输入** - 支持两种触发模式：长按模式 / 按压切换模式
-- 🔄 **语音识别** - 使用本地 Whisper 模型进行语音转文字
+- 🔄 **语音识别** - 使用本地 sherpa-onnx Paraformer 模型进行流式语音转文字
 - ✨ **智能整理** - 可选 LLM 自动润色转写文本
 - ⌨️ **自动输入** - 自动模拟键盘输入到当前应用
 - ⌨️ **固定热键** - 使用 Control 键触发（左右 Ctrl 均可）
@@ -63,27 +63,11 @@ cargo install --git https://github.com/pupkit-labs/echo-pup-rust.git
 sudo apt install pkg-config libssl-dev libasound2-dev libnotify-bin pulseaudio-utils
 ```
 
-### 2. 下载 Whisper 模型
+### 2. 下载语音识别模型
 
 ```bash
-# 模型将下载到 ~/.echopup/models
-./target/release/echopup download-model large-v3
-
-# 或继续使用脚本
-./scripts/download_model.sh large-v3
-```
-
-### 2.5 验收与性能基线（可选）
-
-```bash
-# 状态栏菜单与 TUI 对齐验收（自动化）
-./scripts/run_acceptance.sh
-
-# 聚合最近 200 条性能埋点（P50/P95）
-./scripts/perf_baseline.py --limit 200
-
-# 导出基线到 CSV（机型 × 档位）
-./scripts/perf_baseline.py --profile balanced --export-csv ./artifacts/perf-baseline.csv
+# 自动下载 Paraformer ASR 模型和标点恢复模型到 ~/.echopup/models/
+./target/release/echopup download-model
 ```
 
 ### 3. 编译运行
@@ -148,22 +132,20 @@ trigger_mode = "press_to_toggle" # 或 "hold_to_record"
 sample_rate = 16000
 channels = 1
 
-[whisper]
-# 可选: "accurate" / "balanced" / "fast"
-# performance_profile = "balanced"
-# 请使用绝对路径；默认在 ~/.echopup/models 下
-model_path = "/Users/<user>/.echopup/models/ggml-large-v3.bin"
-translate = false
-language = "zh"
-decoding_strategy = "beam_search"
-beam_size = 5
-greedy_best_of = 5
-temperature = 0.0
-no_context = true
-suppress_nst = true
-n_threads = "auto"
-# initial_prompt = "可选热词：EchoPup, OpenAI, Rust"
-hotwords = []
+[asr]
+backend = "sherpa_paraformer"
+
+[asr.sherpa_paraformer]
+# 模型文件默认在 ~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/
+encoder_path = "~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/encoder.onnx"
+decoder_path = "~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/decoder.onnx"
+tokens_path = "~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/tokens.txt"
+provider = "cpu"
+num_threads = 4  # 自动检测，上限 8
+
+[punctuation]
+enabled = true
+model_path = "~/.echopup/models/punctuation/model.onnx"
 
 [llm]
 enabled = false
@@ -222,7 +204,7 @@ Commands:
   ui               打开管理 TUI（仅管理，不执行语音输入）
   test             测试各模块
   config           配置管理
-  download-model   下载 Whisper 模型
+  download-model   下载语音识别模型
 
 Options:
   -c, --config <CONFIG>  配置文件路径 [default: ~/.echopup/config.toml]
@@ -237,19 +219,23 @@ Options:
 ```text
 echo-pup-rust/
 ├── src/
-│   ├── main.rs         # 主程序入口
-│   ├── audio/          # 音频录制模块
-│   ├── config/         # 配置管理模块
-│   ├── hotkey/         # 热键监听模块
-│   ├── input/          # 键盘输入模块
-│   ├── llm/            # LLM 整理模块
-│   ├── stt/            # Whisper 转写模块
-│   ├── ui.rs           # 终端管理 UI
-│   └── status_indicator.rs # macOS 状态栏指示器
-├── scripts/
-│   ├── download_model.sh
-│   ├── run_acceptance.sh
-│   └── perf_baseline.py
+│   ├── main.rs            # 主程序入口
+│   ├── audio/             # 音频录制模块
+│   ├── asr/               # 语音识别模块（sherpa-onnx Paraformer）
+│   ├── commit/            # 文本提交模块
+│   ├── config/            # 配置管理模块
+│   ├── hotkey/            # 热键监听模块
+│   ├── input/             # 键盘输入模块
+│   ├── llm/               # LLM 整理模块
+│   ├── session/           # 会话管理模块
+│   ├── model_download.rs  # 模型下载
+│   ├── punctuation.rs     # 离线标点恢复
+│   ├── menu_core.rs       # 状态栏菜单核心逻辑
+│   ├── status_indicator.rs # macOS 状态栏指示器
+│   ├── text_processor.rs  # 文本后处理
+│   ├── runtime.rs         # 运行时工具
+│   ├── trigger.rs         # 外部触发
+│   └── linux_desktop.rs   # Linux 桌面集成
 ├── docs/
 └── Cargo.toml
 
@@ -275,8 +261,8 @@ echo-pup-rust/
 ### Q: 键盘输入失败
 A: Linux 请确认在图形会话中运行并具备输入模拟能力；macOS 请在“系统设置 -> 隐私与安全性 -> 辅助功能”中授权 EchoPup。
 
-### Q: Whisper 模型加载失败
-A: 检查模型文件是否存在于 `~/.echopup/models/`，并确认 `whisper.model_path` 指向有效绝对路径。
+### Q: 语音识别模型加载失败
+A: 检查模型文件（encoder.onnx, decoder.onnx, tokens.txt）是否存在于 `~/.echopup/models/asr/sherpa-onnx-streaming-paraformer-bilingual-zh-en/`，可运行 `echopup download-model` 重新下载。
 
 ### Q: 录音没有声音
 A: 检查麦克风权限、输入设备和系统音量；在 macOS 上确认应用麦克风授权已开启。

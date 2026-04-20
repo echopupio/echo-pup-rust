@@ -222,7 +222,7 @@ impl Default for FeedbackConfig {
 }
 
 /// LLM 配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LLMConfig {
     /// 是否启用 LLM 整理
@@ -236,6 +236,22 @@ pub struct LLMConfig {
     /// API Key
     #[serde(alias = "api_key_env")]
     pub api_key: String,
+}
+
+impl std::fmt::Debug for LLMConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMConfig")
+            .field("enabled", &self.enabled)
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("api_base", &self.api_base)
+            .field("api_key", &if self.api_key.is_empty() {
+                "(empty)".to_string()
+            } else {
+                format!("{}***", &self.api_key[..self.api_key.len().min(4)])
+            })
+            .finish()
+    }
 }
 
 impl Default for LLMConfig {
@@ -355,10 +371,20 @@ impl Config {
         // 确保目录存在
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
         }
 
         let content = toml::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        fs::write(&path, content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }

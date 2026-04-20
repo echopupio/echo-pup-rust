@@ -61,10 +61,10 @@ impl PunctuationRestorer {
         match self.inner.add_punctuation(text) {
             Some(result) => {
                 info!(
-                    "标点恢复完成: {}ms, '{}' -> '{}'",
+                    "标点恢复完成: {}ms, {}字 -> {}字",
                     start.elapsed().as_millis(),
-                    text,
-                    result
+                    text.chars().count(),
+                    result.chars().count()
                 );
                 result
             }

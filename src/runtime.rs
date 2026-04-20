@@ -77,6 +77,12 @@ fn try_acquire_lock(name: &str) -> Result<Option<File>> {
         .open(&path)
         .with_context(|| format!("打开锁文件失败: {}", path.display()))?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     match file.try_lock_exclusive() {
         Ok(()) => {
             file.set_len(0).ok();
@@ -266,6 +272,12 @@ pub fn spawn_background(config_path: &str) -> Result<u32> {
         .append(true)
         .open(&log_path)
         .with_context(|| format!("打开后台日志文件失败: {}", log_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     let log_file_stderr = log_file.try_clone().context("克隆后台日志文件句柄失败")?;
 
     let mut command = Command::new(exe);

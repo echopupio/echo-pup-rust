@@ -330,7 +330,7 @@ fn process_audio(
                         desktop_notify(desktop_notify_enabled, "EchoPup", "未识别到有效语音");
                         return false;
                     }
-                    info!("转写完成: {}", text);
+                    info!("转写完成: {}字", text.chars().count());
                     final_text = text;
                     transcribe_success = true;
                 }
@@ -659,14 +659,16 @@ fn send_desktop_notify(title: &str, body: &str) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        let escaped_title = title.replace('"', "\\\"");
-        let escaped_body = body.replace('"', "\\\"");
         let status = std::process::Command::new(MAC_OSASCRIPT_PATH)
             .arg("-e")
-            .arg(format!(
-                "display notification \"{}\" with title \"{}\"",
-                escaped_body, escaped_title
-            ))
+            .arg("on run {notifTitle, notifBody}")
+            .arg("-e")
+            .arg("  display notification notifBody with title notifTitle")
+            .arg("-e")
+            .arg("end run")
+            .arg("--")
+            .arg(title)
+            .arg(body)
             .status()
             .context("执行 osascript 失败")?;
         if !status.success() {
