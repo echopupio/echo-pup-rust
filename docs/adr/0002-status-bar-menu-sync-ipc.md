@@ -53,14 +53,12 @@
   - `src/main.rs`（菜单动作执行与快照下发）
 - TUI 已切换为共享内核：
   - `src/ui.rs`
-- 回归入口：
-  - `./scripts/run_acceptance.sh`
 
 ## 后续约束
 
 1. 新增菜单项时，先扩展 `MenuAction` 与 `MenuSnapshot`，再分别接入 TUI 与状态栏。
 2. 状态栏只保留展示/交互职责，不直接承载业务规则。
-3. 每次菜单相关改动需执行 `./scripts/run_acceptance.sh` 并同步 `docs/changes/` 与 `docs/traceability/`。
+3. 每次菜单相关改动需同步 `docs/changes/` 与 `docs/traceability/`。
 
 ## 关联文档
 

@@ -93,7 +93,6 @@
   - `status_indicator` 菜单 tag 到动作映射
 - 集成测试：
   - `run/start/stop/status/restart` 与 `ui *` 生命周期
-  - `./scripts/run_acceptance.sh`（Phase E 契约测试 + 全量单测冒烟）
 - 端到端测试：
   - macOS 后台运行下热键录音与跨应用文本输入
   - 状态栏反馈与下载流程可视化校验
