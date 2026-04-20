@@ -20,6 +20,7 @@ mod trigger;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use parking_lot::Mutex;
+use std::fs;
 use std::io::{IsTerminal, Write};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::{AsRawFd, RawFd};
@@ -82,8 +83,10 @@ enum Commands {
     Doctor,
     /// 显示版本信息
     Version,
-    /// 下载语音识别模型
-    DownloadModel,
+    /// 检查更新并自动更新
+    Update,
+    /// 管理语音识别模型（下载缺失模型 / 打开模型目录）
+    Model,
     /// 发送外部触发动作（主要用于 Linux/Wayland 桌面快捷键绑定）
     Trigger {
         #[command(subcommand)]
@@ -617,11 +620,11 @@ fn print_macos_notification_setup_tip(show_tip: bool) {
 
     #[cfg(target_os = "macos")]
     {
-        println!("提示: macOS 通知由 osascript 发送，通知来源通常显示为“脚本编辑器”。");
-        println!(
-            "若全屏时看不到横幅，请到“系统设置 -> 通知 -> 脚本编辑器”开启通知，并选择“横幅”或“提醒”。"
-        );
-        println!("若仍不弹出，请检查“专注模式”和“通知摘要”设置。");
+        let dim = "\x1b[2m";
+        let yellow = "\x1b[33m";
+        let reset = "\x1b[0m";
+        println!("  {yellow}!{reset} 通知来源显示为「脚本编辑器」{dim}(osascript){reset}");
+        println!("    {dim}全屏不弹通知? → 系统设置 → 通知 → 脚本编辑器 → 横幅{reset}");
     }
 }
 
@@ -684,9 +687,39 @@ fn send_desktop_notify(title: &str, body: &str) -> Result<()> {
     }
 }
 
-fn download_paraformer_model_cli() -> Result<()> {
-    info!("开始下载所有必需模型...");
-    ensure_all_models_downloaded()
+fn handle_model_command() -> Result<()> {
+    use model_download::check_missing_models;
+
+    let models_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".echopup")
+        .join("models");
+
+    let missing = check_missing_models();
+
+    if missing.is_empty() {
+        println!("✅ 所有模型已就绪");
+        println!("📂 {}", models_dir.display());
+        open_directory(&models_dir);
+        return Ok(());
+    }
+
+    println!("检测到缺失模型，开始下载...");
+    ensure_all_models_downloaded()?;
+    println!("📂 {}", models_dir.display());
+    open_directory(&models_dir);
+    Ok(())
+}
+
+fn open_directory(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).status();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).status();
+    }
 }
 
 fn ensure_all_models_downloaded() -> Result<()> {
@@ -1028,7 +1061,8 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::DEBUG.into()),
+                .add_directive("echo_pup_rust=debug".parse().unwrap())
+                .add_directive(tracing::Level::INFO.into()),
         )
         .init();
 
@@ -1047,9 +1081,10 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Version) => {
             println!("echopup {}", env!("CARGO_PKG_VERSION"));
         }
+        Some(Commands::Update) => handle_update_command()?,
         Some(Commands::Trigger { action }) => handle_trigger_command(&cli.config, action)?,
         Some(Commands::StatusIndicator) => status_indicator::run_status_indicator_process()?,
-        Some(Commands::DownloadModel) => download_paraformer_model_cli()?,
+        Some(Commands::Model) => handle_model_command()?,
         None => start_background_mode(&cli.config)?,
     }
 
@@ -1060,13 +1095,19 @@ fn start_background_mode(config_path: &str) -> Result<()> {
     print_banner();
     let config = config::Config::load(config_path)?;
 
+    let dim = "\x1b[2m";
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let cyan = "\x1b[36m";
+    let reset = "\x1b[0m";
+
     if runtime::is_running()? {
         if let Some(pid) = runtime::running_instance_pid()? {
-            println!("echopup 已在后台运行 (pid: {})，不会重复创建进程。", pid);
+            println!("  {green}●{reset} 已在运行  {dim}pid {pid}{reset}");
         } else {
-            println!("echopup 已在后台运行，不会重复创建进程。");
+            println!("  {green}●{reset} 已在运行");
         }
-        println!("可使用 `echopup config` 管理配置。");
+        println!("  {dim}运行 echopup config 管理配置{reset}");
         return Ok(());
     }
 
@@ -1075,11 +1116,14 @@ fn start_background_mode(config_path: &str) -> Result<()> {
     let pid = runtime::spawn_background(config_path)?;
     let log_path = runtime::background_log_path()?;
     ensure_background_started(pid, &log_path)?;
-    println!("echopup 已在后台启动 (pid: {})", pid);
-    println!("日志文件: {}", log_path.display());
-    print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
 
-    println!("可使用 `echopup config` 管理配置。");
+    println!("  {green}●{reset} 后台已启动  {dim}pid {pid}{reset}");
+    println!("  {cyan}⎔{reset} 日志  {dim}{}{reset}", log_path.display());
+    print_macos_notification_setup_tip(config.feedback.notify_tip_on_start);
+    println!();
+    println!("  {yellow}▸{reset} echopup status   {dim}查看状态{reset}");
+    println!("  {yellow}▸{reset} echopup config    {dim}管理配置{reset}");
+    println!("  {yellow}▸{reset} echopup update    {dim}检查更新{reset}");
     Ok(())
 }
 
@@ -1109,6 +1153,161 @@ fn handle_trigger_command(_config_path: &str, action: TriggerCommands) -> Result
         let _ = action;
         anyhow::bail!("`echopup trigger` 当前仅用于 Linux 外部快捷键集成");
     }
+}
+
+fn handle_update_command() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("当前版本: v{}", current);
+    println!("正在检查最新版本...");
+
+    let latest_tag = fetch_latest_version()?;
+    let latest = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
+
+    if latest == current {
+        println!("✅ 已是最新版本 v{}", current);
+        return Ok(());
+    }
+
+    println!("🆕 发现新版本: v{} → v{}", current, latest);
+
+    #[cfg(target_os = "macos")]
+    {
+        if is_installed_via_brew() {
+            println!("检测到 Homebrew 安装，使用 brew 更新...");
+            let status = std::process::Command::new("brew")
+                .args(["upgrade", "pupkit-labs/tap/echopup"])
+                .status()
+                .context("执行 brew upgrade 失败")?;
+            if status.success() {
+                println!("✅ 更新完成！请运行 echopup --version 验证。");
+            } else {
+                anyhow::bail!("brew upgrade 失败，退出码: {}", status);
+            }
+            return Ok(());
+        }
+    }
+
+    self_update_from_github(&latest_tag)?;
+    Ok(())
+}
+
+fn fetch_latest_version() -> Result<String> {
+    let url = "https://api.github.com/repos/pupkit-labs/echo-pup-rust/releases/latest";
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("echopup-updater")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp: serde_json::Value = client.get(url).send()?.json()?;
+    resp["tag_name"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("无法从 GitHub API 获取最新版本号"))
+}
+
+#[cfg(target_os = "macos")]
+fn is_installed_via_brew() -> bool {
+    std::process::Command::new("brew")
+        .args(["list", "--formula", "echopup"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn self_update_from_github(version_tag: &str) -> Result<()> {
+    let target = detect_target_triple();
+    let archive_name = format!("echopup-{}.tar.xz", target);
+    let url = format!(
+        "https://github.com/pupkit-labs/echo-pup-rust/releases/download/{}/{}",
+        version_tag, archive_name
+    );
+
+    println!("正在下载 {}...", archive_name);
+
+    let tmpdir = std::env::temp_dir().join(format!("echopup-update-{}", std::process::id()));
+    fs::create_dir_all(&tmpdir)?;
+
+    let archive_path = tmpdir.join(&archive_name);
+    let resp = reqwest::blocking::Client::builder()
+        .user_agent("echopup-updater")
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?
+        .get(&url)
+        .send()
+        .context("下载失败")?;
+
+    if !resp.status().is_success() {
+        let _ = fs::remove_dir_all(&tmpdir);
+        anyhow::bail!("下载失败: HTTP {}", resp.status());
+    }
+
+    let bytes = resp.bytes()?;
+    fs::write(&archive_path, &bytes)?;
+    println!("下载完成 ({:.1} MB)", bytes.len() as f64 / 1_048_576.0);
+
+    println!("正在解压...");
+    let status = std::process::Command::new("tar")
+        .args(["xJf", archive_path.to_str().unwrap()])
+        .current_dir(&tmpdir)
+        .status()
+        .context("解压失败")?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&tmpdir);
+        anyhow::bail!("tar 解压失败");
+    }
+
+    let new_binary = tmpdir.join("echopup");
+    if !new_binary.exists() {
+        let _ = fs::remove_dir_all(&tmpdir);
+        anyhow::bail!("解压后未找到 echopup 二进制文件");
+    }
+
+    let current_exe = std::env::current_exe().context("无法获取当前可执行文件路径")?;
+    let current_exe = current_exe
+        .canonicalize()
+        .unwrap_or_else(|_| current_exe.clone());
+
+    let backup = current_exe.with_extension("old");
+    fs::rename(&current_exe, &backup)
+        .context("备份当前版本失败（可能需要 sudo）")?;
+
+    if let Err(e) = fs::rename(&new_binary, &current_exe) {
+        let _ = fs::rename(&backup, &current_exe);
+        let _ = fs::remove_dir_all(&tmpdir);
+        anyhow::bail!("替换二进制文件失败: {}（已回滚）", e);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755));
+    }
+
+    let _ = fs::remove_file(&backup);
+    let _ = fs::remove_dir_all(&tmpdir);
+
+    println!("✅ 更新完成！当前版本:");
+    let _ = std::process::Command::new(&current_exe)
+        .arg("--version")
+        .status();
+
+    Ok(())
+}
+
+fn detect_target_triple() -> &'static str {
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    { "x86_64-apple-darwin" }
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    { "aarch64-apple-darwin" }
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    { "x86_64-unknown-linux-gnu" }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_os = "macos"),
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux"),
+    )))]
+    { compile_error!("Unsupported platform for self-update") }
 }
 
 fn stop_background_mode() -> Result<()> {
@@ -1637,48 +1836,26 @@ fn run_voice_input(config_path: &str) -> Result<()> {
 
     // ===== 首次运行引导 =====
     if config::Config::is_first_run(config_path) {
-        println!("");
-        println!("===========================================");
-        println!("🎉 欢迎使用 EchoPup！");
-        println!("===========================================");
-        println!("");
-        println!("首次运行，请先配置 LLM 以启用文本整理功能。");
-        println!("");
-        println!("📝 配置示例 (Ollama - 本地部署):");
-        println!("");
-        println!("  [llm]");
-        println!("  enabled = true");
-        println!("  provider = \"ollama\"");
-        println!("  model = \"llama3\"");
-        println!("  api_base = \"http://localhost:11434/v1\"");
-        println!("  api_key = \"\"");
-        println!("");
-        println!("📝 配置示例 (OpenAI):");
-        println!("");
-        println!("  [llm]");
-        println!("  enabled = true");
-        println!("  provider = \"openai\"");
-        println!("  model = \"gpt-4o-mini\"");
-        println!("  api_base = \"https://api.openai.com/v1\"");
-        println!("  api_key = \"\"");
-        println!("");
-        println!("💡 提示：");
-        println!("  - Ollama: 从 https://ollama.com 下载安装");
-        println!("  - 运行 'ollama serve' 启动 Ollama 服务");
-        println!("  - 使用 'ollama pull llama3' 下载模型");
-        println!("");
-        println!(
-            "编辑配置文件: {}",
-            config_path.replace(
-                "~",
-                &dirs::home_dir().unwrap_or_default().display().to_string()
-            )
-        );
-        println!("");
-        println!("===========================================");
-        println!("");
+        let dim = "\x1b[2m";
+        let bold = "\x1b[1m";
+        let cyan = "\x1b[36m";
+        let yellow = "\x1b[33m";
+        let reset = "\x1b[0m";
 
-        // 如果默认配置下 LLM 未配置，也显示提示
+        println!("  {cyan}{bold}首次运行{reset}  配置 LLM 可启用文本智能整理");
+        println!();
+        println!("  {yellow}Ollama (本地){reset}              {yellow}OpenAI{reset}");
+        println!("  {dim}[llm]{reset}                        {dim}[llm]{reset}");
+        println!("  {dim}enabled = true{reset}               {dim}enabled = true{reset}");
+        println!("  {dim}provider = \"ollama\"{reset}          {dim}provider = \"openai\"{reset}");
+        println!("  {dim}model = \"llama3\"{reset}             {dim}model = \"gpt-4o-mini\"{reset}");
+        println!("  {dim}api_base = \"http://…:11434/v1\"{reset}  {dim}api_base = \"https://api.openai.com/v1\"{reset}");
+        println!();
+        println!(
+            "  {yellow}▸{reset} echopup config edit   {dim}编辑配置文件{reset}"
+        );
+        println!();
+
         let default_config = config::Config::default();
         if !default_config.is_llm_configured() {
             info!("首次运行引导：LLM 未配置，将以基础模式运行（仅语音转文字）");
