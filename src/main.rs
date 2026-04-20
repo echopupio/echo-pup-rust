@@ -41,6 +41,7 @@ const MAC_SOUND_RECORDING_END: &str = "/System/Library/Sounds/Pop.aiff";
 #[derive(Parser)]
 #[command(name = "echopup")]
 #[command(about = "AI Voice Dictation Tool", long_about = None)]
+#[command(version)]
 struct Cli {
     #[arg(short, long, default_value = "~/.echopup/config.toml")]
     config: String,

@@ -2,6 +2,33 @@
 
 AI 语音输入工具 - 支持长按模式与按压切换模式，自动识别并输入文本
 
+## 安装
+
+### macOS (Homebrew)
+
+```bash
+brew tap pupkit-labs/tap
+brew install echopup
+```
+
+### Linux (Shell Installer)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pupkit-labs/echo-pup-rust/main/install.sh | bash
+```
+
+或指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pupkit-labs/echo-pup-rust/main/install.sh | bash -s -- v0.0.1
+```
+
+### 从源码编译
+
+```bash
+cargo install --git https://github.com/pupkit-labs/echo-pup-rust.git
+```
+
 ## 功能特性
 
 - 🎤 **语音输入** - 支持两种触发模式：长按模式 / 按压切换模式

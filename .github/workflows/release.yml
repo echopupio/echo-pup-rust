@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: echopup
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            cmake \
+            libasound2-dev \
+            libgtk-3-dev \
+            libssl-dev
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar cJf ../../../${BINARY_NAME}-${{ matrix.target }}.tar.xz ${BINARY_NAME}
+          cd ../../..
+          shasum -a 256 ${BINARY_NAME}-${{ matrix.target }}.tar.xz | awk '{print $1}' \
+            > ${BINARY_NAME}-${{ matrix.target }}.tar.xz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: |
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.xz
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.xz.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.xz
+            artifacts/*.sha256
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    # Skip pre-releases (tags containing '-', e.g. v0.0.1-beta)
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate and push formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME}"
+
+          SHA_AARCH64_DARWIN=$(cat artifacts/${BINARY_NAME}-aarch64-apple-darwin.tar.xz.sha256)
+          SHA_X86_64_DARWIN=$(cat artifacts/${BINARY_NAME}-x86_64-apple-darwin.tar.xz.sha256)
+          SHA_X86_64_LINUX=$(cat artifacts/${BINARY_NAME}-x86_64-unknown-linux-gnu.tar.xz.sha256)
+
+          REPO_URL="https://github.com/pupkit-labs/echo-pup-rust"
+
+          cat > echopup.rb << FORMULA
+          class Echopup < Formula
+            desc "EchoPup - AI Voice Dictation Tool - 按住热键说话，自动输入到任意应用"
+            homepage "${REPO_URL}"
+            version "${VERSION}"
+            license "MIT"
+
+            if OS.mac?
+              if Hardware::CPU.arm?
+                url "${REPO_URL}/releases/download/${TAG}/${BINARY_NAME}-aarch64-apple-darwin.tar.xz"
+                sha256 "${SHA_AARCH64_DARWIN}"
+              end
+              if Hardware::CPU.intel?
+                url "${REPO_URL}/releases/download/${TAG}/${BINARY_NAME}-x86_64-apple-darwin.tar.xz"
+                sha256 "${SHA_X86_64_DARWIN}"
+              end
+            end
+            if OS.linux? && Hardware::CPU.intel?
+              url "${REPO_URL}/releases/download/${TAG}/${BINARY_NAME}-x86_64-unknown-linux-gnu.tar.xz"
+              sha256 "${SHA_X86_64_LINUX}"
+            end
+
+            def install
+              bin.install "${BINARY_NAME}"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/${BINARY_NAME} --version")
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' echopup.rb
+
+          # Push to homebrew-tap
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/pupkit-labs/homebrew-tap.git" tap
+          cp echopup.rb tap/Formula/echopup.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/echopup.rb
+          git commit -m "Update echopup formula to ${TAG}"
+          git push
