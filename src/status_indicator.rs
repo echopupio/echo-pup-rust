@@ -723,7 +723,6 @@ mod menu_bridge {
         pub mode_hold: id,
         pub mode_press_toggle: id,
         pub edit_llm_form: id,
-        pub status_line: id,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -780,10 +779,6 @@ mod menu_bridge {
             let menu: id = msg_send![class!(NSMenu), alloc];
             let menu: id = msg_send![menu, initWithTitle: nsstring("EchoPup")];
 
-            let status_line = add_info_item(menu, "状态: 启动中");
-
-            add_separator(menu);
-
             let toggle_llm = add_action_item(menu, target, TAG_TOGGLE_LLM, "启用 LLM 润色");
             let edit_llm_form =
                 add_action_item(menu, target, TAG_EDIT_LLM_FORM, "编辑 LLM 配置...");
@@ -832,7 +827,6 @@ mod menu_bridge {
                 mode_hold,
                 mode_press_toggle,
                 edit_llm_form,
-                status_line,
             };
 
             (menu, handles)
@@ -878,8 +872,6 @@ mod menu_bridge {
                     snapshot.llm_provider, snapshot.llm_model
                 ),
             );
-
-            set_title(handles.status_line, &format!("状态: {}", snapshot.status));
         }
     }
 
@@ -1171,18 +1163,6 @@ mod menu_bridge {
     unsafe fn add_separator(menu: id) {
         let sep: id = msg_send![class!(NSMenuItem), separatorItem];
         let _: () = msg_send![menu, addItem: sep];
-    }
-
-    unsafe fn add_info_item(menu: id, title: &str) -> id {
-        let item: id = msg_send![class!(NSMenuItem), alloc];
-        let item: id = msg_send![item,
-            initWithTitle: nsstring(title)
-            action: std::ptr::null::<std::ffi::c_void>()
-            keyEquivalent: nsstring("")
-        ];
-        let _: () = msg_send![item, setEnabled: NO];
-        let _: () = msg_send![menu, addItem: item];
-        item
     }
 
     unsafe fn add_action_item(menu: id, target: id, tag: i64, title: &str) -> id {
@@ -2004,7 +1984,6 @@ const MENU_ID_QUIT_UI: &str = "quit_ui";
 
 #[cfg(target_os = "linux")]
 struct LinuxMenuHandles {
-    status_line: muda::MenuItem,
     edit_llm_form: muda::MenuItem,
     llm_enabled: muda::CheckMenuItem,
     correction_enabled: muda::CheckMenuItem,
@@ -2130,14 +2109,11 @@ fn open_llm_form_popup_linux(
 fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     let menu = muda::Menu::new();
 
-    let status_line = muda::MenuItem::new("状态: 就绪", false, None);
     let llm_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_LLM, "启用 LLM 润色", true, false, None);
     let correction_enabled =
         muda::CheckMenuItem::with_id(MENU_ID_TOGGLE_CORRECTION, "启用文本纠错", true, false, None);
 
-    menu.append(&status_line)?;
-    menu.append(&muda::PredefinedMenuItem::separator())?;
     menu.append(&llm_enabled)?;
     let edit_llm_form =
         muda::MenuItem::with_id(MENU_ID_EDIT_LLM_FORM_LINUX, "编辑 LLM 配置", true, None);
@@ -2184,7 +2160,6 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
     Ok((
         menu,
         LinuxMenuHandles {
-            status_line,
             edit_llm_form,
             llm_enabled,
             correction_enabled,
@@ -2195,15 +2170,7 @@ fn build_linux_menu() -> Result<(muda::Menu, LinuxMenuHandles)> {
 }
 
 #[cfg(target_os = "linux")]
-fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, state: IndicatorState) {
-    let mut status_text = linux_status_text(snapshot, state);
-    if status_text.chars().count() > 56 {
-        status_text = format!("{}...", status_text.chars().take(56).collect::<String>());
-    }
-
-    handles
-        .status_line
-        .set_text(format!("状态: {}", status_text.replace('\n', " ")));
+fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, _state: IndicatorState) {
     handles.edit_llm_form.set_text(format!(
         "编辑 LLM 配置 ({}/{})",
         snapshot.llm_provider, snapshot.llm_model
