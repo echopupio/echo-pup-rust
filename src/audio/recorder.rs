@@ -630,7 +630,7 @@ impl AudioRecorder {
             buffer_clone_elapsed
         );
 
-        // 重采样到目标采样率（Whisper 需要 16000 Hz）
+        // 重采样到目标采样率（ASR 引擎需要 16000 Hz）
         let resample_start = std::time::Instant::now();
         let device_rate = *self.device_sample_rate.lock();
         info!(

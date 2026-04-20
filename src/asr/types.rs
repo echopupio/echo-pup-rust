@@ -26,7 +26,7 @@ pub struct AsrRuntimeInfo {
 
 /// 流式识别会话配置。
 ///
-/// 当前阶段先为 Whisper 预览线程提供统一入口，
+/// 为 ASR 预览线程提供统一入口，
 /// 后续 sherpa-onnx / SenseVoice 将直接复用这套 session 边界。
 #[derive(Debug, Clone, Copy)]
 pub struct AsrSessionConfig {
@@ -49,7 +49,7 @@ pub trait AsrSession {
 
 /// 统一的识别运行时接口。
 ///
-/// 第一阶段先把当前 Whisper 路径收口到该 trait 上，
+/// 将 ASR 引擎收口到该 trait 上，
 /// 后续再继续演进为常驻引擎 + session 形态。
 pub trait AsrEngine: Send {
     fn backend_kind(&self) -> AsrBackendKind;

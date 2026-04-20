@@ -2187,7 +2187,6 @@ fn update_linux_menu(handles: &LinuxMenuHandles, snapshot: &MenuSnapshot, _state
         .mode_toggle
         .set_checked(snapshot.hotkey_trigger_mode == HotkeyTriggerMode::PressToToggle);
 
-    // Whisper 模型切换和下载相关代码已移除
 }
 
 #[cfg(target_os = "linux")]

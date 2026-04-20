@@ -27,7 +27,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 音频
 cpal = "0.15"
-hound = "3.5"
 
 # HTTP (使用 rustls 避免 openssl 依赖)
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
@@ -40,7 +39,6 @@ enigo = "0.6"
 
 # 错误处理
 anyhow = "1.0"
-thiserror = "1.0"
 
 # 异步
 tokio = { version = "1", features = ["full"] }

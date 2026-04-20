@@ -89,9 +89,6 @@ echopup model
 # 编译
 cargo build --release
 
-# 测试各模块
-./target/release/echopup test
-
 # 启动后台服务（默认行为）
 ./target/release/echopup
 
@@ -100,20 +97,12 @@ cargo build --release
 
 # 查看后台状态
 ./target/release/echopup status
-
-# 打开管理 TUI
-./target/release/echopup ui
-
-# 管理 TUI 生命周期
-./target/release/echopup ui status
-./target/release/echopup ui stop
-./target/release/echopup ui restart
 ```
 
 ## 使用方法
 
-1. 运行 `./target/release/echopup`（默认后台启动，单实例）
-2. 需要管理配置和模型时，运行 `./target/release/echopup ui`（UI 也是单实例）
+1. 运行 `echopup`（默认后台启动，单实例）
+2. 使用 `echopup config edit` 编辑配置文件
 3. 触发方式按平台区分：
    - macOS：在需要输入文本的应用中长按 `Control` 键 1 秒（左右 `Ctrl` 均可）
    - Linux X11：在需要输入文本的应用中长按 `F6` 1 秒
@@ -208,24 +197,23 @@ echopup - AI Voice Dictation Tool
 Usage: echopup [OPTIONS] [COMMAND]
 
 Commands:
-  run              运行语音输入
-  start            后台启动服务
+  start            启动后台服务（默认行为）
   stop             停止后台服务
   status           查看后台服务状态
   restart          重启后台服务
-  trigger          发送外部触发动作（Linux 桌面快捷键集成）
-  ui               打开管理 TUI（仅管理，不执行语音输入）
-  test             测试各模块
-  config           配置管理
+  config           配置管理（show / init / path / edit）
+  devices          列出可用音频输入设备
+  log              查看后台运行日志
+  doctor           系统环境诊断
   model            管理语音识别模型（下载 / 打开目录）
+  update           检查更新并自动更新
+  trigger          发送外部触发动作（Linux 桌面快捷键集成）
 
 Options:
   -c, --config <CONFIG>  配置文件路径 [default: ~/.echopup/config.toml]
   -h, --help             显示帮助信息
   -V, --version          显示版本信息
 ```
-
-`ui` 子命令支持：`echopup ui start|stop|status|restart`（`echopup ui` 等价于 `echopup ui start`）。
 
 ## 项目结构
 
@@ -255,7 +243,6 @@ echo-pup-rust/
 ~/.echopup/
 ├── config.toml
 ├── echopup.lock
-├── echopup-ui.pid
 ├── echopup.log
 └── models/
 ```
