@@ -46,6 +46,7 @@ pub fn background_log_path() -> Result<PathBuf> {
     Ok(runtime_dir_path()?.join(RUN_LOG_FILE_NAME))
 }
 
+#[allow(dead_code)]
 pub fn trigger_socket_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("trigger.sock"))
 }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +36,6 @@ struct ShortcutEntry {
     binding: Option<String>,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortcutConflict {
     pub name: Option<String>,

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#[allow(unused_imports)]
 use anyhow::{anyhow, Context, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

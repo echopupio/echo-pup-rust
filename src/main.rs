@@ -853,6 +853,7 @@ fn is_wayland_session() -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn is_wayland_session() -> bool {
     false
 }
@@ -904,6 +905,7 @@ fn internal_hotkey_conflict_warning() -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn shell_escape_arg(input: &str) -> String {
     if input.is_empty() {
         return "''".to_string();
@@ -927,14 +929,15 @@ fn linux_wayland_trigger_command(config_path: &str) -> Result<String> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn linux_wayland_trigger_command(_config_path: &str) -> Result<String> {
     anyhow::bail!("仅 Linux 支持 Wayland 外部触发命令");
 }
 
-fn maybe_setup_linux_wayland_shortcut(config_path: &str) -> Result<()> {
+fn maybe_setup_linux_wayland_shortcut(_config_path: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let command_line = linux_wayland_trigger_command(config_path)?;
+        let command_line = linux_wayland_trigger_command(_config_path)?;
         match linux_desktop::maybe_install_gnome_wayland_shortcut(
             &command_line,
             &default_trigger_key().to_uppercase(),
@@ -1865,14 +1868,17 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         sequence: u64,
         started_by_hold_on_current_press: bool,
     }
+    #[cfg(target_os = "linux")]
     #[derive(Default)]
     struct ExternalToggleBurstState {
         sequence: u64,
     }
     let hold_to_record_duration = Duration::from_secs(1);
     let stop_press_debounce_window = Duration::from_millis(500);
+    #[cfg(target_os = "linux")]
     let external_toggle_burst_gap = Duration::from_millis(250);
     let hotkey_press_state = Arc::new(Mutex::new(HotkeyPressState::default()));
+    #[cfg(target_os = "linux")]
     let external_toggle_burst_state = Arc::new(Mutex::new(ExternalToggleBurstState::default()));
     let stop_debounce_until = Arc::new(Mutex::new(None::<Instant>));
     let hotkey_trigger_mode = Arc::new(Mutex::new(config.hotkey.trigger_mode));
@@ -2266,6 +2272,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
         }
     });
 
+    #[cfg(target_os = "linux")]
     let toggle_recording_action: Arc<dyn Fn() + Send + Sync> = {
         let is_recording_toggle = is_recording.clone();
         let start_recording_toggle = start_recording_action.clone();
@@ -2278,6 +2285,7 @@ fn run_voice_input(config_path: &str) -> Result<()> {
             }
         })
     };
+    #[cfg(target_os = "linux")]
     let external_toggle_action: Arc<dyn Fn() + Send + Sync> = if uses_external_trigger_backend() {
         let burst_state = external_toggle_burst_state.clone();
         let toggle_action = toggle_recording_action.clone();
