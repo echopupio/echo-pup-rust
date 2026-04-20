@@ -374,8 +374,8 @@ fn process_audio(
 
     if llm_enabled {
         let llm_start = Instant::now();
-        let llm_guard = llm.lock();
-        if let Some(ref llm) = *llm_guard {
+        let mut llm_guard = llm.lock();
+        if let Some(ref mut llm) = *llm_guard {
             match llm.rewrite(&final_text) {
                 Ok(rewritten) => {
                     final_text = rewritten;

@@ -7,7 +7,13 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// 请求超时（秒）
-const REQUEST_TIMEOUT_SECS: u64 = 8;
+const REQUEST_TIMEOUT_SECS: u64 = 4;
+
+/// 连续失败多少次后暂停 LLM 调用
+const PAUSE_AFTER_FAILURES: u32 = 3;
+
+/// 暂停后每隔多少秒探测一次（尝试恢复）
+const PROBE_INTERVAL_SECS: u64 = 60;
 
 /// 系统提示词
 const SYSTEM_PROMPT: &str = "你是语音转写文本的校对助手。请仅修正以下语音识别文本中的错误，不要改变原意、不要添加内容、不要解释。\n\n规则：\n1. 修正同音字和近音字错误\n2. 补充必要的标点符号\n3. 只输出修正后的文本";
@@ -20,6 +26,8 @@ pub struct LLMRewrite {
     api_base: String,
     api_key: String,
     enabled: bool,
+    consecutive_failures: u32,
+    last_probe_time: Option<Instant>,
 }
 
 /// OpenAI API 请求
@@ -102,13 +110,28 @@ impl LLMRewrite {
             api_base: api_base.to_string(),
             api_key,
             enabled,
+            consecutive_failures: 0,
+            last_probe_time: None,
         })
     }
 
     /// 整理/润色文本
-    pub fn rewrite(&self, text: &str) -> Result<String> {
+    pub fn rewrite(&mut self, text: &str) -> Result<String> {
         if !self.enabled || text.is_empty() {
             return Ok(text.to_string());
+        }
+
+        // 连续失败达到阈值后暂停，定期探测恢复
+        if self.consecutive_failures >= PAUSE_AFTER_FAILURES {
+            let should_probe = match self.last_probe_time {
+                Some(t) => t.elapsed() >= Duration::from_secs(PROBE_INTERVAL_SECS),
+                None => true,
+            };
+            if !should_probe {
+                return Ok(text.to_string());
+            }
+            info!("LLM 已暂停（连续失败 {} 次），尝试探测恢复...", self.consecutive_failures);
+            self.last_probe_time = Some(Instant::now());
         }
 
         let start = Instant::now();
@@ -120,15 +143,33 @@ impl LLMRewrite {
 
         match result {
             Ok(rewritten) => {
+                if self.consecutive_failures > 0 {
+                    info!("LLM 已恢复（之前连续失败 {} 次）", self.consecutive_failures);
+                }
+                self.consecutive_failures = 0;
+                self.last_probe_time = None;
                 info!("LLM 整理耗时: {}ms", start.elapsed().as_millis());
                 Ok(rewritten)
             }
             Err(e) => {
+                self.consecutive_failures += 1;
                 let elapsed = start.elapsed();
                 if elapsed >= Duration::from_secs(REQUEST_TIMEOUT_SECS) {
-                    warn!("LLM 整理超时 ({}ms)，降级到原始文本", elapsed.as_millis());
+                    warn!(
+                        "LLM 整理超时 ({}ms)，降级到原始文本 (连续失败 {}/{})",
+                        elapsed.as_millis(), self.consecutive_failures, PAUSE_AFTER_FAILURES
+                    );
                 } else {
-                    warn!("LLM 整理失败: {}，降级到原始文本", e);
+                    warn!(
+                        "LLM 整理失败: {}，降级到原始文本 (连续失败 {}/{})",
+                        e, self.consecutive_failures, PAUSE_AFTER_FAILURES
+                    );
+                }
+                if self.consecutive_failures == PAUSE_AFTER_FAILURES {
+                    warn!(
+                        "LLM 连续失败 {} 次，暂停调用（每 {}s 探测一次恢复）",
+                        PAUSE_AFTER_FAILURES, PROBE_INTERVAL_SECS
+                    );
                 }
                 Ok(text.to_string())
             }
