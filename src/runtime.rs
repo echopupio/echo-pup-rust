@@ -213,16 +213,48 @@ pub fn stop_running_instance() -> Result<Option<u32>> {
         ));
     }
 
+    // 先收集子进程列表（status-indicator 等），以便主进程退出后清理孤儿
+    let child_pids = find_child_pids(pid);
+
     send_term(pid)?;
 
     for _ in 0..STOP_WAIT_RETRY {
         if !is_running()? {
+            // 主进程已退出，清理可能残留的子进程
+            cleanup_orphan_children(&child_pids);
             return Ok(Some(pid));
         }
         thread::sleep(STOP_WAIT_INTERVAL);
     }
 
     Err(anyhow!("停止 echopup 超时: pid={}", pid))
+}
+
+/// 查找指定进程的子进程 PID 列表
+fn find_child_pids(parent_pid: u32) -> Vec<u32> {
+    let output = Command::new("pgrep")
+        .arg("-P")
+        .arg(parent_pid.to_string())
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 清理孤儿子进程：仅终止仍在运行且确实是 echopup 的进程
+fn cleanup_orphan_children(child_pids: &[u32]) {
+    for &pid in child_pids {
+        if let Some(cmd) = process_command(pid) {
+            if cmd.contains("echopup") {
+                let _ = send_term(pid);
+            }
+        }
+    }
 }
 
 /// 后台启动 echopup run

@@ -48,7 +48,7 @@ tokio = { version = "1", features = ["full"] }
 # 其他
 dirs = "5.0"
 parking_lot = "0.12"
-ctrlc = "3.2"
+ctrlc = { version = "3.2", features = ["termination"] }
 fs2 = "0.4"
 sherpa-onnx = "1.12.33"
 
