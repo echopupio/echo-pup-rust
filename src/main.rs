@@ -53,10 +53,15 @@ struct Cli {
 enum Commands {
     #[command(hide = true)]
     Run,
+    /// 启动后台服务
     Start,
+    /// 停止后台服务
     Stop,
+    /// 查看运行状态
     Status,
+    /// 重启后台服务
     Restart,
+    /// 配置管理
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
@@ -76,6 +81,7 @@ enum Commands {
     Doctor,
     /// 显示版本信息
     Version,
+    /// 下载语音识别模型
     DownloadModel,
     /// 发送外部触发动作（主要用于 Linux/Wayland 桌面快捷键绑定）
     Trigger {
@@ -88,8 +94,11 @@ enum Commands {
 
 #[derive(Subcommand, Clone, Copy, Debug)]
 enum TriggerCommands {
+    /// 模拟按下热键
     Press,
+    /// 模拟松开热键
     Release,
+    /// 切换录音状态
     Toggle,
 }
 
