@@ -506,14 +506,8 @@ pub fn punctuation_model_path() -> PathBuf {
     punctuation_model_dir().join("model.onnx")
 }
 
-const PUNCTUATION_ARCHIVE_NAME: &str =
-    "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12";
-
-fn punctuation_archive_url() -> String {
-    format!(
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/{}.tar.bz2",
-        PUNCTUATION_ARCHIVE_NAME
-    )
+fn punctuation_model_download_url() -> String {
+    "https://github.com/pupkit-labs/echopup-models/releases/download/v1.0.0/model.onnx".to_string()
 }
 
 /// Start punctuation model download (async with channel, same pattern as paraformer)
@@ -566,46 +560,14 @@ fn download_punctuation_model_files(
 
     fs::create_dir_all(model_dir).context("创建标点模型目录失败")?;
 
-    let archive_url = punctuation_archive_url();
-    let tmp_dir = std::env::temp_dir();
-    let archive_path = tmp_dir.join(format!("{}.tar.bz2", PUNCTUATION_ARCHIVE_NAME));
-
+    let url = punctuation_model_download_url();
     let _ = tx.send(DownloadEvent::Log(format!(
         "[info] 下载地址: {}",
-        archive_url
+        url
     )));
 
-    // Download archive using download_single_file
-    download_single_file(&archive_url, &archive_path, tx.clone())?;
-
-    // Extract using tar
-    let _ = tx.send(DownloadEvent::Log("[info] 解压中...".to_string()));
-    let output = std::process::Command::new("tar")
-        .args([
-            "-xjf",
-            &archive_path.to_string_lossy(),
-            "-C",
-            &tmp_dir.to_string_lossy(),
-        ])
-        .output()
-        .context("执行 tar 命令失败")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("解压失败: {}", stderr);
-    }
-
-    // Copy model.onnx
-    let extracted_model = tmp_dir.join(PUNCTUATION_ARCHIVE_NAME).join("model.onnx");
-    if !extracted_model.exists() {
-        anyhow::bail!("解压后未找到 model.onnx");
-    }
-
-    fs::copy(&extracted_model, &model_path).context("复制 model.onnx 失败")?;
-
-    // Cleanup
-    let _ = fs::remove_dir_all(tmp_dir.join(PUNCTUATION_ARCHIVE_NAME));
-    let _ = fs::remove_file(&archive_path);
+    // Download model.onnx directly
+    download_single_file(&url, &model_path, tx.clone())?;
 
     let _ = tx.send(DownloadEvent::Log("[done] 标点模型下载完成".to_string()));
     let _ = tx.send(DownloadEvent::Finished);
@@ -647,7 +609,7 @@ pub fn paraformer_model_dir() -> PathBuf {
 
 pub fn paraformer_model_download_url(file_name: &str) -> String {
     format!(
-        "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en/resolve/main/{}",
+        "https://github.com/pupkit-labs/echopup-models/releases/download/v1.0.0/{}",
         file_name
     )
 }

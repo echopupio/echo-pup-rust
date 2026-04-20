@@ -704,7 +704,6 @@ fn handle_model_command() -> Result<()> {
         return Ok(());
     }
 
-    println!("检测到缺失模型，开始下载...");
     ensure_all_models_downloaded()?;
     println!("📂 {}", models_dir.display());
     open_directory(&models_dir);
@@ -732,11 +731,10 @@ fn ensure_all_models_downloaded() -> Result<()> {
         return Ok(());
     }
 
-    println!("检测到以下模型缺失，开始自动下载：");
-    for m in &missing {
-        println!("  ⚠ {}", m);
-    }
-    println!();
+    let total = missing.len();
+    println!("  ⚠ 缺失: {}\n", missing.join(", "));
+
+    let mut step = 0usize;
 
     // Download ASR if missing
     let asr_dir = model_download::paraformer_model_dir();
@@ -745,7 +743,8 @@ fn ensure_all_models_downloaded() -> Result<()> {
         .any(|f| !asr_dir.join(f).exists());
 
     if asr_missing {
-        println!("📦 下载 ASR 模型 (Paraformer)...");
+        step += 1;
+        println!("  📦 [{}/{}] ASR 模型 (Paraformer)", step, total);
         download_model_with_cli_progress(start_paraformer_model_download()?)?;
         println!();
     }
@@ -758,12 +757,13 @@ fn ensure_all_models_downloaded() -> Result<()> {
             .unwrap_or(true);
 
     if punct_missing {
-        println!("📦 下载标点恢复模型...");
+        step += 1;
+        println!("  📦 [{}/{}] 标点恢复模型", step, total);
         download_model_with_cli_progress(start_punctuation_model_download()?)?;
         println!();
     }
 
-    println!("✅ 所有模型已就绪！");
+    println!("  ✅ 所有模型已就绪");
     Ok(())
 }
 
@@ -772,51 +772,56 @@ fn download_model_with_cli_progress(start: model_download::DownloadStart) -> Res
     use model_download::DownloadEvent;
 
     let model_download::DownloadStart {
-        rx, initial_logs, ..
+        rx, ..
     } = start;
 
-    for line in initial_logs {
-        println!("  {}", line);
-    }
+    // Verbose log prefixes to filter out
+    const VERBOSE_PREFIXES: &[&str] = &[
+        "[start]", "[dir]", "[head]", "[probe-size]", "[equiv]", "[info]",
+    ];
 
     let mut latest_total = None::<u64>;
+    let mut current_file = String::new();
     let mut progress_active = false;
 
     loop {
         match rx.recv() {
             Ok(DownloadEvent::Started {
-                downloaded, total, ..
+                model_file_name,
+                downloaded,
+                total,
+                ..
             }) => {
                 latest_total = total;
                 if progress_active {
                     println!();
                     progress_active = false;
                 }
-                println!(
-                    "  [started] 已下载 {}，总大小 {}",
-                    model_download::format_bytes(downloaded),
-                    total
-                        .map(model_download::format_bytes)
-                        .unwrap_or_else(|| "未知".to_string())
-                );
+                current_file = model_file_name;
+                let _ = downloaded; // resume info not needed in clean output
             }
             Ok(DownloadEvent::Progress { downloaded, total }) => {
                 if total.is_some() {
                     latest_total = total;
                 }
                 let progress_text = match latest_total {
-                    Some(total) if total > 0 => {
-                        let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                    Some(t) if t > 0 => {
+                        let ratio = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
                         format!(
-                            "{} / {} ({:.1}%)",
+                            "  downloading {} ... {:.1}% ({} / {})",
+                            if current_file.is_empty() { "..." } else { &current_file },
+                            ratio * 100.0,
                             model_download::format_bytes(downloaded),
-                            model_download::format_bytes(total),
-                            ratio * 100.0
+                            model_download::format_bytes(t),
                         )
                     }
-                    _ => format!("已下载 {}", model_download::format_bytes(downloaded)),
+                    _ => format!(
+                        "  downloading {} ... {}",
+                        if current_file.is_empty() { "..." } else { &current_file },
+                        model_download::format_bytes(downloaded),
+                    ),
                 };
-                print!("\r  [progress] {}", progress_text);
+                print!("\r{}", progress_text);
                 let _ = std::io::stdout().flush();
                 progress_active = true;
             }
@@ -834,11 +839,15 @@ fn download_model_with_cli_progress(start: model_download::DownloadStart) -> Res
                 return Err(anyhow::anyhow!("下载失败: {}", err));
             }
             Ok(DownloadEvent::Log(line)) => {
-                if progress_active {
-                    println!();
-                    progress_active = false;
+                // Filter out verbose debug-style messages
+                let is_verbose = VERBOSE_PREFIXES.iter().any(|p| line.starts_with(p));
+                if !is_verbose {
+                    if progress_active {
+                        println!();
+                        progress_active = false;
+                    }
+                    println!("  {}", line);
                 }
-                println!("  {}", line);
             }
             Err(_) => {
                 if progress_active {
